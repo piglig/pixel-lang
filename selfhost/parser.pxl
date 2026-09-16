@@ -1,0 +1,464 @@
+import "model.pxl" as model
+import "lexer.pxl" as lexer
+
+record Reader { source: string, tokens: [model.Token], index: int, nodes: [model.Node], diagnostics: [model.Diagnostic], depth: int, typeNames: map[bool], callableNames: map[bool] }
+fn Current(r: Reader) -> model.Token = r.tokens[r.index]
+fn At(r: Reader, value: string) -> bool = Current(r).value == value && Current(r).kind != "str"
+fn Take(r: Reader, value: string) -> bool {
+    if !At(r, value) { return false }
+    if Current(r).kind != "eof" { r.index += 1 }
+    return true
+}
+fn Problem(r: Reader, message: string) {
+    if len(r.diagnostics) > 0 { return }
+    let token = Current(r)
+    append(r.diagnostics, model.Diagnostic{source: r.source, phase: "parse", message, start: token.start, end: token.end, line: token.line, column: token.column})
+}
+fn Need(r: Reader, value: string) {
+    if !Take(r, value) { Problem(r, "Expected " + value) }
+}
+fn Name(r: Reader) -> model.Token {
+    let token = Current(r)
+    if token.kind != "name" { Problem(r, "Expected an identifier"); return token }
+    r.index += 1
+    return token
+}
+fn Newlines(r: Reader) { while Take(r, "\n") {} }
+fn Separators(r: Reader) { while Take(r, "\n") || Take(r, ";") {} }
+fn Add(r: Reader, kind: string, text: string, children: [int], start: int) -> int {
+    var end = Current(r).start
+    if r.index > 0 { end = r.tokens[r.index - 1].end }
+    if end < start { end = start }
+    let index = len(r.nodes)
+    append(r.nodes, model.Node{kind, text, children, start, end})
+    return index
+}
+fn Type(r: Reader) -> int {
+    r.depth += 1
+    if r.depth > 128 { Problem(r, "Type nesting exceeds 128"); r.depth -= 1; return Add(r, "invalid", "", [], Current(r).start) }
+    let result = TypeInner(r)
+    r.depth -= 1
+    return result
+}
+fn TypeInner(r: Reader) -> int {
+    let start = Current(r).start
+    if Take(r, "[") {
+        let inner = Type(r)
+        Need(r, "]")
+        return Add(r, "type_array", "", [inner], start)
+    }
+    if Take(r, "fn") {
+        let children: [int] = []
+        Need(r, "("); Newlines(r)
+        while !At(r, ")") && len(r.diagnostics) == 0 {
+            append(children, Type(r))
+            if !Take(r, ",") { break }
+            Newlines(r)
+        }
+        Need(r, ")")
+        if Take(r, "->") { append(children, Type(r)) }
+        else { append(children, Add(r, "type", "unit", [], r.tokens[r.index - 1].end)) }
+        return Add(r, "type_fn", "", children, start)
+    }
+    let name = Name(r)
+    var text = name.value
+    while Take(r, ".") { text += "." + Name(r).value }
+    let arguments: [int] = []
+    if Take(r, "[") {
+        Newlines(r)
+        while !At(r, "]") && len(r.diagnostics) == 0 {
+            append(arguments, Type(r))
+            if !Take(r, ",") { break }
+            Newlines(r)
+        }
+        Need(r, "]")
+    }
+    return Add(r, "type", text, arguments, start)
+}
+fn ResultType(r: Reader) -> int {
+    let start = Current(r).start
+    let child = Type(r)
+    return Add(r, "result", "", [child], start)
+}
+fn ExpressionBody(r: Reader) -> int {
+    let start = Current(r).start
+    let child = Expression(r, 1, true)
+    return Add(r, "expression_body", "", [child], start)
+}
+fn Params(r: Reader, inferred: bool) -> [int] {
+    let parameters: [int] = []
+    Need(r, "("); Newlines(r)
+    while !At(r, ")") && len(r.diagnostics) == 0 {
+        let name = Name(r)
+        let children: [int] = []
+        if Take(r, ":") { append(children, Type(r)) }
+        else { if !inferred { Problem(r, "Named parameters need a type") } }
+        append(parameters, Add(r, "parameter", name.value, children, name.start))
+        Newlines(r)
+        if !Take(r, ",") { break }
+        Newlines(r)
+    }
+    Need(r, ")")
+    return parameters
+}
+fn Precedence(value: string) -> int {
+    if value == "||" || value == "or" { return 1 }
+    if value == "&&" || value == "and" { return 2 }
+    if value == "==" || value == "!=" { return 3 }
+    if value == "<" || value == "<=" || value == ">" || value == ">=" { return 4 }
+    if value == "+" || value == "-" { return 5 }
+    if value == "*" || value == "/" || value == "%" { return 6 }
+    return 0
+}
+fn TypeArgumentAhead(r: Reader, left: int) -> bool {
+    let node = r.nodes[left]
+    if node.kind != "name" && node.kind != "field" { return false }
+    var root = left
+    while r.nodes[root].kind == "field" { root = r.nodes[root].children[0] }
+    let base = r.nodes[root]
+    if base.kind != "name" { return false }
+    if node.kind == "field" && !has(r.typeNames, base.text) { return false }
+    if node.kind == "name" && !has(r.typeNames, base.text) && !has(r.callableNames, base.text) { return false }
+    let token = Current(r)
+    return token.kind != "str" && (token.value == "[" || token.value == "fn" || has(r.typeNames, token.value))
+}
+fn MapValue(r: Reader, start: int) -> int {
+    Need(r, "[")
+    let children = [Type(r)]
+    Need(r, "]"); Need(r, "{"); Newlines(r)
+    while !At(r, "}") && len(r.diagnostics) == 0 {
+        let key = Expression(r, 1, true)
+        Need(r, ":")
+        let value = Expression(r, 1, true)
+        append(children, Add(r, "map_entry", "", [key, value], r.nodes[key].start))
+        Newlines(r)
+        if !Take(r, ",") { break }
+        Newlines(r)
+    }
+    Need(r, "}")
+    return Add(r, "map", "", children, start)
+}
+fn Expression(r: Reader, minimum: int, records: bool) -> int {
+    r.depth += 1
+    if r.depth > 128 { Problem(r, "Expression nesting exceeds 128"); r.depth -= 1; return Add(r, "invalid", "", [], Current(r).start) }
+    let start = Current(r).start
+    let token = Current(r)
+    var left = 0
+    if Take(r, "map") {
+        left = MapValue(r, start)
+    } else if Take(r, "(") {
+        Newlines(r)
+        left = Expression(r, 1, true)
+        if Take(r, ":") { left = Add(r, "annotate", "", [left, Type(r)], start) }
+        Newlines(r); Need(r, ")")
+    } else if Take(r, "[") {
+        let items: [int] = []
+        Newlines(r)
+        while !At(r, "]") && len(r.diagnostics) == 0 {
+            append(items, Expression(r, 1, true)); Newlines(r)
+            if !Take(r, ",") { break }
+            Newlines(r)
+        }
+        Need(r, "]")
+        left = Add(r, "array", "", items, start)
+        if Take(r, ":") { left = Add(r, "annotate", "", [left, Type(r)], start) }
+    } else if Take(r, "match") {
+        left = Match(r, false, start)
+    } else if Take(r, "fn") {
+        let children = Params(r, true)
+        if Take(r, "->") { append(children, ResultType(r)) }
+        if Take(r, "=") { append(children, ExpressionBody(r)) }
+        else { append(children, Block(r)) }
+        left = Add(r, "lambda", "", children, start)
+    } else if Take(r, "-") || Take(r, "!") || Take(r, "not") {
+        left = Add(r, "unary", token.value, [Expression(r, 7, records)], start)
+    } else if token.kind == "int" || token.kind == "float64" || token.kind == "str" || At(r, "true") || At(r, "false") {
+        r.index += 1
+        left = Add(r, "literal_" + token.kind, token.value, [], start)
+    } else if token.kind == "name" {
+        r.index += 1
+        left = Add(r, "name", token.value, [], start)
+    } else {
+        Problem(r, "Expected expression")
+        left = Add(r, "invalid", "", [], start)
+    }
+    while len(r.diagnostics) == 0 {
+        if Take(r, "(") {
+            let children = [left]
+            Newlines(r)
+            while !At(r, ")") && len(r.diagnostics) == 0 {
+                append(children, Expression(r, 1, true)); Newlines(r)
+                if !Take(r, ",") { break }
+                Newlines(r)
+            }
+            Need(r, ")")
+            left = Add(r, "call", "", children, start)
+            continue
+        }
+        if Take(r, ".") {
+            let name = Name(r)
+            left = Add(r, "field", name.value, [left], start)
+            continue
+        }
+        if Take(r, "[") {
+            let children = [left]
+            Newlines(r)
+            if TypeArgumentAhead(r, left) {
+                while !At(r, "]") && len(r.diagnostics) == 0 {
+                    append(children, Type(r)); Newlines(r)
+                    if !Take(r, ",") { break }
+                    Newlines(r)
+                }
+                Need(r, "]")
+                left = Add(r, "specialize", "", children, start)
+            } else {
+                append(children, Expression(r, 1, true)); Newlines(r)
+                Need(r, "]")
+                left = Add(r, "index", "", children, start)
+            }
+            continue
+        }
+        if records && Take(r, "{") {
+            let fields = [left]
+            Separators(r)
+            while !At(r, "}") && len(r.diagnostics) == 0 {
+                let field = Current(r)
+                var key = ""
+                if field.kind == "str" { key = field.value; r.index += 1 }
+                else { key = Name(r).value }
+                let values: [int] = []
+                if Take(r, ":") { append(values, Expression(r, 1, true)) }
+                append(fields, Add(r, "initializer", key, values, field.start))
+                Separators(r)
+                if !Take(r, ",") { break }
+                Separators(r)
+            }
+            Need(r, "}")
+            left = Add(r, "construct", "", fields, start)
+            continue
+        }
+        let op = Current(r)
+        let precedence = Precedence(op.value)
+        if precedence < minimum || precedence == 0 { break }
+        r.index += 1
+        let right = Expression(r, precedence + 1, records)
+        left = Add(r, "binary", op.value, [left, right], start)
+    }
+    r.depth -= 1
+    return left
+}
+fn Match(r: Reader, statement: bool, start: int) -> int {
+    let children = [Expression(r, 1, false)]
+    Need(r, "{"); Separators(r)
+    while !At(r, "}") && len(r.diagnostics) == 0 {
+        let patternStart = Current(r).start
+        var pattern = Type(r)
+        if Take(r, ".") {
+            let variant = Name(r)
+            pattern = Add(r, "variant_pattern", variant.value, [pattern], patternStart)
+        }
+        let arm = [pattern]
+        if Take(r, "(") {
+            while !At(r, ")") && len(r.diagnostics) == 0 {
+                let name = Name(r)
+                append(arm, Add(r, "binding", name.value, [], name.start))
+                if !Take(r, ",") { break }
+            }
+            Need(r, ")")
+        }
+        Newlines(r); Need(r, "=>")
+        if statement { append(arm, Block(r)) }
+        else { append(arm, Expression(r, 1, true)) }
+        append(children, Add(r, "arm", "", arm, patternStart))
+        Take(r, ","); Separators(r)
+    }
+    Need(r, "}")
+    var kind = "match"
+    if statement { kind = "match_stmt" }
+    return Add(r, kind, "", children, start)
+}
+fn TypeParameters(r: Reader) -> [int] {
+    let children: [int] = []
+    if Take(r, "[") {
+        Newlines(r)
+        while !At(r, "]") && len(r.diagnostics) == 0 {
+            let parameter = Name(r)
+            append(children, Add(r, "type_parameter", parameter.value, [], parameter.start))
+            if !Take(r, ",") { break }
+            Newlines(r)
+        }
+        Need(r, "]")
+    }
+    return children
+}
+fn Boundary(r: Reader) {
+    if Current(r).kind != "eof" && !At(r, "}") && !At(r, ";") && !At(r, "\n") { Problem(r, "Expected newline or semicolon between statements") }
+}
+fn Block(r: Reader) -> int {
+    let start = Current(r).start
+    Need(r, "{")
+    let children: [int] = []
+    Separators(r)
+    while !At(r, "}") && Current(r).kind != "eof" && len(r.diagnostics) == 0 {
+        append(children, Statement(r))
+        Boundary(r); Separators(r)
+    }
+    Need(r, "}")
+    return Add(r, "block", "", children, start)
+}
+fn Statement(r: Reader) -> int {
+    r.depth += 1
+    if r.depth > 128 { Problem(r, "Statement nesting exceeds 128"); r.depth -= 1; return Add(r, "invalid", "", [], Current(r).start) }
+    let result = StatementInner(r)
+    r.depth -= 1
+    return result
+}
+fn StatementInner(r: Reader) -> int {
+    let token = Current(r)
+    let start = token.start
+    if Take(r, "export") {
+        if !At(r, "fn") && !At(r, "record") && !At(r, "enum") { Problem(r, "Only declarations may be exported"); return Add(r, "invalid", "", [], start) }
+        return Add(r, "export", "", [Statement(r)], start)
+    }
+    if Take(r, "import") {
+        let path = Current(r)
+        if path.kind != "str" { Problem(r, "Expected quoted import path") }
+        else { r.index += 1 }
+        let children: [int] = []
+        if Take(r, "as") { let name = Name(r); append(children, Add(r, "alias", name.value, [], name.start)) }
+        return Add(r, "import", path.value, children, start)
+    }
+    if Take(r, "fn") {
+        let name = Name(r)
+        let children: [int] = []
+        if Take(r, "[") {
+            while !At(r, "]") && len(r.diagnostics) == 0 {
+                let parameter = Name(r)
+                append(children, Add(r, "type_parameter", parameter.value, [], parameter.start))
+                if !Take(r, ",") { break }
+            }
+            Need(r, "]")
+        }
+        for parameter in Params(r, false) { append(children, parameter) }
+        if Take(r, "->") { append(children, ResultType(r)) }
+        if Take(r, "=") { append(children, ExpressionBody(r)) }
+        else { append(children, Block(r)) }
+        return Add(r, "fn", name.value, children, start)
+    }
+    if Take(r, "match") { return Match(r, true, start) }
+    if Take(r, "enum") {
+        let name = Name(r)
+        let children = TypeParameters(r)
+        Need(r, "{"); Separators(r)
+        while !At(r, "}") && len(r.diagnostics) == 0 {
+            let variant = Name(r)
+            var fields: [int] = []
+            if At(r, "(") { fields = Params(r, false) }
+            append(children, Add(r, "variant_decl", variant.value, fields, variant.start))
+            Take(r, ","); Separators(r)
+        }
+        Need(r, "}")
+        return Add(r, "enum", name.value, children, start)
+    }
+    if Take(r, "record") {
+        let name = Name(r)
+        let children = TypeParameters(r)
+        Need(r, "{"); Separators(r)
+        while !At(r, "}") && len(r.diagnostics) == 0 {
+            let field = Name(r)
+            Need(r, ":")
+            append(children, Add(r, "field_decl", field.value, [Type(r)], field.start))
+            if !At(r, "}") && !At(r, ",") && !At(r, "\n") && !At(r, ";") { Problem(r, "Expected field separator") }
+            Take(r, ","); Separators(r)
+        }
+        Need(r, "}")
+        return Add(r, "record", name.value, children, start)
+    }
+    if Take(r, "let") || Take(r, "var") {
+        let name = Name(r)
+        let children: [int] = []
+        if Take(r, ":") { append(children, Add(r, "annotation", "", [Type(r)], name.start)) }
+        Need(r, "=")
+        append(children, Expression(r, 1, true))
+        return Add(r, token.value, name.value, children, start)
+    }
+    if Take(r, "if") || Take(r, "while") {
+        let children = [Expression(r, 1, false), Block(r)]
+        let beforeElse = r.index
+        if token.value == "if" { Newlines(r) }
+        if token.value == "if" && Take(r, "else") {
+            if At(r, "if") { append(children, Statement(r)) } else { append(children, Block(r)) }
+        }
+        else { r.index = beforeElse }
+        return Add(r, token.value, "", children, start)
+    }
+    if Take(r, "for") {
+        let name = Name(r)
+        let children = [Add(r, "binding", name.value, [], name.start)]
+        if Take(r, ",") { let second = Name(r); append(children, Add(r, "binding", second.value, [], second.start)) }
+        Need(r, "in")
+        append(children, Expression(r, 1, false)); append(children, Block(r))
+        return Add(r, "for", "", children, start)
+    }
+    if Take(r, "try") {
+        let children = [Block(r)]
+        Newlines(r); Need(r, "catch")
+        let name = Name(r)
+        append(children, Block(r))
+        return Add(r, "try", name.value, children, start)
+    }
+    if Take(r, "return") {
+        let children: [int] = []
+        if !At(r, "}") && !At(r, ";") && !At(r, "\n") { append(children, Expression(r, 1, true)) }
+        return Add(r, "return", "", children, start)
+    }
+    if Take(r, "break") || Take(r, "continue") { return Add(r, token.value, "", [], start) }
+    let left = Expression(r, 1, true)
+    let op = Current(r).value
+    if Take(r, "=") || Take(r, "+=") || Take(r, "-=") || Take(r, "*=") || Take(r, "/=") || Take(r, "%=") {
+        return Add(r, "assign", op, [left, Expression(r, 1, true)], start)
+    }
+    if Take(r, "++") || Take(r, "--") { return Add(r, "update", op, [left], start) }
+    return Add(r, "expression_stmt", "", [left], start)
+}
+fn CollectTypeNames(tokens: [model.Token]) -> map[bool] {
+    let names = map[bool]{}
+    for name in ["int", "float64", "bool", "string", "json", "Error", "Option", "map", "unit"] { names[name] = true }
+    var index = 0
+    while index + 1 < len(tokens) {
+        let token = tokens[index]
+        if token.kind == "keyword" && (token.value == "record" || token.value == "enum" || token.value == "fn") && tokens[index + 1].kind == "name" {
+            if token.value != "fn" { names[tokens[index + 1].value] = true }
+            var cursor = index + 2
+            if cursor < len(tokens) && tokens[cursor].value == "[" {
+                cursor += 1
+                while cursor < len(tokens) && tokens[cursor].value != "]" {
+                    if tokens[cursor].kind == "name" { names[tokens[cursor].value] = true }
+                    cursor += 1
+                }
+            }
+        }
+        if token.kind == "keyword" && token.value == "as" && tokens[index + 1].kind == "name" { names[tokens[index + 1].value] = true }
+        index += 1
+    }
+    return names
+}
+fn CollectCallables(tokens: [model.Token]) -> map[bool] {
+    let names = map[bool]{}
+    for name in ["jsonDecode", "len", "append", "pop", "slice", "string", "parseInt", "assert", "split", "join", "input", "trim", "replace", "keys", "has", "delete", "fail", "print", "readText", "writeText", "int", "float64", "parseFloat64", "lookup", "unicodeCategory", "utf8Encode", "utf8Decode", "float64Bytes", "float64FromBytes", "crc32", "zlibCompress", "zlibDecompress", "readBytes", "writeBytes", "extend", "arrayRepeat"] { names[name] = true }
+    var index = 0
+    while index + 1 < len(tokens) {
+        if tokens[index].kind == "keyword" && tokens[index].value == "fn" && tokens[index + 1].kind == "name" { names[tokens[index + 1].value] = true }
+        index += 1
+    }
+    return names
+}
+export fn Parse(source: string, text: string) -> model.Parsed {
+    let scanned = lexer.Scan(source, text)
+    if len(scanned.diagnostics) > 0 { return model.Parsed{tokens: scanned.tokens, nodes: [], roots: [], diagnostics: scanned.diagnostics} }
+    let r = Reader{source, tokens: scanned.tokens, index: 0, nodes: [], diagnostics: [], depth: 0, typeNames: CollectTypeNames(scanned.tokens), callableNames: CollectCallables(scanned.tokens)}
+    let roots: [int] = []
+    Separators(r)
+    while Current(r).kind != "eof" && len(r.diagnostics) == 0 { append(roots, Statement(r)); Boundary(r); Separators(r) }
+    return model.Parsed{tokens: r.tokens, nodes: r.nodes, roots, diagnostics: r.diagnostics}
+}

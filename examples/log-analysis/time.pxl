@@ -1,0 +1,22 @@
+// Fixed-width UTC timestamps compare chronologically as strings.
+// Validate the calendar before relying on lexical order.
+export fn Validate(value: string) {
+    if len(value) != 20 { fail("timestamp must use YYYY-MM-DDTHH:MM:SSZ") }
+    if value[4] != "-" || value[7] != "-" || value[10] != "T" || value[13] != ":" || value[16] != ":" || value[19] != "Z" {
+        fail("timestamp must use YYYY-MM-DDTHH:MM:SSZ")
+    }
+    for index, digit in value {
+        if index == 4 || index == 7 || index == 10 || index == 13 || index == 16 || index == 19 { continue }
+        if digit < "0" || digit > "9" { fail("timestamp contains a non-digit") }
+    }
+    let year = parseInt(slice(value, 0, 4))
+    let month = parseInt(slice(value, 5, 7))
+    let day = parseInt(slice(value, 8, 10))
+    let hour = parseInt(slice(value, 11, 13))
+    let minute = parseInt(slice(value, 14, 16))
+    let second = parseInt(slice(value, 17, 19))
+    if year < 1 || month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59 { fail("timestamp is outside the calendar range") }
+    let days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    if year % 400 == 0 || (year % 4 == 0 && year % 100 != 0) { days[1] = 29 }
+    if day < 1 || day > days[month - 1] { fail("timestamp has an invalid calendar day") }
+}

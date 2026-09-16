@@ -1,0 +1,27 @@
+import "models.pxl" as models
+import "std/collections.pxl" as collections
+
+fn main() {
+    let request = jsonDecode[models.Request](input())
+    let minimum = match request.minimum { None => 0.0, Some(value) => value }
+    let selected = collections.Filter[models.Sample](request.samples, fn(sample: models.Sample) -> bool {
+        return sample.value >= minimum
+    })
+    let ordered = collections.Sort[models.Sample](selected, fn(a: models.Sample, b: models.Sample) -> bool {
+        return a.value > b.value
+    })
+    let names = collections.Map[models.Sample, string](ordered, fn(sample: models.Sample) -> string {
+        return sample.name
+    })
+    let total = collections.Fold[models.Sample, float64](selected, 0.0, fn(sum: float64, sample: models.Sample) -> float64 {
+        return sum + sample.value
+    })
+    let grouped = collections.GroupBy[models.Sample](selected, fn(sample: models.Sample) -> string {
+        return sample.category
+    })
+    let categories = map[int]{}
+    for category, samples in grouped { categories[category] = len(samples) }
+    var mean = 0.0
+    if len(selected) > 0 { mean = total / float64(len(selected)) }
+    print(models.Report{names, mean, categories})
+}

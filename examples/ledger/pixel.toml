@@ -1,0 +1,37 @@
+format = 1
+
+[project]
+name = "ledger"
+entry = "main.pxl"
+
+[[test]]
+name = "inclusive amount bounds"
+entry = "main.pxl"
+input = "fixtures/bounded-config.json"
+expected = "fixtures/bounded-expected.json"
+read_root = "fixtures"
+written = { "report.json" = "fixtures/bounded-report.json" }
+
+[[test]]
+name = "sales validation and grouping"
+entry = "main.pxl"
+input = "fixtures/config.json"
+expected = "fixtures/expected.json"
+read_root = "fixtures"
+written = { "report.json" = "fixtures/report.json" }
+
+[[test]]
+name = "changed input and ties"
+entry = "main.pxl"
+input = "fixtures/changed-config.json"
+expected = "fixtures/changed-expected.json"
+read_root = "fixtures"
+written = { "report.json" = "fixtures/changed-report.json" }
+
+[[test]]
+name = "empty input"
+entry = "main.pxl"
+input = "fixtures/empty-config.json"
+expected = "fixtures/empty-expected.json"
+read_root = "fixtures"
+written = { "report.json" = "fixtures/empty-report.json" }

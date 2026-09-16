@@ -1,0 +1,23 @@
+import "sort.pxl"
+
+import "stats.pxl"
+
+fn main() {
+    var raw = trim(input())
+    if len(raw) == 0 {
+        raw = "42, 18, 75, 30, 61, 18, 95, 54, 30, 82, 47"
+    }
+    let fields = split(raw, ",")
+    let values: [int] = []
+    var i = 0
+    while i < len(fields) {
+        append(values, parseInt(trim(fields[i])))
+        i = i + 1
+    }
+    sort.InsertionSort(values)
+    let report = stats.Describe(values)
+    print("Measurement report")
+    print("summary: " + join(report, " | "))
+    print(values)
+    print("samples=" + string(len(values)))
+}

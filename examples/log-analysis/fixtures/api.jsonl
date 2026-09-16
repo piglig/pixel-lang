@@ -1,0 +1,4 @@
+{"timestamp": "2026-09-09T10:00:00Z", "level": "INFO", "service": "api", "duration_ms": 10, "message": "ok"}
+{"timestamp": "2026-09-09T10:00:40Z", "level": "ERROR", "service": "api", "duration_ms": 50, "message": "超时"}
+{"timestamp": "2026-09-09T09:59:59Z", "level": "INFO", "service": "api", "duration_ms": 10, "message": "ok"}
+{"timestamp": "2026-09-09T10:00:50Z", "level": "WARN", "service": "worker", "message": "missing duration"}

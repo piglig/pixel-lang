@@ -1,0 +1,47 @@
+import "models.pxl" as models
+import "time.pxl" as time
+import "std/io.pxl" as io
+import "std/collections.pxl" as collections
+import "std/maps.pxl" as maps
+import "std/text.pxl" as text
+import "severity.pxl" as severity
+
+export fn Run(config: models.Config) -> models.Report {
+    let minimum = severity.Minimum(config.minimum_level)
+    let since = match config.since { None => "", Some(value) => value }
+    let until = match config.until { None => "", Some(value) => value }
+    match config.since { Some(value) => { time.Validate(value) } None => {} }
+    match config.until { Some(value) => { time.Validate(value) } None => {} }
+    if len(since) > 0 && len(until) > 0 && since >= until { fail("since must precede until") }
+    let report = models.Report{count: 0, errors: 0, excluded: 0, duration_total_ms: 0, duration_mean_ms: 0.0, duration_max_ms: 0, services: map[int]{}, levels: map[int]{}, minutes: map[int]{}, problems: []}
+    for source in config.files {
+        try {
+            let lines = text.Lines(io.Read(source))
+            for index, raw in lines {
+                let line = trim(raw)
+                if len(line) == 0 { continue }
+                try {
+                    let event = jsonDecode[models.Event](line)
+                    time.Validate(event.timestamp)
+                    let rank = severity.Rank(event.level)
+                    if event.duration_ms < 0 || len(trim(event.service)) == 0 { fail("duration must be nonnegative and service must be nonempty") }
+                    if rank < minimum || (len(since) > 0 && event.timestamp < since) || (len(until) > 0 && event.timestamp >= until) { report.excluded = report.excluded + 1; continue }
+                    report.count = report.count + 1
+                    if event.level == "ERROR" { report.errors = report.errors + 1 }
+                    report.duration_total_ms = report.duration_total_ms + event.duration_ms
+                    if event.duration_ms > report.duration_max_ms { report.duration_max_ms = event.duration_ms }
+                    maps.Increment(report.services, event.service)
+                    maps.Increment(report.levels, event.level)
+                    maps.Increment(report.minutes, slice(event.timestamp, 0, 16) + ":00Z")
+                } catch error {
+                    append(report.problems, models.Problem{source, line: index + 1, message: error.message, code: error.code, path: error.path})
+                }
+            }
+        } catch error {
+            append(report.problems, models.Problem{source, line: 0, message: error.message, code: error.code, path: error.path})
+        }
+    }
+    if report.count > 0 { report.duration_mean_ms = float64(report.duration_total_ms) / float64(report.count) }
+    report.problems = collections.Sort(report.problems, fn(a, b) = a.source < b.source || (a.source == b.source && a.line < b.line))
+    return report
+}

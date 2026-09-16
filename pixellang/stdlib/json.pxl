@@ -1,0 +1,13 @@
+// Immutable, tagged JSON values. Numeric text is preserved without float rounding.
+export fn Parse(text: string) -> json = jsonParse(text)
+export fn Stringify(value: json) -> string = jsonStringify(value)
+export fn Kind(value: json) -> string = jsonKind(value)
+export fn Get(value: json, key: string) -> json = jsonGet(value, key)
+export fn At(value: json, index: int) -> json = jsonAt(value, index)
+export fn Keys(value: json) -> [string] = jsonKeys(value)
+export fn Int(value: json) -> int = jsonAsInt(value)
+export fn String(value: json) -> string = jsonAsString(value)
+export fn Bool(value: json) -> bool = jsonAsBool(value)
+export fn Null() -> json = jsonNull()
+export fn Object(values: map[json]) -> json = jsonFrom(values)
+export fn Array(values: [json]) -> json = jsonFrom(values)

@@ -1,0 +1,43 @@
+import "model.pxl" as model
+import "types.pxl" as types
+
+export record State { calls: [model.CallResolution], resolved: model.ResolvedTypes, references: map[int], declarations: map[int], annotations: map[int], signatures: map[int], expressions: [model.NodeType], diagnostics: [model.Diagnostic] }
+export fn Key(module: int, node: int) -> string = string(module) + ":" + string(node)
+export fn Report(c: State, module: int, index: int, message: string) {
+    let source = c.resolved.bound.project.modules[module]
+    let node = source.syntax.nodes[index]
+    var line = 1
+    var column = 1
+    for token in source.syntax.tokens { if token.start >= node.start { line = token.line; column = token.column; break } }
+    append(c.diagnostics, model.Diagnostic{source: source.path, phase: "check", message, start: node.start, end: node.end, line, column})
+}
+export fn Scalar(c: State, name: string) -> int = types.Scalar(c.resolved, name)
+export fn Match(c: State, module: int, index: int, expected: int, actual: int) {
+    if expected >= 0 && actual >= 0 && expected != actual { Report(c, module, index, "Type mismatch") }
+}
+export fn Reference(c: State, module: int, index: int) -> int {
+    let key = Key(module, index)
+    if has(c.references, key) { return c.references[key] }
+    return -1
+}
+export fn Declared(c: State, module: int, index: int) -> int {
+    let key = Key(module, index)
+    if has(c.declarations, key) { return c.declarations[key] }
+    return -1
+}
+export fn Annotation(c: State, module: int, index: int) -> int {
+    let key = Key(module, index)
+    if has(c.annotations, key) { return c.annotations[key] }
+    return -1
+}
+export fn Save(c: State, module: int, index: int, typeId: int) -> int {
+    append(c.expressions, model.NodeType{module, node: index, typeId})
+    return typeId
+}
+export fn ParameterTypes(c: State, symbol: int) -> [int] {
+    if symbol < 0 { return [] }
+    let target = c.resolved.bound.symbols[symbol]
+    let key = Key(target.module, target.node)
+    if has(c.signatures, key) { return c.resolved.signatures[c.signatures[key]].parameters }
+    return []
+}

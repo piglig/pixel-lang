@@ -1,1 +1,17 @@
 .DS_Store
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+*.pxb
+.coverage
+
+node_modules/
+
+vscode/runtime/
+vscode/.vscode-test/
+*.vsix
+
+assets/branding/concepts/

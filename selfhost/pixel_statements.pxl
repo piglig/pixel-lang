@@ -1,0 +1,211 @@
+import "model.pxl" as model
+import "pixel_decode.pxl" as decoder
+import "pixel_regions.pxl" as regions
+import "pixel_reader.pxl" as reader
+import "pixel_types.pxl" as types
+import "pixel_expressions.pxl" as expressions
+import "pixel_restore.pxl" as restore
+
+export record Output { syntax: model.Parsed, entries: [int], diagnostics: [decoder.Diagnostic] }
+record Context { r: reader.Reader, regions: [regions.Region], children: map[[int]], entries: [int] }
+fn Begin(c: Context, region: int) -> int {
+    let start = len(c.r.tokens)
+    for token in c.regions[region].tokens { append(c.r.tokens, token) }
+    c.r.index = start; return start
+}
+fn End(c: Context) { if c.r.index != len(c.r.tokens) { reader.Problem(c.r, "Unexpected token after statement header") } }
+fn Head(c: Context, region: int, name: string) -> bool {
+    let token = c.regions[region].tokens[0]
+    return token.kind == "keyword" && jsonKind(token.value) == "string" && jsonAsString(token.value) == name
+}
+fn Children(c: Context, region: int) -> [int] {
+    if has(c.children, string(region)) { return c.children[string(region)] }
+    return []
+}
+fn Body(c: Context, region: int, depth: int) -> int {
+    let start = c.r.index
+    let children = Block(c, region, depth + 1)
+    return reader.Add(c.r, "block", "", children, start)
+}
+fn Generics(r: reader.Reader) -> [int] {
+    let result: [int] = []
+    if reader.Take(r, "punct", "[") {
+        while len(r.diagnostics) == 0 {
+            let start = r.index
+            let name = reader.Name(reader.Identity(r))
+            append(result, reader.Add(r, "type_parameter", name, [], start))
+            if !reader.Take(r, "punct", ",") { break }
+        }
+        reader.Need(r, "punct", "]")
+    }
+    return result
+}
+fn FieldName(r: reader.Reader) -> string {
+    let literal = decoder.ReadLiteral(r.tokens, r.index, r.source)
+    if len(literal.diagnostics) > 0 || literal.kind != "str" { reader.Problem(r, "Field requires a UTF-8 name"); return "" }
+    r.index = literal.next; return jsonAsString(literal.value)
+}
+fn Statement(c: Context, region: int, depth: int) -> int {
+    let r = c.r
+    let start = Begin(c, region)
+    let exported = reader.Take(r, "keyword", "export")
+    let entry = reader.Take(r, "keyword", "entry")
+    if r.index >= len(r.tokens) || r.tokens[r.index].kind != "keyword" {
+        reader.Problem(r, "Expected statement keyword"); return reader.Add(r, "invalid", "", [], start)
+    }
+    let kind = jsonAsString(r.tokens[r.index].value); r.index += 1
+    if exported && kind != "fn" && kind != "record" && kind != "enum" { reader.Problem(r, "Only declarations may be exported") }
+    if entry && kind != "fn" { reader.Problem(r, "Entry marker requires a function") }
+    var result = -1
+    var opens = false
+    if kind == "fn" || kind == "lambda_body" {
+        let name = reader.Name(reader.Identity(r))
+        let children = Generics(r)
+        if kind == "lambda_body" && len(children) > 0 { reader.Problem(r, "Lambda body cannot declare type parameters") }
+        reader.Need(r, "punct", "(")
+        var parameters = 0
+        if !reader.At(r, "punct", ")") {
+            while len(r.diagnostics) == 0 {
+                let at = r.index
+                let parameter = reader.Name(reader.Identity(r)); reader.Need(r, "punct", ":")
+                let typ = types.Parse(r)
+                append(children, reader.Add(r, "parameter", parameter, [typ], at)); parameters += 1
+                if !reader.Take(r, "punct", ",") { break }
+            }
+        }
+        reader.Need(r, "punct", ")"); reader.Need(r, "punct", "->")
+        let at = r.index
+        let typ = types.Parse(r)
+        if entry && (parameters > 0 || len(children) > 0 || r.nodes[typ].kind != "type" || r.nodes[typ].text != "unit") { reader.Problem(r, "Entry must be nongeneric, parameterless and return unit") }
+        append(children, reader.Add(r, "result", "", [typ], at))
+        End(c); append(children, Body(c, region, depth)); opens = true
+        result = reader.Add(r, kind, name, children, start)
+        if entry { append(c.entries, result) }
+    } else if kind == "record" || kind == "enum" {
+        let name = reader.Name(reader.Identity(r))
+        let children = Generics(r)
+        reader.Need(r, "punct", "(")
+        if !reader.At(r, "punct", ")") {
+            while len(r.diagnostics) == 0 {
+                let at = r.index
+                let field = FieldName(r)
+                if kind == "record" {
+                    reader.Need(r, "punct", ":")
+                    append(children, reader.Add(r, "field_decl", field, [types.Parse(r)], at))
+                } else {
+                    let fields: [int] = []
+                    reader.Need(r, "punct", "(")
+                    if !reader.At(r, "punct", ")") {
+                        while len(r.diagnostics) == 0 {
+                            let fieldStart = r.index
+                            let fieldName = FieldName(r); reader.Need(r, "punct", ":")
+                            append(fields, reader.Add(r, "parameter", fieldName, [types.Parse(r)], fieldStart))
+                            if !reader.Take(r, "punct", ",") { break }
+                        }
+                    }
+                    reader.Need(r, "punct", ")")
+                    append(children, reader.Add(r, "variant_decl", field, fields, at))
+                }
+                if !reader.Take(r, "punct", ",") { break }
+            }
+        }
+        reader.Need(r, "punct", ")")
+        result = reader.Add(r, kind, name, children, start)
+    } else if kind == "import" {
+        let id = reader.Identity(r)
+        let alias = reader.Add(r, "alias", "_module_" + string(id), [], start)
+        result = reader.Add(r, "import", "_module_" + string(id) + ".pxl", [alias], start)
+    } else if kind == "let" || kind == "var" {
+        let name = reader.Name(reader.Identity(r))
+        let children: [int] = []
+        if reader.Take(r, "punct", ":") { append(children, reader.Add(r, "annotation", "", [types.Parse(r)], start)) }
+        reader.Need(r, "punct", "="); append(children, expressions.Parse(r))
+        result = reader.Add(r, kind, name, children, start)
+    } else if kind == "set" {
+        let left = expressions.Parse(r)
+        var op = ""
+        for candidate in ["=", "+=", "-=", "*=", "/=", "%="] { if reader.Take(r, "punct", candidate) { op = candidate; break } }
+        if op == "" { reader.Problem(r, "Expected assignment operator") }
+        let right = expressions.Parse(r)
+        result = reader.Add(r, "assign", op, [left, right], start)
+    } else if kind == "if" || kind == "while" || kind == "for" || kind == "match" {
+        let children: [int] = []
+        if kind == "for" {
+            let at = r.index
+            append(children, reader.Add(r, "binding", reader.Name(reader.Identity(r)), [], at))
+            if reader.Take(r, "punct", ",") { let second = r.index; append(children, reader.Add(r, "binding", reader.Name(reader.Identity(r)), [], second)) }
+            reader.Need(r, "keyword", "in")
+        }
+        append(children, expressions.Parse(r)); End(c)
+        if kind == "match" {
+            for caseRegion in Children(c, region) {
+                let at = Begin(c, caseRegion)
+                reader.Need(r, "keyword", "case")
+                let arm = expressions.Pattern(r); End(c)
+                append(arm, Body(c, caseRegion, depth))
+                append(children, reader.Add(r, "arm", "", arm, at))
+            }
+            result = reader.Add(r, "match_stmt", "", children, start)
+        } else { append(children, Body(c, region, depth)); result = reader.Add(r, kind, "", children, start) }
+        opens = true
+    } else if kind == "try" {
+        End(c); result = reader.Add(r, "try", "", [Body(c, region, depth)], start); opens = true
+    } else if kind == "print" || kind == "do" {
+        let value = expressions.Parse(r)
+        var expression = value
+        if kind == "print" { let callee = reader.Add(r, "name", "print", [], start); expression = reader.Add(r, "call", "", [callee, value], start) }
+        result = reader.Add(r, "expression_stmt", "", [expression], start)
+    } else if kind == "return" {
+        let children: [int] = []
+        if r.index < len(r.tokens) { append(children, expressions.Parse(r)) }
+        result = reader.Add(r, "return", "", children, start)
+    } else if kind == "break" || kind == "continue" { result = reader.Add(r, kind, "", [], start) }
+    else { reader.Problem(r, "Unsupported or orphan statement: " + kind); result = reader.Add(r, "invalid", "", [], start) }
+    End(c)
+    if !opens && len(Children(c, region)) > 0 { reader.Problem(r, "Statement cannot contain child regions") }
+    if exported { result = reader.Add(r, "export", "", [result], start) }
+    return result
+}
+fn Block(c: Context, parent: int, depth: int) -> [int] {
+    if depth > 128 { reader.Problem(c.r, "Statement nesting exceeds 128"); return [] }
+    let result: [int] = []
+    let rows = Children(c, parent)
+    var index = 0
+    while index < len(rows) && len(c.r.diagnostics) == 0 {
+        let node = Statement(c, rows[index], depth)
+        index += 1
+        let statement = c.r.nodes[node]
+        if statement.kind == "if" && index < len(rows) && Head(c, rows[index], "else") {
+            Begin(c, rows[index]); reader.Need(c.r, "keyword", "else"); End(c)
+            append(statement.children, Body(c, rows[index], depth)); statement.end = c.r.index; index += 1
+        }
+        if statement.kind == "try" {
+            if index >= len(rows) || !Head(c, rows[index], "catch") { reader.Problem(c.r, "Try requires a catch region") }
+            else {
+                Begin(c, rows[index]); reader.Need(c.r, "keyword", "catch")
+                statement.text = reader.Name(reader.Identity(c.r)); End(c)
+                append(statement.children, Body(c, rows[index], depth)); statement.end = c.r.index; index += 1
+            }
+        }
+        append(result, node)
+    }
+    return result
+}
+export fn Parse(analyzed: regions.Output, source: string, module: int) -> Output {
+    let r = reader.New(source, module, [])
+    r.diagnostics = slice(analyzed.diagnostics, 0, len(analyzed.diagnostics))
+    let c = Context{r, regions: analyzed.regions, children: map[[int]]{}, entries: []}
+    for region in analyzed.regions {
+        let key = string(region.parent)
+        if !has(c.children, key) { c.children[key] = [] }
+        append(c.children[key], region.id)
+    }
+    let roots = Block(c, -1, 0)
+    let tokens: [model.Token] = []
+    for index, token in r.tokens { append(tokens, model.Token{kind: "pixel", text: "", value: "", start: index, end: index + 1, line: token.position[1] + 1, column: token.position[0] + 1}) }
+    let syntax = model.Parsed{tokens, nodes: r.nodes, roots, diagnostics: []}
+    if len(r.diagnostics) > 0 { syntax.roots = []; c.entries = [] }
+    if len(r.diagnostics) > 0 { return Output{syntax, entries: c.entries, diagnostics: r.diagnostics} }
+    let restored = restore.Build(syntax, c.entries, source)
+    return Output{syntax: restored.syntax, entries: restored.entries, diagnostics: restored.diagnostics}
+}

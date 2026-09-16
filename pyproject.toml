@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pixellang"
+version = "0.9.0a1"
+description = "A spatial programming language, RGBA compiler and PixelVM"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["Pillow>=10,<13"]
+
+[project.scripts]
+pixelcompiler = "pixellang.compiler_rpc:main"
+pixel = "pixellang.cli:project_main"
+pixelc = "pixellang.cli:compile_main"
+pixelrun = "pixellang.cli:run_main"
+pixelinspect = "pixellang.cli:inspect_main"
+pixelfmt = "pixellang.cli:format_main"
+pixelrender = "pixellang.cli:render_main"
+pixeldebug = "pixellang.cli:debug_main"
+pixelpack = "pixellang.cli:pack_main"
+pixelunpack = "pixellang.cli:unpack_main"
+
+[tool.setuptools]
+packages = ["pixellang"]
+
+[tool.setuptools.package-data]
+pixellang = ["stdlib/*.pxl", "artifacts/*.json"]

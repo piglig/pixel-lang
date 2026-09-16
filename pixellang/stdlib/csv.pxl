@@ -1,0 +1,60 @@
+// CSV records. Quoted commas, escaped quotes, multiline fields and Unicode are preserved.
+// A malformed CSV document raises a recoverable data error.
+export fn Parse(text: string) -> [[string]] {
+    let rows: [[string]] = []
+    var row: [string] = []
+    var field = ""
+    var state = 0
+    var i = 0
+    var pending = false
+    while i < len(text) {
+        let c = text[i]
+        pending = true
+        if state == 2 {
+            if c == "\"" { state = 3 } else { field = field + c }
+        } else {
+            if c == "\"" {
+                if state == 3 { field = field + "\""; state = 2 } else {
+                    if state == 0 { state = 2 } else { fail("CSV quote inside unquoted field at offset " + string(i)) }
+                }
+            } else {
+                if c == "," {
+                    append(row, field)
+                    field = ""
+                    state = 0
+                } else {
+                    if c == "\n" || c == "\r" {
+                        append(row, field)
+                        append(rows, row)
+                        row = []: [string]
+                        field = ""
+                        state = 0
+                        pending = false
+                        if c == "\r" && i + 1 < len(text) && text[i + 1] == "\n" { i += 1 }
+                    } else {
+                        if state == 3 { fail("CSV character after closing quote at offset " + string(i)) }
+                        field = field + c
+                        state = 1
+                    }
+                }
+            }
+        }
+        i += 1
+    }
+    if state == 2 { fail("CSV unterminated quoted field") }
+    if pending { append(row, field); append(rows, row) }
+    return rows
+}
+
+export fn Encode(rows: [[string]]) -> string {
+    var result = ""
+    for row in rows {
+        if len(row) == 0 { fail("CSV rows require at least one field") }
+        let fields: [string] = []
+        for value in row {
+            append(fields, "\"" + replace(value, "\"", "\"\"") + "\"")
+        }
+        result = result + join(fields, ",") + "\r\n"
+    }
+    return result
+}

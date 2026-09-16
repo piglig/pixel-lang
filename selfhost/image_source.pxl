@@ -1,0 +1,73 @@
+import "model.pxl" as model
+import "source_writer.pxl" as writer
+import "picture_reader.pxl" as reader
+import "pixel_project.pxl" as pixels
+import "spatial_layout.pxl" as layout
+import "project.pxl" as project
+import "lexer.pxl" as lexer
+import "bindings.pxl" as bindings
+import "types.pxl" as types
+import "checker.pxl" as checker
+
+fn Identifier(text: string) -> bool {
+    let lexed = lexer.Scan("", text)
+    return len(lexed.diagnostics) == 0 && len(lexed.tokens) == 2 && lexed.tokens[0].kind == "name" && lexed.tokens[0].text == text
+}
+export fn Load(path: string, byteLimit: int, imageLimit: int) -> writer.Output {
+    var phase = "io"
+    try {
+        let bytes = readBytes(path, byteLimit)
+        phase = "image"
+        let pieces = reader.ReadSelected(bytes, imageLimit, map[bool]{}, true)
+        let modules = map[layout.Source]{}
+        for id, source in pieces.sources { if id != "0" { modules[id] = source } }
+        let decoded = pixels.BuildDecoded(pieces.sources["0"], modules, pieces.decoded)
+        let checked = checker.Check(types.Analyze(bindings.Bind(decoded)))
+        if len(checked.diagnostics) > 0 { return writer.Output{entry: "", files: map[string]{}, diagnostics: checked.diagnostics} }
+        phase = "recover"
+        let paths = map[string]{}
+        let usedPaths = map[bool]{}
+        for id in pieces.ids { usedPaths["_module_" + id + ".pxl"] = true }
+        for id, source in pieces.sources {
+            let fallback = "_module_" + id + ".pxl"
+            var name = fallback
+            if has(source.metadata, "filename") && jsonKind(source.metadata["filename"]) == "string" {
+                match project.Normalize(jsonAsString(source.metadata["filename"])) {
+                    Some(candidate) => { if !has(usedPaths, candidate) { name = candidate } }
+                    None => {}
+                }
+            }
+            usedPaths[name] = true
+            paths[fallback] = name
+        }
+        let names = map[string]{}
+        for module in decoded.modules {
+            let moduleName = slice(module.path, 0, len(module.path) - 4)
+            let id = slice(moduleName, 8, len(moduleName))
+            let source = pieces.sources[id]
+            let used = map[bool]{"main": true, "unit": true, "int": true, "float": true, "bool": true, "string": true, "map": true, "Option": true, "Some": true, "None": true, "Error": true, "json": true}
+            for node in module.syntax.nodes { used[node.text] = true }
+            if has(source.metadata, "symbols") && jsonKind(source.metadata["symbols"]) == "object" {
+                let symbols = source.metadata["symbols"]
+                for key in jsonKeys(symbols) {
+                    let value = jsonGet(symbols, key)
+                    if jsonKind(value) == "string" {
+                        let candidate = jsonAsString(value)
+                        if Identifier(candidate) && !has(used, candidate) {
+                            names[moduleName + ":_pixel_" + key] = candidate
+                            used[candidate] = true
+                        }
+                    }
+                }
+            }
+        }
+        let result = writer.Build(decoded, names, paths)
+        // Metadata is only a readability hint. Verify its chosen names and paths
+        // still form a complete, valid source project before returning it.
+        let recovered = checker.Check(types.Analyze(bindings.Bind(project.Build(result.files, result.entry))))
+        if len(recovered.diagnostics) > 0 { return writer.Output{entry: result.entry, files: map[string]{}, diagnostics: recovered.diagnostics} }
+        return result
+    } catch error {
+        return writer.Output{entry: "", files: map[string]{}, diagnostics: [model.Diagnostic{source: path, phase, message: error.message, start: 0, end: 0, line: 1, column: 1}]}
+    }
+}

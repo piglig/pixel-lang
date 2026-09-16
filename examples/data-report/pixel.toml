@@ -1,0 +1,11 @@
+format = 1
+
+[project]
+name = "data-report"
+entry = "main.pxl"
+
+[[test]]
+name = "measurement report"
+entry = "main.pxl"
+input = "measurements.csv"
+expected = "expected.json"

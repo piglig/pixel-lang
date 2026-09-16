@@ -1,0 +1,14 @@
+// Absence is explicit; a present value is returned without copying it.
+export fn Get[T](values: map[T], key: string) -> Option[T] = lookup(values, key)
+
+// Copy the outer map in insertion order; referenced values remain shared.
+export fn Copy[T](values: map[T]) -> map[T] {
+    let result = map[T]{}
+    for key, value in values { result[key] = value }
+    return result
+}
+
+// Mutate an integer histogram. New keys start at one; overflow is fatal.
+export fn Increment(counts: map[int], key: string) {
+    counts[key] = match Get(counts, key) { Some(count) => count + 1, None => 1 }
+}

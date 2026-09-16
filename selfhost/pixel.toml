@@ -1,0 +1,4 @@
+format = 1
+[project]
+name = "pixellang-compiler"
+entry = "main.pxl"

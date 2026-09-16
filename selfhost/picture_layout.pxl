@@ -1,0 +1,56 @@
+// Deterministic shelf placement; coordinates remain explicit in the image header.
+export record Placement { width: int, height: int, origins: [[int]] }
+export fn Plan(dimensions: [[int]], scale: int, headerRows: int) -> Placement {
+    if scale < 4 || scale > 24 || headerRows < 1 || headerRows > 32000000 { fail("Invalid picture layout parameters") }
+    if len(dimensions) < 1 || len(dimensions) > 128 { fail("Invalid picture module count") }
+    let margin = scale * 3
+    var total = 0
+    var area = 0
+    var width = 192
+    var verticalHeight = headerRows
+    for size in dimensions {
+        if len(size) != 2 { fail("Picture module requires two dimensions") }
+        if size[0] < 1 || size[1] < 1 || size[0] > 1000000 / size[1] { fail("Invalid picture module dimensions") }
+        total += size[0] * size[1]
+        if total > 1000000 { fail("Picture exceeds logical cell limit") }
+        let w = size[0] * scale + margin * 2
+        let h = size[1] * scale + margin * 2
+        area += w * h
+        verticalHeight += h
+        if area > 32000000 { fail("Picture exceeds physical pixel limit") }
+        if w > width { width = w }
+    }
+    let verticalWidth = width
+    var low = 1
+    var high = area
+    while low < high {
+        let middle = (low + high + 1) / 2
+        if middle <= area / middle { low = middle } else { high = middle - 1 }
+    }
+    if low * low < area { low += 1 }
+    if low > width { width = low }
+    var origins: [[int]] = []
+    var x = 0
+    var y = headerRows
+    var shelf = 0
+    for size in dimensions {
+        let w = size[0] * scale + margin * 2
+        let h = size[1] * scale + margin * 2
+        if x > 0 && w > width - x { y += shelf; x = 0; shelf = 0 }
+        append(origins, [x + margin, y + margin])
+        x += w
+        if h > shelf { shelf = h }
+    }
+    var height = y + shelf
+    if verticalWidth * verticalHeight < width * height {
+        width = verticalWidth; height = verticalHeight
+        origins = []
+        y = headerRows
+        for size in dimensions {
+            append(origins, [margin, y + margin])
+            y += size[1] * scale + margin * 2
+        }
+    }
+    if width > 32000000 / height { fail("Picture exceeds physical pixel limit") }
+    return Placement{width, height, origins}
+}

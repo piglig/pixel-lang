@@ -1,0 +1,28 @@
+import "model.pxl" as model
+import "project.pxl" as project
+export record Info { imports: [string], interface: string }
+fn Shape(nodes: [model.Node], index: int) -> string {
+    let node = nodes[index]
+    let values = [jsonStringify(jsonFrom(node.kind)), jsonStringify(jsonFrom(node.text))]
+    for offset, child in node.children {
+        // Top-level function signatures are explicit; bodies are implementation.
+        if node.kind == "fn" && offset == len(node.children) - 1 { continue }
+        append(values, Shape(nodes, child))
+    }
+    return "[" + join(values, ",") + "]"
+}
+export fn Describe(parsed: model.Parsed, path: string) -> Info {
+    let imports: [string] = []
+    let shapes: [string] = []
+    for root in parsed.roots {
+        let node = parsed.nodes[root]
+        if node.kind == "import" {
+            match project.Resolve(path, node.text) { Some(target) => { append(imports, target) }, None => {} }
+        }
+        // Include private declarations conservatively: exported records may refer
+        // to private types. Transitive import invalidation covers external types.
+        append(shapes, Shape(parsed.nodes, root))
+    }
+    return Info{imports, interface: "[" + join(shapes, ",") + "]"}
+
+}

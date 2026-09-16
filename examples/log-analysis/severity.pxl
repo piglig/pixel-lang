@@ -1,0 +1,12 @@
+// Explicit ordering; lexical string order is not severity order.
+export fn Rank(level: string) -> int {
+    if level == "INFO" { return 0 }
+    if level == "WARN" { return 1 }
+    if level == "ERROR" { return 2 }
+    fail("level must be INFO, WARN or ERROR")
+    return 0
+}
+
+export fn Minimum(level: Option[string]) -> int = match level {
+    Some(value) => Rank(value), None => 0
+}

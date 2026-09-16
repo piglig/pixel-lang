@@ -1,0 +1,206 @@
+import "ir_state.pxl" as state
+import "model.pxl" as model
+import "types.pxl" as types
+
+record Collection { type: string, count: int }
+record RecordValue { type: string, fields: [string] }
+record EnumValue { type: string, variant: string, fields: [string] }
+record EnumTest { type: string, variant: string }
+record EnumField { type: string, variant: string, field: string }
+fn Enum(c: state.Context, index: int, name: string, arguments: [int]) {
+    let resolved = c.planned.named.checked.resolved
+    let typeId = state.ExpressionType(c, index)
+    if typeId < 0 { return }
+    for variant in types.VariantTypes(resolved, typeId) {
+        if variant.name != name { continue }
+        if len(variant.fields) != len(arguments) { state.Report(c, index, "Enum payload arity mismatch"); return }
+        let fields: [string] = []
+        for field in variant.fields { append(fields, field.name) }
+        for argument in arguments { Emit(c, argument) }
+        state.Emit(c, "ENUM", jsonFrom(EnumValue{type: state.TypeName(resolved, typeId), variant: name, fields}), index)
+        return
+    }
+    state.Report(c, index, "Unknown concrete enum variant: " + name)
+}
+fn EnumBase(c: state.Context, node: int) -> bool {
+    let key = state.Key(c.frame.module, node)
+    if !has(c.expressionTypes, key) { return false }
+    let typeId = c.expressionTypes[key]
+    if typeId < 0 { return false }
+    return c.planned.named.checked.resolved.types[typeId].kind == "enum"
+}
+export fn Match(c: state.Context, index: int, body: fn(state.Context, int)) {
+    let resolved = c.planned.named.checked.resolved
+    let nodes = resolved.bound.project.modules[c.frame.module].syntax.nodes
+    let node = nodes[index]
+    let typeId = state.ExpressionType(c, node.children[0])
+    if typeId < 0 { return }
+    let typ = state.TypeName(resolved, typeId)
+    let variants = types.VariantTypes(resolved, typeId)
+    let slot = state.Temporary(c, index)
+    let end = state.Label(c)
+    Emit(c, node.children[0]); state.Emit(c, "STORE", jsonFrom(slot), index)
+    for armId in slice(node.children, 1, len(node.children)) {
+        let arm = nodes[armId]
+        let pattern = nodes[arm.children[0]]
+        let parts = split(pattern.text, ".")
+        let name = parts[len(parts) - 1]
+        let next = state.Label(c)
+        let wildcard = pattern.kind == "type" && pattern.text == "_" && len(pattern.children) == 0
+        if !wildcard {
+            state.Emit(c, "LOAD", jsonFrom(slot), armId)
+            state.Emit(c, "ENUM_IS", jsonFrom(EnumTest{type: typ, variant: name}), armId)
+            state.Emit(c, "JUMP_IF_FALSE", jsonFrom(next), armId)
+            for variant in variants {
+                if variant.name != name { continue }
+                var position = 1
+                while position < len(arm.children) - 1 {
+                    state.Emit(c, "LOAD", jsonFrom(slot), armId)
+                    state.Emit(c, "ENUM_GET", jsonFrom(EnumField{type: typ, variant: name, field: variant.fields[position - 1].name}), armId)
+                    let key = state.Key(c.frame.module, arm.children[position])
+                    if !has(c.declarations, key) { state.Report(c, armId, "Missing pattern binding"); return }
+                    state.Emit(c, "BIND", jsonFrom(state.Slot(c, c.declarations[key], armId)), armId)
+                    position += 1
+                }
+            }
+        }
+        body(c, arm.children[len(arm.children) - 1])
+        state.Emit(c, "JUMP", jsonFrom(end), armId)
+        state.Emit(c, "LABEL", jsonFrom(next), armId)
+    }
+    state.Emit(c, "TRAP", jsonFrom("Non-exhaustive match reached at runtime"), index)
+    state.Emit(c, "LABEL", jsonFrom(end), index)
+}
+fn FunctionValue(c: state.Context, target: int, node: int) {
+    let frame = c.frames.functions[target]
+    for slot in frame.slots {
+        if slot.kind == "capture" { state.Emit(c, "CAPTURE", jsonFrom(state.Slot(c, slot.symbol, node)), node) }
+    }
+    var op = "FUNCTION"
+    if frame.captures > 0 { op = "CLOSURE" }
+    state.Emit(c, op, jsonFrom(string(target)), node)
+}
+export fn Emit(c: state.Context, index: int) {
+    if len(c.diagnostics) > 0 { return }
+    let resolved = c.planned.named.checked.resolved
+    let node = resolved.bound.project.modules[c.frame.module].syntax.nodes[index]
+    let children = node.children
+    if node.kind == "literal_int" { state.ConstantValue(c, "int", jsonFrom(parseInt(node.text)), index); return }
+    if node.kind == "literal_float64" { state.ConstantValue(c, "float64", jsonFrom(parseFloat64(node.text)), index); return }
+    if node.kind == "literal_str" { state.ConstantValue(c, "str", jsonFrom(node.text), index); return }
+    if node.kind == "literal_keyword" { state.ConstantValue(c, "bool", jsonFrom(node.text == "true"), index); return }
+    if node.kind == "match" { Match(c, index, Emit); return }
+    if node.kind == "name" {
+        let symbol = state.Reference(c, index)
+        if symbol >= 0 && resolved.bound.symbols[symbol].kind == "builtin" && resolved.bound.symbols[symbol].name == "None" { Enum(c, index, "None", []); return }
+    }
+    if node.kind == "field" && EnumBase(c, children[0]) { Enum(c, index, node.text, []); return }
+    if node.kind == "annotate" { Emit(c, children[0]); return }
+    if node.kind == "lambda" {
+        for target, frame in c.frames.functions { if frame.closure >= 0 && frame.owner == c.frame.owner && frame.node == index && frame.module == c.frame.module { FunctionValue(c, target, index); return } }
+        state.Report(c, index, "Closure has no function frame"); return
+    }
+    if node.kind == "name" || node.kind == "specialize" || node.kind == "field" {
+        let targetKey = state.Key(c.frame.owner, index)
+        if has(c.targets, targetKey) { FunctionValue(c, c.targets[targetKey], index); return }
+        let symbol = state.Reference(c, index)
+        if symbol >= 0 && resolved.bound.symbols[symbol].kind != "builtin" { state.Emit(c, "LOAD", jsonFrom(state.Slot(c, symbol, index)), index); return }
+        if node.kind == "field" { Emit(c, children[0]); state.Emit(c, "FIELD", jsonFrom(node.text), index); return }
+    }
+    if node.kind == "unary" {
+        let operand = resolved.bound.project.modules[c.frame.module].syntax.nodes[children[0]]
+        if node.text == "-" && operand.kind == "literal_int" { state.ConstantValue(c, "int", jsonFrom(parseInt("-" + operand.text)), index); return }
+        Emit(c, children[0])
+        var op = "NOT"
+        if node.text == "-" { op = "NEG" }
+        state.Op(c, op, index); return
+    }
+    if node.kind == "binary" {
+        Emit(c, children[0])
+        if node.text == "&&" || node.text == "and" || node.text == "||" || node.text == "or" {
+            let end = state.Label(c)
+            state.Op(c, "DUP", index)
+            var op = "JUMP_IF_FALSE"
+            if node.text == "||" || node.text == "or" { op = "JUMP_IF_TRUE" }
+            state.Emit(c, op, jsonFrom(end), index); state.Op(c, "POP", index)
+            Emit(c, children[1]); state.Emit(c, "LABEL", jsonFrom(end), index)
+        } else {
+            Emit(c, children[1])
+            var op = state.Binary(node.text)
+            if op == "ADD" {
+                let typeId = state.ExpressionType(c, index)
+                if typeId >= 0 && state.TypeName(resolved, typeId) == "str" { op = "CONCAT" }
+            }
+            if op == "" { state.Report(c, index, "Unknown binary operation") } else { state.Op(c, op, index) }
+        }
+        return
+    }
+    if node.kind == "call" {
+        let callee = resolved.bound.project.modules[c.frame.module].syntax.nodes[children[0]]
+        if callee.kind == "specialize" {
+            let base = state.Reference(c, callee.children[0])
+            if base >= 0 && resolved.bound.symbols[base].kind == "builtin" && resolved.bound.symbols[base].name == "jsonDecode" {
+                Emit(c, children[1])
+                let typeId = state.ExpressionType(c, index)
+                if typeId >= 0 { state.Emit(c, "JSON_DECODE", jsonFrom(state.TypeName(resolved, typeId)), index) }
+                return
+            }
+        }
+        if callee.kind == "field" && EnumBase(c, callee.children[0]) { Enum(c, index, callee.text, slice(children, 1, len(children))); return }
+        let target = state.Reference(c, children[0])
+        if target >= 0 && resolved.bound.symbols[target].kind == "builtin" {
+            let name = resolved.bound.symbols[target].name
+            if name == "Some" || name == "None" { Enum(c, index, name, slice(children, 1, len(children))); return }
+            if name == "jsonDecode" { state.Report(c, index, "jsonDecode requires explicit type arguments"); return }
+            for argument in slice(children, 1, len(children)) { Emit(c, argument) }
+            if name == "print" { state.Op(c, "PRINT", index); state.Unit(c, index) }
+            else { state.Emit(c, "BUILTIN", jsonFrom(name), index) }
+            return
+        }
+        var direct = -1
+        let targetKey = state.Key(c.frame.owner, index)
+        if has(c.targets, targetKey) { direct = c.targets[targetKey] }
+        var typeId = -1
+        if direct >= 0 { FunctionValue(c, direct, index); typeId = c.frames.functions[direct].typeId }
+        else {
+            Emit(c, children[0])
+            let callKey = state.Key(c.frame.module, index)
+            if has(c.callTypes, callKey) { typeId = types.Substitute(resolved, c.callTypes[callKey], c.parameters, c.arguments) }
+            if typeId < 0 { typeId = state.ExpressionType(c, children[0]) }
+        }
+        for argument in slice(children, 1, len(children)) { Emit(c, argument) }
+        if typeId >= 0 { state.Emit(c, "INVOKE", jsonFrom(state.TypeName(resolved, typeId)), index) }
+        return
+    }
+    if node.kind == "map" || node.kind == "map_inferred" {
+        var start = 1
+        if node.kind == "map_inferred" { start = 0 }
+        for child in slice(children, start, len(children)) {
+            let entry = resolved.bound.project.modules[c.frame.module].syntax.nodes[child]
+            Emit(c, entry.children[0]); Emit(c, entry.children[1])
+        }
+        let typeId = state.ExpressionType(c, index)
+        if typeId >= 0 { state.Emit(c, "MAP", jsonFrom(Collection{type: state.TypeName(resolved, typeId), count: (len(children) - start) * 2}), index) }
+        return
+    }
+    if node.kind == "array" {
+        for child in children { Emit(c, child) }
+        let typeId = state.ExpressionType(c, index)
+        if typeId >= 0 { state.Emit(c, "ARRAY", jsonFrom(Collection{type: state.TypeName(resolved, typeId), count: len(children)}), index) }
+        return
+    }
+    if node.kind == "index" { Emit(c, children[0]); Emit(c, children[1]); state.Op(c, "INDEX", index); return }
+    if node.kind == "construct" {
+        let fields: [string] = []
+        for child in slice(children, 1, len(children)) {
+            let field = resolved.bound.project.modules[c.frame.module].syntax.nodes[child]
+            append(fields, field.text)
+            if len(field.children) > 0 { Emit(c, field.children[0]) }
+            else { state.Emit(c, "LOAD", jsonFrom(state.Slot(c, state.Reference(c, child), child)), child) }
+        }
+        let typeId = state.ExpressionType(c, index)
+        if typeId >= 0 { state.Emit(c, "RECORD", jsonFrom(RecordValue{type: state.TypeName(resolved, typeId), fields}), index) }
+        return
+    }
+    state.Report(c, index, "Expression lowering is not implemented: " + node.kind)
+}

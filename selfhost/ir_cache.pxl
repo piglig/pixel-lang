@@ -1,0 +1,173 @@
+import "model.pxl" as model
+import "ir_state.pxl" as state
+
+// Cache identities are separate from executable arena indices. The host owns
+// source/interface digests; PixelLang owns identity and instruction relocation.
+export record Snapshot { environment: string, stamps: map[string], modules: [string], nominal: map[string], targets: map[string], functions: map[state.Function], fileNames: map[string], fileSizes: map[int] }
+export record Reuse { previous: Snapshot, current: Snapshot, oldFunctions: map[string], newFunctions: map[string], newNominal: map[string], newModules: map[int], hits: int, relocated: int, valid: bool, sameLayout: bool, changed: bool }
+export record DiskSnapshot { environment: string, stamps: map[string], modules: [string], nominal: map[string], targets: map[string], functions: map[string], hits: int, relocated: int }
+
+export fn Empty(environment: string, stamps: map[string]) -> Snapshot {
+    return Snapshot{environment, stamps, modules: [], nominal: map[string]{}, targets: map[string]{}, functions: map[state.Function]{}, fileNames: map[string]{}, fileSizes: map[int]{}}
+}
+export fn Begin(previous: Snapshot, environment: string, stamps: map[string]) -> Reuse {
+    return Reuse{previous, current: Empty(environment, stamps), oldFunctions: map[string]{}, newFunctions: map[string]{}, newNominal: map[string]{}, newModules: map[int]{}, hits: 0, relocated: 0, valid: true, sameLayout: false, changed: false}
+}
+fn TypeKey(resolved: model.ResolvedTypes, id: int) -> string {
+    let typ = resolved.types[id]
+    var name = typ.name
+    if typ.module >= 0 { name = jsonStringify(jsonFrom([resolved.bound.project.modules[typ.module].path, typ.name])) }
+    let parts = [typ.kind, name]
+    for argument in typ.arguments { append(parts, TypeKey(resolved, argument)) }
+    return jsonStringify(jsonFrom(parts))
+}
+fn FunctionKey(planned: model.ClosurePlan, frame: model.FunctionFrame) -> string {
+    let resolved = planned.named.checked.resolved
+    let instance = planned.named.instances[frame.owner]
+    let symbol = resolved.bound.symbols[instance.symbol]
+    let path = resolved.bound.project.modules[symbol.module].path
+    // Top-level declarations keep their identity when preceding bodies change
+    // node counts. Nested declarations are reused only with unchanged source.
+    var scope = "top"
+    if resolved.bound.scopes[symbol.scope].owner >= 0 { scope = string(symbol.node) }
+    let parts = [path, symbol.name, scope]
+    for argument in instance.arguments { append(parts, TypeKey(resolved, argument)) }
+    if frame.closure >= 0 { append(parts, "closure"); append(parts, string(frame.node)) }
+    return jsonStringify(jsonFrom(parts))
+}
+export fn Prepare(reuse: Reuse, planned: model.ClosurePlan, layout: model.FramePlan) {
+    let resolved = planned.named.checked.resolved
+    for index, module in resolved.bound.project.modules {
+        append(reuse.current.modules, module.path); reuse.newModules[module.path] = index
+    }
+    for typ in resolved.types {
+        if typ.module < 0 || (typ.kind != "record" && typ.kind != "enum") { continue }
+        let spelling = "@" + string(typ.module) + ":" + string(typ.declaration)
+        let identity = jsonStringify(jsonFrom([resolved.bound.project.modules[typ.module].path, typ.name]))
+        reuse.current.nominal[spelling] = identity
+        reuse.newNominal[identity] = spelling
+    }
+    for id, frame in layout.functions {
+        let key = FunctionKey(planned, frame)
+        reuse.current.targets[string(id)] = key
+        reuse.newFunctions[key] = string(id)
+    }
+    for id, key in reuse.previous.targets { reuse.oldFunctions[key] = id }
+    reuse.sameLayout = jsonStringify(jsonFrom(reuse.previous.modules)) == jsonStringify(jsonFrom(reuse.current.modules)) && jsonStringify(jsonFrom(reuse.previous.nominal)) == jsonStringify(jsonFrom(reuse.current.nominal)) && jsonStringify(jsonFrom(reuse.previous.targets)) == jsonStringify(jsonFrom(reuse.current.targets))
+}
+fn Digit(char: string) -> bool = char >= "0" && char <= "9"
+fn Type(reuse: Reuse, spelling: string) -> string {
+    let parts: [string] = []
+    var cursor = 0
+    var start = 0
+    while cursor < len(spelling) {
+        if spelling[cursor] != "@" { cursor += 1; continue }
+        append(parts, slice(spelling, start, cursor))
+        let first = cursor
+        cursor += 1
+        while cursor < len(spelling) && Digit(spelling[cursor]) { cursor += 1 }
+        if cursor >= len(spelling) || spelling[cursor] != ":" { reuse.valid = false; return spelling }
+        cursor += 1
+        while cursor < len(spelling) && Digit(spelling[cursor]) { cursor += 1 }
+        let old = slice(spelling, first, cursor)
+        if !has(reuse.previous.nominal, old) { reuse.valid = false; return spelling }
+        let key = reuse.previous.nominal[old]
+        if !has(reuse.newNominal, key) { reuse.valid = false; return spelling }
+        if reuse.newNominal[key] != old { reuse.changed = true }
+        append(parts, reuse.newNominal[key])
+        start = cursor
+    }
+    append(parts, slice(spelling, start, len(spelling)))
+    return join(parts, "")
+}
+fn Target(reuse: Reuse, old: string) -> string {
+    if !has(reuse.previous.targets, old) { reuse.valid = false; return old }
+    let key = reuse.previous.targets[old]
+    if !has(reuse.newFunctions, key) { reuse.valid = false; return old }
+    if reuse.newFunctions[key] != old { reuse.changed = true }
+    return reuse.newFunctions[key]
+}
+fn Argument(reuse: Reuse, instruction: state.Instruction) -> json {
+    let op = instruction.op
+    let arg = instruction.arg
+    if op == "CALL" || op == "FUNCTION" || op == "CLOSURE" { return jsonFrom(Target(reuse, jsonAsString(arg))) }
+    if op == "INVOKE" || op == "JSON_DECODE" { return jsonFrom(Type(reuse, jsonAsString(arg))) }
+    if op == "ARRAY" || op == "MAP" || op == "RECORD" || op == "ENUM" || op == "ENUM_IS" || op == "ENUM_GET" {
+        let fields = map[json]{}
+        for key in jsonKeys(arg) { fields[key] = jsonGet(arg, key) }
+        fields["type"] = jsonFrom(Type(reuse, jsonAsString(fields["type"])))
+        return jsonFrom(fields)
+    }
+    // CONST strings and every other non-type payload are deliberately opaque.
+    return arg
+}
+export fn Take(reuse: Reuse, id: int, path: string) -> Option[state.Function] {
+    try { return Load(reuse, id, path) } catch error { return None }
+}
+fn Preserve(reuse: Reuse, id: int, old: string, size: int) {
+    reuse.current.fileNames[string(id)] = reuse.previous.fileNames[old]
+    reuse.current.fileSizes[string(id)] = size
+}
+fn Load(reuse: Reuse, id: int, path: string) -> Option[state.Function] {
+    if reuse.previous.environment != reuse.current.environment { return None }
+    if !has(reuse.previous.stamps, path) || !has(reuse.current.stamps, path) { return None }
+    if reuse.previous.stamps[path] != reuse.current.stamps[path] { return None }
+    let key = reuse.current.targets[string(id)]
+    if !has(reuse.oldFunctions, key) { return None }
+    let old = reuse.oldFunctions[key]
+    if !has(reuse.previous.fileNames, old) { return None }
+    let text = readText(reuse.previous.fileNames[old])
+    let function = jsonDecode[state.Function](text)
+    let size = len(text) * 4
+    if reuse.sameLayout { Preserve(reuse, id, old, size); reuse.hits += 1; return Some(function) }
+    reuse.valid = true
+    reuse.changed = false
+    let params: [string] = []
+    let captures: [string] = []
+    for typ in function.params { append(params, Type(reuse, typ)) }
+    for typ in function.captures { append(captures, Type(reuse, typ)) }
+    let result = Type(reuse, function.result)
+    let instructions: [state.Instruction] = []
+    for instruction in function.instructions {
+        if !has(reuse.newModules, instruction.span.source) { return None }
+        if reuse.newModules[instruction.span.source] != instruction.module { reuse.changed = true }
+        append(instructions, state.Instruction{op: instruction.op, arg: Argument(reuse, instruction), module: reuse.newModules[instruction.span.source], node: instruction.node, span: instruction.span})
+    }
+    if !reuse.valid { return None }
+    if !reuse.changed { Preserve(reuse, id, old, size) }
+    reuse.hits += 1; reuse.relocated += 1
+    return Some(state.Function{params, captures, locals: function.locals, result, instructions})
+}
+export fn Store(reuse: Reuse, id: int, function: state.Function) {
+    reuse.current.functions[string(id)] = function
+}
+export fn Read(path: string) -> Snapshot {
+    let index = jsonDecode[DiskSnapshot](readText(path))
+    return Snapshot{environment: index.environment, stamps: index.stamps, modules: index.modules, nominal: index.nominal, targets: index.targets, functions: map[state.Function]{}, fileNames: index.functions, fileSizes: map[int]{}}
+}
+export fn Write(reuse: Reuse, path: string, byteLimit: int) {
+    let snapshot = reuse.current
+    let files = map[string]{}
+    var remaining = byteLimit - 1000000
+    for id, function in snapshot.functions {
+        if has(snapshot.fileNames, id) {
+            if snapshot.fileSizes[id] <= remaining {
+                files[id] = snapshot.fileNames[id]; remaining -= snapshot.fileSizes[id]
+            }
+            continue
+        }
+        // Each function is independently bounded by the JSON limits. An
+        // oversized function remains compilable and is simply not retained.
+        try {
+            let text = jsonStringify(jsonFrom(function))
+            // UTF-8 uses at most four bytes per scalar. Reserve index space and
+            // avoid constructing an additional byte buffer just to count it.
+            if len(text) * 4 > remaining { continue }
+            let file = "ir-function-" + id + ".json"
+            writeText(file, text)
+            files[id] = file
+            remaining -= len(text) * 4
+        } catch error {}
+    }
+    writeText(path, jsonStringify(jsonFrom(DiskSnapshot{environment: snapshot.environment, stamps: snapshot.stamps, modules: snapshot.modules, nominal: snapshot.nominal, targets: snapshot.targets, functions: files, hits: reuse.hits, relocated: reuse.relocated})))
+}

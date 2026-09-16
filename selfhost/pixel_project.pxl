@@ -1,0 +1,106 @@
+import "model.pxl" as model
+import "spatial_layout.pxl" as layout
+import "pixel_decode.pxl" as decoder
+import "pixel_regions.pxl" as regions
+import "pixel_statements.pxl" as statements
+import "pixel_reader.pxl" as reader
+
+record Builder { sources: map[layout.Source], decoded: map[decoder.Output], parsed: map[statements.Output], states: map[int], modules: [model.Module], diagnostics: [model.Diagnostic] }
+fn Path(id: int) -> string = "_module_" + string(id) + ".pxl"
+fn Report(b: Builder, source: string, message: string, token: model.Token) {
+    append(b.diagnostics, model.Diagnostic{source, phase: "pixel-project", message, start: token.start, end: token.end, line: token.line, column: token.column})
+}
+fn Origin() -> model.Token = model.Token{kind: "pixel", text: "", value: "", start: 0, end: 0, line: 1, column: 1}
+fn Entry(parsed: statements.Output) {
+    // A separate wrapper preserves all lexical uses/shadowing of the entry ID.
+    let r = reader.New("", 0, [])
+    r.nodes = parsed.syntax.nodes
+    let start = len(parsed.syntax.tokens)
+    r.index = start + 1
+    let entry = r.nodes[parsed.entries[0]]
+    let origin = parsed.syntax.tokens[entry.start]
+    append(parsed.syntax.tokens, model.Token{kind: "pixel", text: "", value: origin.value, start, end: start + 1, line: origin.line, column: origin.column})
+    let target = reader.Add(r, "name", entry.text, [], start)
+    let call = reader.Add(r, "call", "", [target], start)
+    let statement = reader.Add(r, "expression_stmt", "", [call], start)
+    let body = reader.Add(r, "block", "", [statement], start)
+    append(parsed.syntax.roots, reader.Add(r, "fn", "main", [body], start))
+}
+fn Visit(b: Builder, id: int, source: string, origin: model.Token) {
+    let key = string(id)
+    if has(b.states, key) {
+        if b.states[key] == 1 { Report(b, source, "Cyclic pixel module import: " + key, origin) }
+        return
+    }
+    if !has(b.sources, key) && !has(b.parsed, key) { Report(b, source, "Missing pixel module: " + key, origin); return }
+    b.states[key] = 1
+    let path = Path(id)
+    var parsed = statements.Output{syntax: model.Parsed{tokens: [], nodes: [], roots: [], diagnostics: []}, diagnostics: [], entries: []}
+    if has(b.parsed, key) { parsed = b.parsed[key] }
+    else {
+        let document = b.sources[key]
+        var decoded = decoder.Output{tokens: [], diagnostics: []}
+        if has(b.decoded, key) { decoded = b.decoded[key] }
+        else { decoded = decoder.Decode(document, path) }
+        parsed = statements.Parse(regions.Analyze(decoded, document.spatial.links, path), path, id)
+    }
+    for error in parsed.diagnostics {
+        var line = 1
+        var column = 1
+        if len(error.position) == 2 { line = error.position[1] + 1; column = error.position[0] + 1 }
+        append(b.diagnostics, model.Diagnostic{source: error.source, phase: error.phase, message: error.message, start: 0, end: 0, line, column})
+    }
+    if len(parsed.diagnostics) > 0 { b.states[key] = 2; return }
+    if (id == 0 && len(parsed.entries) != 1) || (id != 0 && len(parsed.entries) != 0) {
+        Report(b, path, "Program requires exactly one entry in the root module", Origin()); b.states[key] = 2; return
+    }
+    if id == 0 { Entry(parsed) }
+    let declarations: [model.Declaration] = []
+    let imports: [model.Import] = []
+    for root in parsed.syntax.roots {
+        var index = root
+        var exported = false
+        if parsed.syntax.nodes[index].kind == "export" { exported = true; index = parsed.syntax.nodes[index].children[0] }
+        let node = parsed.syntax.nodes[index]
+        let token = parsed.syntax.tokens[node.start]
+        if node.kind == "import" {
+            let alias = parsed.syntax.nodes[node.children[0]].text
+            let target = parseInt(slice(alias, 8, len(alias)))
+            append(imports, model.Import{alias, target: Path(target), node: index})
+            Visit(b, target, path, token)
+        } else if node.kind == "fn" || node.kind == "record" || node.kind == "enum" {
+            append(declarations, model.Declaration{name: node.text, kind: node.kind, node: index, exported})
+        } else { Report(b, path, "Modules may contain declarations only", token) }
+    }
+    b.states[key] = 2
+    append(b.modules, model.Module{path, syntax: parsed.syntax, imports, declarations})
+}
+export fn Build(main: layout.Source, modules: map[layout.Source]) -> model.Project = BuildDecoded(main, modules, map[decoder.Output]{})
+// Internal fast path: decoded outputs belong to these exact validated documents.
+export fn BuildDecoded(main: layout.Source, modules: map[layout.Source], decoded: map[decoder.Output]) -> model.Project {
+    let b = Builder{sources: map[layout.Source]{"0": main}, decoded, parsed: map[statements.Output]{}, states: map[int]{}, modules: [], diagnostics: []}
+    if len(modules) > 127 { Report(b, Path(0), "Pixel project exceeds 128 modules", Origin()); return model.Project{modules: [], diagnostics: b.diagnostics} }
+    for key, source in modules {
+        var id = -1
+        try { id = parseInt(key) } catch err { Report(b, Path(0), "Invalid pixel module ID: " + key, Origin()) }
+        if id < 1 || id > 65535 || string(id) != key { Report(b, Path(0), "Invalid pixel module ID: " + key, Origin()) }
+        else { b.sources[key] = source }
+    }
+    if len(b.diagnostics) == 0 { Visit(b, 0, Path(0), Origin()) }
+    if len(b.diagnostics) > 0 { b.modules = [] }
+    return model.Project{modules: b.modules, diagnostics: b.diagnostics}
+}
+
+// Internal transport boundary for independently parsed, version-matched modules.
+export fn BuildParsed(parsed: map[statements.Output]) -> model.Project {
+    let b = Builder{sources: map[layout.Source]{}, decoded: map[decoder.Output]{}, parsed, states: map[int]{}, modules: [], diagnostics: []}
+    if len(parsed) < 1 || len(parsed) > 128 { Report(b, Path(0), "Pixel project requires 1..128 modules", Origin()) }
+    for key in keys(parsed) {
+        var id = -1
+        try { id = parseInt(key) } catch err { Report(b, Path(0), "Invalid parsed module ID", Origin()) }
+        if id < 0 || id > 65535 || string(id) != key { Report(b, Path(0), "Invalid parsed module ID", Origin()) }
+    }
+    if len(b.diagnostics) == 0 { Visit(b, 0, Path(0), Origin()) }
+    if len(b.diagnostics) > 0 { b.modules = [] }
+    return model.Project{modules: b.modules, diagnostics: b.diagnostics}
+}

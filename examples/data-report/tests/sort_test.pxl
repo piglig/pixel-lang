@@ -1,0 +1,13 @@
+import "../sort.pxl" as sort
+
+fn main() {
+    let values = [3, -2, 3, 0]
+    sort.InsertionSort(values)
+    assert(values[0] == -2)
+    assert(values[1] == 0)
+    assert(values[2] == 3)
+    assert(values[3] == 3)
+    let empty: [int] = []
+    sort.InsertionSort(empty)
+    assert(len(empty) == 0)
+}

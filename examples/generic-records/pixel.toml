@@ -1,0 +1,10 @@
+format = 1
+[project]
+name = "generic-records"
+entry = "main.pxl"
+
+[[test]]
+name = "typed batch with a fractional mean"
+entry = "main.pxl"
+input = "input.json"
+expected = "expected.json"

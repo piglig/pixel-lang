@@ -1,0 +1,48 @@
+import "model.pxl" as model
+import "pixel_decode.pxl" as decode
+import "pixel_statements.pxl" as statements
+import "spatial_layout.pxl" as layout
+record Chunk { kind: string, items: [json] }
+record End { kind: string, first: int, second: int }
+record ParsedHeader { kind: string, roots: [int], entries: [int], diagnostics: [decode.Diagnostic], syntaxDiagnostics: [model.Diagnostic] }
+record ParseInput { links: [layout.Link], tokenFiles: [string] }
+record ParsedInput { roots: [int], entries: [int], diagnostics: [decode.Diagnostic], syntaxDiagnostics: [model.Diagnostic], tokenFiles: [string], nodeFiles: [string] }
+fn Emit[T](kind: string, values: [T], encode: fn(T) -> json) {
+    var chunk: [json] = []
+    var size = 0
+    for value in values {
+        let encoded = encode(value)
+        let length = len(jsonStringify(encoded))
+        if len(chunk) > 0 && (size + length > 128000 || len(chunk) >= 1000) {
+            print(jsonStringify(jsonFrom(Chunk{kind, items: chunk})))
+            chunk = []; size = 0
+        }
+        append(chunk, encoded); size += length + 1
+    }
+    if len(chunk) > 0 { print(jsonStringify(jsonFrom(Chunk{kind, items: chunk}))) }
+}
+export fn Finish(kind: string, first: int, second: int) { print(jsonStringify(jsonFrom(End{kind, first, second}))) }
+export fn EmitParsed(parsed: statements.Output) {
+    print(jsonStringify(jsonFrom(ParsedHeader{kind: "parsed", roots: parsed.syntax.roots, entries: parsed.entries, diagnostics: parsed.diagnostics, syntaxDiagnostics: parsed.syntax.diagnostics})))
+    Emit("tokens", parsed.syntax.tokens, fn(value: model.Token) -> json = jsonFrom(value))
+    Emit("nodes", parsed.syntax.nodes, fn(value: model.Node) -> json = jsonFrom(value))
+    Finish("parsed-end", len(parsed.syntax.tokens), len(parsed.syntax.nodes))
+}
+export record Input { links: [layout.Link], decoded: decode.Output }
+export fn LoadSource(path: string) -> Input {
+    let header = jsonDecode[ParseInput](readText(path))
+    let tokens: [decode.Token] = []
+    for file in header.tokenFiles { extend(tokens, jsonDecode[[decode.Token]](readText(file))) }
+    return Input{links: header.links, decoded: decode.Output{tokens, diagnostics: []}}
+}
+export fn LoadParsed(path: string) -> statements.Output {
+    let header = jsonDecode[ParsedInput](readText(path))
+    let tokens: [model.Token] = []
+    let nodes: [model.Node] = []
+    for file in header.tokenFiles { extend(tokens, jsonDecode[[model.Token]](readText(file))) }
+    for file in header.nodeFiles { extend(nodes, jsonDecode[[model.Node]](readText(file))) }
+    return statements.Output{syntax: model.Parsed{tokens, nodes, roots: header.roots, diagnostics: header.syntaxDiagnostics}, entries: header.entries, diagnostics: header.diagnostics}
+}
+
+export fn Pixels(values: [layout.Pixel]) { Emit("pixels", values, fn(value: layout.Pixel) -> json = jsonFrom(value)) }
+export fn Decoded(values: [decode.Token]) { Emit("decoded", values, fn(value: decode.Token) -> json = jsonFrom(value)) }

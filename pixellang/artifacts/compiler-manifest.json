@@ -1,0 +1,10 @@
+{
+  "protocolVersion": 1,
+  "sha256": "b69f94f145988a0d9b289b1c999fc838a9b1a2d38a3fe1fb6e0a9ceb499d15af",
+  "sourceSha256": "b0f2912e18ea1e00073713864bf3892a90e55a2406ef1bb141c30d5f6a9a50b9",
+  "seedSha256": "90f6e7bc261b243f1d8bd3860289d80c958cb7ce5f79aa5f7e4476ecec705680",
+  "steps": 208146767,
+  "seconds": 211.44553345799795,
+  "files": 49,
+  "provenance": "PixelLang-compiled development artifact; two-generation fixed point verified; full release acceptance separate"
+}

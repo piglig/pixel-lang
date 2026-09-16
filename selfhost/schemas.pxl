@@ -1,0 +1,91 @@
+import "model.pxl" as model
+import "types.pxl" as types
+import "syntax_index.pxl" as syntaxIndex
+
+// Materialize a finite graph, retaining arena IDs for recursive references.
+export fn Materialize(resolved: model.ResolvedTypes, roots: [int]) -> model.SchemaPlan {
+    let result = model.SchemaPlan{schemas: [], diagnostics: []}
+    let pending = slice(roots, 0, len(roots))
+    let seen = map[bool]{}
+    var cursor = 0
+    while cursor < len(pending) {
+        let typeId = pending[cursor]
+        cursor += 1
+        let key = string(typeId)
+        if has(seen, key) { continue }
+        seen[key] = true
+        if !types.Concrete(resolved, typeId, 0) {
+            append(result.diagnostics, model.Diagnostic{source: "", phase: "schemas", message: "Schema requires a concrete type within depth 32", start: 0, end: 0, line: 1, column: 1})
+            break
+        }
+        let typ = resolved.types[typeId]
+        for argument in typ.arguments { append(pending, argument) }
+        if typ.kind != "record" && typ.kind != "enum" { continue }
+        if len(result.schemas) >= 256 {
+            append(result.diagnostics, model.Diagnostic{source: "", phase: "schemas", message: "Concrete nominal schema limit 256 exceeded", start: 0, end: 0, line: 1, column: 1})
+            break
+        }
+        let fields: [model.TypeField] = []
+        let variants: [model.TypeVariant] = []
+        if typ.kind == "record" {
+            for field in types.FieldTypes(resolved, typeId) {
+                append(fields, field)
+                append(pending, field.typeId)
+            }
+        } else {
+            for variant in types.VariantTypes(resolved, typeId) {
+                append(variants, variant)
+                for field in variant.fields { append(pending, field.typeId) }
+            }
+        }
+        append(result.schemas, model.NominalSchema{typeId, fields, variants})
+    }
+    return result
+}
+
+export fn Build(planned: model.ClosurePlan) -> model.SchemaPlan {
+    if len(planned.diagnostics) > 0 { return model.SchemaPlan{schemas: [], diagnostics: slice(planned.diagnostics, 0, len(planned.diagnostics))} }
+    let checked = planned.named.checked
+    let resolved = checked.resolved
+    let roots: [int] = []
+    let owners: [[int]] = []
+    for module in resolved.bound.project.modules { append(owners, syntaxIndex.Owners(module.syntax)) }
+    let signatures = map[int]{}
+    let locals = map[[int]]{}
+    let expressions = map[[int]]{}
+    for index, signature in resolved.signatures {
+        let key = syntaxIndex.Key(signature.module, signature.node)
+        signatures[key] = index; locals[key] = []; expressions[key] = []
+    }
+    for index, local in resolved.bound.symbols {
+        if local.node < 0 { continue }
+        if local.kind != "let" && local.kind != "var" && local.kind != "parameter" && local.kind != "binding" && local.kind != "catch" { continue }
+        let owner = owners[local.module][local.node]
+        if owner >= 0 { append(locals[syntaxIndex.Key(local.module, owner)], index) }
+    }
+    for index, expression in checked.expressions {
+        let owner = owners[expression.module][expression.node]
+        if owner >= 0 { append(expressions[syntaxIndex.Key(expression.module, owner)], index) }
+    }
+    for instance in planned.named.instances {
+        append(roots, instance.typeId)
+        let symbol = resolved.bound.symbols[instance.symbol]
+        let key = syntaxIndex.Key(symbol.module, symbol.node)
+        let signature = resolved.signatures[signatures[key]]
+        for index in locals[key] {
+            let local = resolved.bound.symbols[index]
+            append(roots, types.Substitute(resolved, local.typeId, signature.parameters, instance.arguments))
+        }
+        for index in expressions[key] {
+            let expression = checked.expressions[index]
+            let concrete = types.Substitute(resolved, expression.typeId, signature.parameters, instance.arguments)
+            // Open generic names are not runtime schema roots.
+            if types.Concrete(resolved, concrete, 0) { append(roots, concrete) }
+        }
+    }
+    for closure in planned.closures {
+        append(roots, closure.typeId)
+        for capture in closure.captures { append(roots, capture.typeId) }
+    }
+    return Materialize(resolved, roots)
+}

@@ -1,0 +1,31 @@
+export record Mapping { category: int, red: int, green: [int], blue: [int] }
+export record Palette { forward: map[Mapping], reverse: map[Mapping] }
+// Construct all 256 XOR results by doubling; no per-pixel bit loop.
+fn Table(mask: int) -> [int] {
+    let values = [mask]
+    var bit = 1
+    while bit < 256 {
+        var index = 0
+        while index < bit {
+            let value = values[index]
+            if (value / bit) % 2 == 0 { append(values, value + bit) }
+            else { append(values, value - bit) }
+            index += 1
+        }
+        bit *= 2
+    }
+    return values
+}
+export fn Build() -> Palette {
+    let categories = [16, 17, 18, 19, 20, 32, 48, 64, 80, 96, 112, 128]
+    let palette = [[177, 220, 110], [192, 171, 230], [178, 220, 110], [230, 181, 127], [179, 220, 110], [80, 195, 222], [240, 175, 94], [222, 125, 112], [116, 135, 155], [154, 170, 220], [208, 190, 146], [92, 218, 170]]
+    let forward = map[Mapping]{}
+    let reverse = map[Mapping]{}
+    for index, category in categories {
+        let color = palette[index]
+        let mapping = Mapping{category, red: color[0], green: Table(color[1]), blue: Table(color[2])}
+        forward[string(category)] = mapping
+        reverse[string(color[0])] = mapping
+    }
+    return Palette{forward, reverse}
+}

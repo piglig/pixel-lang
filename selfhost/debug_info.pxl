@@ -1,0 +1,51 @@
+import "spatial_layout.pxl" as layout
+import "model.pxl" as model
+import "frames.pxl" as frames
+import "ir_state.pxl" as ir
+export record Function { name: string, source: string, module: string, names: [string], typeArguments: [string] }
+export record Output { functions: map[Function], types: map[string] }
+export fn Build(planned: model.ClosurePlan) -> Output {
+    let resolved = planned.named.checked.resolved
+    let output = Output{functions: map[Function]{}, types: map[string]{}}
+    if len(planned.diagnostics) > 0 { return output }
+    let layout = frames.Build(planned)
+    if len(layout.diagnostics) > 0 { return output }
+    for typ in resolved.types {
+        if typ.module >= 0 && (typ.kind == "record" || typ.kind == "enum") {
+            let path = resolved.bound.project.modules[typ.module].path
+            output.types["@" + string(typ.module) + ":" + string(typ.declaration)] = path + ":" + typ.name
+        }
+    }
+    for id, frame in layout.functions {
+        let source = resolved.bound.project.modules[frame.module]
+        let node = source.syntax.nodes[frame.node]
+        let names: [string] = []
+        for slot in frame.slots { append(names, resolved.bound.symbols[slot.symbol].name) }
+        let arguments: [string] = []
+        for typ in planned.named.instances[frame.owner].arguments { append(arguments, ir.TypeName(resolved, typ)) }
+        var module = string(frame.module + 1)
+        if frame.module == len(resolved.bound.project.modules) - 1 { module = "main" }
+        var name = node.text
+        if name == "" { name = "lambda" }
+        output.functions[string(id)] = Function{name, source: source.path, module, names, typeArguments: arguments}
+    }
+    return output
+}
+
+export fn MapDocument(source: model.Module, document: layout.Source, regions: [layout.Region], origins: [int]) {
+    let mapping = map[ir.Span]{}
+    var pixel = 0
+    for row, region in regions {
+        let node = source.syntax.nodes[origins[row]]
+        let start = ir.Point(source.syntax.tokens, node.start)
+        let end = ir.Point(source.syntax.tokens, node.end)
+        let span = ir.Span{source: source.path, kind: "text", start, end, points: [], min: [0, 0], max: [0, 0]}
+        for color in region.colors {
+            let point = document.pixels[pixel].position
+            mapping[string(point[0]) + "," + string(point[1])] = span
+            pixel += 1
+        }
+    }
+    document.metadata["filename"] = jsonFrom(source.path)
+    document.metadata["source_map"] = jsonFrom(mapping)
+}

@@ -1,0 +1,177 @@
+{
+  "name": "pixellang-studio",
+  "displayName": "PixelLang Studio",
+  "description": "PixelLang language, executable images and 3D time debugging workstation",
+  "version": "0.9.0",
+  "publisher": "pixellang-local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Debuggers",
+    "Visualization"
+  ],
+  "main": "./src/extension.js",
+  "activationEvents": [
+    "onLanguage:pixellang",
+    "onDebug:pixellang"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    }
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "pixellang",
+        "aliases": [
+          "PixelLang"
+        ],
+        "extensions": [
+          ".pxl"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "pixellang",
+        "scopeName": "source.pixellang",
+        "path": "./syntaxes/pixellang.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "pixellang.studio",
+        "title": "PixelLang: Open Studio",
+        "icon": "$(symbol-color)"
+      },
+      {
+        "command": "pixellang.run",
+        "title": "PixelLang: Run in Studio",
+        "icon": "$(play)"
+      },
+      {
+        "command": "pixellang.export",
+        "title": "PixelLang: Export Executable PNG"
+      },
+      {
+        "command": "pixellang.import",
+        "title": "PixelLang: Recover Project from PNG"
+      },
+      {
+        "command": "pixellang.openTimeline",
+        "title": "PixelLang: Open Time Recording"
+      },
+      {
+        "command": "pixellang.testProject",
+        "title": "PixelLang: Save and Test Project"
+      },
+      {
+        "command": "pixellang.buildProject",
+        "title": "PixelLang: Save and Build Project PNG"
+      },
+      {
+        "command": "pixellang.lockProject",
+        "title": "PixelLang: Save and Update Dependency Lock"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "pixellang.studio",
+          "when": "editorLangId == pixellang",
+          "group": "navigation"
+        },
+        {
+          "command": "pixellang.run",
+          "when": "editorLangId == pixellang",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "PixelLang",
+      "properties": {
+        "pixellang.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Python 3.11+ with Pillow installed. Defaults to workspace .venv, then python3."
+        },
+        "pixellang.entry": {
+          "type": "string",
+          "default": "",
+          "description": "Entry path relative to workspace. Empty uses the active .pxl file."
+        },
+        "pixellang.readRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Explicitly grant program file reads inside this directory, relative to the workspace or absolute. Empty denies reads."
+        },
+        "pixellang.writeRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Explicitly grant program file writes inside this existing directory, relative to the workspace or absolute. Empty denies writes."
+        },
+        "pixellang.maxSteps": {
+          "type": "integer",
+          "default": 100000,
+          "minimum": 1,
+          "maximum": 1000000,
+          "description": "Instruction budget for Studio runs and debugging."
+        }
+      }
+    },
+    "debuggers": [
+      {
+        "type": "pixellang",
+        "label": "PixelLang",
+        "languages": [
+          "pixellang"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "program"
+            ],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Entry .pxl file"
+              },
+              "input": {
+                "type": "string",
+                "default": ""
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "default": true
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "pixellang",
+            "request": "launch",
+            "name": "Debug PixelLang",
+            "program": "${file}",
+            "stopOnEntry": true
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "prepare-runtime": "node scripts/prepare.js",
+    "package": "npm run prepare-runtime && vsce package --pre-release --allow-missing-repository --skip-license",
+    "check": "node --check src/extension.js && node --check src/debug.js && node --check media/studio.js",
+    "test": "npm run prepare-runtime && node scripts/test.js"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "3.7.1",
+    "@vscode/test-electron": "2.5.2"
+  }
+}

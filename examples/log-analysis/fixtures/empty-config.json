@@ -1,0 +1,8 @@
+{
+  "files": [
+    "empty.jsonl"
+  ],
+  "output": "report.json",
+  "since": "2026-09-09T10:00:00Z",
+  "until": "2026-09-09T10:02:00Z"
+}

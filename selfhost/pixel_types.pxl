@@ -1,0 +1,59 @@
+import "pixel_reader.pxl" as reader
+
+export fn Parse(r: reader.Reader) -> int {
+    let start = r.index
+    if len(r.diagnostics) > 0 { return reader.Add(r, "invalid", "", [], start) }
+    if r.depth >= 32 { reader.Problem(r, "Type nesting exceeds 32"); return reader.Add(r, "invalid", "", [], start) }
+    r.depth += 1
+    let result = Inner(r)
+    r.depth -= 1
+    return result
+}
+fn Inner(r: reader.Reader) -> int {
+    let start = r.index
+    if r.index >= len(r.tokens) || r.tokens[r.index].kind != "type" {
+        reader.Problem(r, "Expected type pixel"); return reader.Add(r, "invalid", "", [], start)
+    }
+    var name = jsonAsString(r.tokens[r.index].value)
+    r.index += 1
+    var kind = "type"
+    let children: [int] = []
+    if name == "function" {
+        kind = "type_fn"; name = ""
+        reader.Need(r, "punct", "(")
+        if !reader.At(r, "punct", ")") {
+            while len(r.diagnostics) == 0 {
+                append(children, Parse(r))
+                if !reader.Take(r, "punct", ",") { break }
+            }
+        }
+        reader.Need(r, "punct", ")"); reader.Need(r, "punct", "->"); reader.Need(r, "punct", "(")
+        append(children, Parse(r)); reader.Need(r, "punct", ")")
+    } else if name == "record" {
+        reader.Need(r, "punct", "(")
+        let module = reader.Identity(r); reader.Need(r, "punct", ".")
+        let id = reader.Identity(r)
+        name = reader.Qualified(r, module, id)
+        if reader.Take(r, "punct", "[") {
+            while len(r.diagnostics) == 0 {
+                append(children, Parse(r))
+                if !reader.Take(r, "punct", ",") { break }
+            }
+            reader.Need(r, "punct", "]")
+        }
+        reader.Need(r, "punct", ")")
+    } else if name == "parameter" {
+        reader.Need(r, "punct", "("); name = reader.Name(reader.Identity(r)); reader.Need(r, "punct", ")")
+    } else if name == "map" || name == "Option" {
+        reader.Need(r, "punct", "("); append(children, Parse(r)); reader.Need(r, "punct", ")")
+    } else if name == "str" { name = "string" }
+    var result = reader.Add(r, kind, name, children, start)
+    var suffixes = 0
+    while len(r.diagnostics) == 0 && reader.Take(r, "punct", "[") {
+        suffixes += 1
+        if r.depth + suffixes > 32 { reader.Problem(r, "Type nesting exceeds 32"); return result }
+        reader.Need(r, "punct", "]")
+        result = reader.Add(r, "type_array", "", [result], start)
+    }
+    return result
+}

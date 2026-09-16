@@ -1,0 +1,27 @@
+import "assembler.pxl" as assembler
+import "model.pxl" as model
+
+record Header { kind: string, protocol: int, magic: string, vm_version: string, language_version: string, compiler_version: string, entry: [string], diagnostics: [model.Diagnostic] }
+record Item { kind: string, name: string, value: json }
+record FunctionHeader { kind: string, name: string, params: [string], captures: [string], locals: int, result: string }
+record End { kind: string, records: int, enums: int, constants: int, functions: int, instructions: int }
+
+// Each event stays independently bounded; no whole-program JSON value is built.
+export fn Emit(output: assembler.Output) {
+    let code = output.bytecode
+    print(jsonFrom(Header{kind: "header", protocol: 1, magic: code.magic, vm_version: code.vm_version, language_version: code.language_version, compiler_version: code.compiler_version, entry: code.entry, diagnostics: output.diagnostics}))
+    var instructions = 0
+    if len(output.diagnostics) == 0 {
+        for name, schema in code.records { print(jsonFrom(Item{kind: "record", name, value: jsonFrom(schema)})) }
+        for name, schema in code.enums { print(jsonFrom(Item{kind: "enum", name, value: jsonFrom(schema)})) }
+        for index, constant in code.constants { print(jsonFrom(Item{kind: "constant", name: string(index), value: constant})) }
+        for name, function in code.functions {
+            print(jsonFrom(FunctionHeader{kind: "function", name, params: function.params, captures: function.captures, locals: function.locals, result: function.result}))
+            for instruction in function.instructions {
+                print(jsonFrom(Item{kind: "instruction", name, value: jsonFrom(instruction)}))
+                instructions += 1
+            }
+        }
+        print(jsonFrom(End{kind: "end", records: len(code.records), enums: len(code.enums), constants: len(code.constants), functions: len(code.functions), instructions}))
+    } else { print(jsonFrom(End{kind: "end", records: 0, enums: 0, constants: 0, functions: 0, instructions: 0})) }
+}

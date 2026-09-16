@@ -1,0 +1,51 @@
+import "picture_reader.pxl" as picture
+import "spatial_layout.pxl" as layout
+import "pixel_regions.pxl" as regions
+import "pixel_statements.pxl" as statements
+import "pixel_project.pxl" as project
+import "image_transport.pxl" as transport
+import "bindings.pxl" as bindings
+import "types.pxl" as types
+import "checker.pxl" as checker
+import "instances.pxl" as instances
+import "closures.pxl" as closures
+import "ir.pxl" as ir
+import "assembler.pxl" as assembler
+import "bytecode_stream.pxl" as stream
+record Request { operation: string, file: Option[string], selected: Option[[string]], moduleId: Option[int], parsedFiles: Option[map[string]] }
+record ModuleHeader { kind: string, id: string, source: layout.Source }
+export fn Run(text: string) {
+    let request = jsonDecode[Request](text)
+    let file = match request.file { Some(value) => value, None => "program.png" }
+    if request.operation == "index" || request.operation == "decode" {
+        let selected = map[bool]{}
+        match request.selected { Some(values) => { for value in values { selected[value] = true } }, None => {} }
+        let pieces = picture.ReadSelected(readBytes(file, 64000000), 64000000, selected, false)
+        if request.operation == "index" { print(jsonStringify(jsonFrom(pieces.ids))) }
+        else {
+            for id in keys(pieces.sources) {
+                let source = pieces.sources[id]
+                let header = layout.Source{magic: source.magic, versions: source.versions, encoding: source.encoding, dimensions: source.dimensions, spatial: source.spatial, pixels: [], metadata: source.metadata}
+                print(jsonStringify(jsonFrom(ModuleHeader{kind: "module", id, source: header})))
+                transport.Pixels(source.pixels)
+                transport.Decoded(pieces.decoded[id].tokens)
+                transport.Finish("module-end", len(source.pixels), len(pieces.decoded[id].tokens))
+            }
+        }
+    } else if request.operation == "parse" {
+        let id = match request.moduleId { Some(value) => value, None => 0 }
+        let path = "_module_" + string(id) + ".pxl"
+        let prepared = transport.LoadSource(file)
+        transport.EmitParsed(statements.Parse(regions.Analyze(prepared.decoded, prepared.links, path), path, id))
+    } else if request.operation == "assemble" {
+        match request.parsedFiles {
+            Some(files) => {
+                let parsed = map[statements.Output]{}
+                for key in keys(files) { parsed[key] = transport.LoadParsed(files[key]) }
+                let checked = checker.Check(types.Analyze(bindings.Bind(project.BuildParsed(parsed))))
+                stream.Emit(assembler.Assemble(ir.Build(closures.Build(instances.Build(checked)))))
+            }
+            None => { fail("Parsed modules required") }
+        }
+    } else { fail("Unknown image worker operation") }
+}

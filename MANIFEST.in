@@ -1,0 +1,24 @@
+include README.md README.en.md uv.lock
+recursive-include examples *.pxl *.csv *.jsonl *.md
+recursive-include examples *.toml *.lock *.json
+recursive-include benchmarks *.py
+recursive-include docs *.md
+recursive-include examples *.py *.pixel *.png
+recursive-include tests *.py
+recursive-include vscode *.js *.json *.html *.css *.md
+prune vscode/node_modules
+prune vscode/runtime
+prune vscode/.vscode-test
+prune examples/data-report/dist
+prune examples/ledger/dist
+prune examples/log-analysis/dist
+
+recursive-include pixellang/stdlib *.pxl
+
+
+recursive-include selfhost *.pxl
+recursive-include scripts *.py
+include config/service-performance-limits.json
+recursive-include tests/fixtures *.png
+
+include assets/branding/icon.png

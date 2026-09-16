@@ -1,0 +1,233 @@
+import "model.pxl" as model
+import "types.pxl" as types
+import "frames.pxl" as frames
+import "schemas.pxl" as schemas
+import "ir_state.pxl" as state
+import "ir_expr.pxl" as expression
+import "ir_cache.pxl" as cache
+
+fn Statement(c: state.Context, index: int) {
+    if len(c.diagnostics) > 0 { return }
+    let nodes = c.planned.named.checked.resolved.bound.project.modules[c.frame.module].syntax.nodes
+    let node = nodes[index]
+    let children = node.children
+    if node.kind == "match_stmt" { expression.Match(c, index, Statement); return }
+    if node.kind == "block" { for child in children { Statement(c, child) }; return }
+    if node.kind == "let" || node.kind == "var" {
+        expression.Emit(c, children[len(children) - 1])
+        let key = state.Key(c.frame.module, index)
+        if !has(c.declarations, key) { state.Report(c, index, "Missing declaration binding"); return }
+        state.Emit(c, "BIND", jsonFrom(state.Slot(c, c.declarations[key], index)), index); return
+    }
+    if node.kind == "assign" || node.kind == "update" {
+        let target = nodes[children[0]]
+        var slot = -1
+        if target.kind == "name" {
+            slot = state.Slot(c, state.Reference(c, children[0]), index)
+            if slot < 0 { return }
+            if node.text != "=" { state.Emit(c, "LOAD", jsonFrom(slot), index) }
+        } else if target.kind == "field" {
+            expression.Emit(c, target.children[0])
+            if node.text != "=" { state.Op(c, "DUP", index); state.Emit(c, "FIELD", jsonFrom(target.text), index) }
+        } else if target.kind == "index" {
+            expression.Emit(c, target.children[0]); expression.Emit(c, target.children[1])
+            if node.text != "=" { state.Op(c, "DUP2", index); state.Op(c, "INDEX", index) }
+        } else { state.Report(c, index, "Invalid assignment target"); return }
+        if node.kind == "update" { state.ConstantValue(c, "int", jsonFrom(1), index) }
+        else { expression.Emit(c, children[1]) }
+        if node.text != "=" {
+            var op = state.Binary(slice(node.text, 0, 1))
+            var typeId = -1
+            if slot >= 0 { typeId = c.frame.slots[slot].typeId }
+            else { typeId = state.ExpressionType(c, children[0]) }
+            if op == "ADD" && typeId >= 0 && state.TypeName(c.planned.named.checked.resolved, typeId) == "str" { op = "CONCAT" }
+            if op == "" { state.Report(c, index, "Unknown assignment operation"); return }
+            state.Op(c, op, index)
+        }
+        if target.kind == "name" { state.Emit(c, "STORE", jsonFrom(slot), index) }
+        else if target.kind == "field" { state.Emit(c, "FIELD_SET", jsonFrom(target.text), index) }
+        else { state.Op(c, "INDEX_SET", index) }
+        return
+    }
+    if node.kind == "return" || node.kind == "expression_body" {
+        if len(children) > 0 { expression.Emit(c, children[0]) } else { state.Unit(c, index) }
+        state.Op(c, "RETURN", index); return
+    }
+    if node.kind == "expression_stmt" { expression.Emit(c, children[0]); state.Op(c, "POP", index); return }
+    if node.kind == "if" {
+        let otherwise = state.Label(c)
+        let end = state.Label(c)
+        expression.Emit(c, children[0]); state.Emit(c, "JUMP_IF_FALSE", jsonFrom(otherwise), index)
+        Statement(c, children[1]); state.Emit(c, "JUMP", jsonFrom(end), index)
+        state.Emit(c, "LABEL", jsonFrom(otherwise), index)
+        if len(children) > 2 { Statement(c, children[2]) }
+        state.Emit(c, "LABEL", jsonFrom(end), index); return
+    }
+    if node.kind == "while" {
+        let start = state.Label(c)
+        let end = state.Label(c)
+        append(c.breaks, end); append(c.continues, start); append(c.loopHandlers, c.handlers)
+        state.Emit(c, "LABEL", jsonFrom(start), index)
+        expression.Emit(c, children[0]); state.Emit(c, "JUMP_IF_FALSE", jsonFrom(end), index)
+        Statement(c, children[1]); state.Emit(c, "JUMP", jsonFrom(start), index)
+        state.Emit(c, "LABEL", jsonFrom(end), index)
+        pop(c.breaks); pop(c.continues); pop(c.loopHandlers); return
+    }
+    if node.kind == "for" {
+        let paired = len(children) == 4
+        let iteration = state.Temporary(c, index)
+        let cursor = state.Temporary(c, index)
+        var values = -1
+        if paired { values = state.Temporary(c, index) }
+        let start = state.Label(c)
+        let advance = state.Label(c)
+        let end = state.Label(c)
+        expression.Emit(c, children[len(children) - 2])
+        var mode = "single"
+        if paired { mode = "pair" }
+        state.Emit(c, "ITER_SNAPSHOT", jsonFrom(mode), index)
+        if paired { state.Emit(c, "STORE", jsonFrom(values), index) }
+        state.Emit(c, "STORE", jsonFrom(iteration), index)
+        state.ConstantValue(c, "int", jsonFrom(0), index)
+        state.Emit(c, "STORE", jsonFrom(cursor), index)
+        state.Emit(c, "LABEL", jsonFrom(start), index)
+        state.Emit(c, "LOAD", jsonFrom(cursor), index)
+        state.Emit(c, "LOAD", jsonFrom(iteration), index)
+        state.Emit(c, "BUILTIN", jsonFrom("len"), index)
+        state.Op(c, "LT", index)
+        state.Emit(c, "JUMP_IF_FALSE", jsonFrom(end), index)
+        var binding = 0
+        while binding < len(children) - 2 {
+            var sequence = iteration
+            if binding == 1 { sequence = values }
+            state.Emit(c, "LOAD", jsonFrom(sequence), index)
+            state.Emit(c, "LOAD", jsonFrom(cursor), index)
+            state.Op(c, "INDEX", index)
+            let key = state.Key(c.frame.module, children[binding])
+            if !has(c.declarations, key) { state.Report(c, index, "Missing iteration binding"); return }
+            state.Emit(c, "BIND", jsonFrom(state.Slot(c, c.declarations[key], index)), index)
+            binding += 1
+        }
+        append(c.breaks, end); append(c.continues, advance); append(c.loopHandlers, c.handlers)
+        Statement(c, children[len(children) - 1])
+        pop(c.breaks); pop(c.continues); pop(c.loopHandlers)
+        state.Emit(c, "LABEL", jsonFrom(advance), index)
+        state.Emit(c, "LOAD", jsonFrom(cursor), index)
+        state.ConstantValue(c, "int", jsonFrom(1), index)
+        state.Op(c, "ADD", index)
+        state.Emit(c, "STORE", jsonFrom(cursor), index)
+        state.Emit(c, "JUMP", jsonFrom(start), index)
+        state.Emit(c, "LABEL", jsonFrom(end), index)
+        return
+    }
+    if node.kind == "try" {
+        let handler = state.Label(c)
+        let end = state.Label(c)
+        state.Emit(c, "TRY", jsonFrom(handler), index)
+        c.handlers += 1
+        Statement(c, children[0])
+        c.handlers -= 1
+        state.Op(c, "END_TRY", index)
+        state.Emit(c, "JUMP", jsonFrom(end), index)
+        state.Emit(c, "LABEL", jsonFrom(handler), index)
+        let key = state.Key(c.frame.module, index)
+        if !has(c.declarations, key) { state.Report(c, index, "Missing catch binding"); return }
+        state.Emit(c, "BIND", jsonFrom(state.Slot(c, c.declarations[key], index)), index)
+        Statement(c, children[1])
+        state.Emit(c, "LABEL", jsonFrom(end), index)
+        return
+    }
+    if node.kind == "break" || node.kind == "continue" {
+        if len(c.loopHandlers) == 0 { state.Report(c, index, "Loop transfer has no target"); return }
+        var depth = c.handlers
+        while depth > c.loopHandlers[len(c.loopHandlers) - 1] { state.Op(c, "END_TRY", index); depth -= 1 }
+        let targets = c.breaks
+        if node.kind == "continue" {
+            if len(c.continues) == 0 { state.Report(c, index, "Continue has no loop"); return }
+            state.Emit(c, "JUMP", jsonFrom(c.continues[len(c.continues) - 1]), index)
+        } else {
+            if len(targets) == 0 { state.Report(c, index, "Break has no loop"); return }
+            state.Emit(c, "JUMP", jsonFrom(targets[len(targets) - 1]), index)
+        }
+        return
+    }
+    if node.kind == "fn" { state.Report(c, index, "Nested named-function declaration lowering is not implemented"); return }
+    state.Report(c, index, "Statement lowering is not implemented: " + node.kind)
+}
+fn Fields(resolved: model.ResolvedTypes, fields: [model.TypeField]) -> map[string] {
+    let result = map[string]{}
+    for field in fields { result[field.name] = state.TypeName(resolved, field.typeId) }
+    return result
+}
+export fn Build(planned: model.ClosurePlan) -> state.Output = Lower(planned, None)
+export fn BuildCached(planned: model.ClosurePlan, reuse: cache.Reuse) -> state.Output = Lower(planned, Some(reuse))
+fn Lower(planned: model.ClosurePlan, reuse: Option[cache.Reuse]) -> state.Output {
+    let program = state.Program{version: "0.8", records: map[map[string]]{}, enums: map[map[map[string]]]{}, entry: [], functions: map[state.Function]{}}
+    let layout = frames.Build(planned)
+    let output = state.Output{ir: program, diagnostics: slice(layout.diagnostics, 0, len(layout.diagnostics))}
+    if len(output.diagnostics) > 0 { return output }
+    let resolved = planned.named.checked.resolved
+    let nominal = schemas.Build(planned)
+    for diagnostic in nominal.diagnostics { append(output.diagnostics, diagnostic) }
+    if len(output.diagnostics) > 0 { return output }
+    program.records["Error"] = Fields(resolved, types.FieldTypes(resolved, types.ErrorType(resolved)))
+    for schema in nominal.schemas {
+        let typ = resolved.types[schema.typeId]
+        let name = state.TypeName(resolved, schema.typeId)
+        if typ.kind == "record" { program.records[name] = Fields(resolved, schema.fields) }
+        else {
+            let variants = map[map[string]]{}
+            for variant in schema.variants { variants[variant.name] = Fields(resolved, variant.fields) }
+            program.enums[name] = variants
+        }
+    }
+    append(program.entry, string(layout.entry))
+    let expressionTypes = map[int]{}
+    let targets = map[int]{}
+    let callTypes = map[int]{}
+    for edge in planned.named.edges { targets[state.Key(edge.caller, edge.node)] = edge.target }
+    for call in planned.named.checked.calls { callTypes[state.Key(call.module, call.node)] = call.functionType }
+    let references = map[int]{}
+    let declarations = map[int]{}
+    for item in planned.named.checked.expressions { expressionTypes[state.Key(item.module, item.node)] = item.typeId }
+    for item in resolved.bound.references { references[state.Key(item.module, item.node)] = item.symbol }
+    for index, item in resolved.bound.symbols { if item.module >= 0 { declarations[state.Key(item.module, item.node)] = index } }
+    let spans = map[state.Span]{}
+    match reuse { Some(value) => { cache.Prepare(value, planned, layout) }, None => {} }
+    for id, frame in layout.functions {
+        var reused = false
+        match reuse {
+            Some(value) => {
+                match cache.Take(value, id, resolved.bound.project.modules[frame.module].path) {
+                    Some(function) => { program.functions[string(id)] = function; cache.Store(value, id, function); reused = true }
+                    None => {}
+                }
+            }
+            None => {}
+        }
+        if reused { continue }
+        let instance = planned.named.instances[frame.owner]
+        let source = resolved.bound.symbols[instance.symbol]
+        let parameters: [int] = []
+        for signature in resolved.signatures {
+            if signature.module == source.module && signature.node == source.node { for parameter in signature.parameters { append(parameters, parameter) }; break }
+        }
+        let c = state.Context{planned, frames: layout, frame, code: [], diagnostics: output.diagnostics, expressionTypes, targets, callTypes, references, declarations, parameters, arguments: instance.arguments, spans, labels: 0, breaks: [], continues: [], loopHandlers: [], handlers: 0, locals: len(frame.slots)}
+        let functionNode = resolved.bound.project.modules[frame.module].syntax.nodes[frame.node]
+        Statement(c, functionNode.children[len(functionNode.children) - 1])
+        let signature = resolved.types[frame.typeId]
+        let result = state.TypeName(resolved, signature.arguments[len(signature.arguments) - 1])
+        if result == "unit" { state.Unit(c, frame.node); state.Op(c, "RETURN", frame.node) }
+        else { state.Emit(c, "TRAP", jsonFrom("Function reached end without return"), frame.node) }
+        let params: [string] = []
+        let captures: [string] = []
+        for slot in frame.slots {
+            if slot.kind == "parameter" { append(params, state.TypeName(resolved, slot.typeId)) }
+            if slot.kind == "capture" { append(captures, state.TypeName(resolved, slot.typeId)) }
+        }
+        program.functions[string(id)] = state.Function{params, captures, locals: c.locals, result, instructions: c.code}
+        match reuse { Some(value) => { cache.Store(value, id, program.functions[string(id)]) }, None => {} }
+    }
+    if len(output.diagnostics) > 0 { program.functions = map[state.Function]{}; program.entry = [] }
+    return output
+}

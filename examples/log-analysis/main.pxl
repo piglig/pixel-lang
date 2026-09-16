@@ -1,0 +1,10 @@
+import "models.pxl" as models
+import "analyze.pxl" as analyze
+import "std/io.pxl" as io
+
+fn main() {
+    let config = jsonDecode[models.Config](input())
+    let report = analyze.Run(config)
+    io.Write(config.output, jsonStringify(jsonFrom(report)) + "\n")
+    print(report)
+}

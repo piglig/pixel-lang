@@ -1,0 +1,19 @@
+import "models.pxl" as models
+
+export fn Header(fields: [string]) {
+    if len(fields) != 2 { fail("Expected category,amount_minor CSV header") }
+    if trim(fields[0]) != "category" || trim(fields[1]) != "amount_minor" {
+        fail("Expected category,amount_minor CSV header")
+    }
+}
+
+export fn Parse(fields: [string]) -> models.Sale {
+    if len(fields) != 2 { fail("Expected category and amount_minor columns") }
+    let category = trim(fields[0])
+    if len(category) == 0 { fail("Category cannot be empty") }
+    let amount = parseInt(trim(fields[1]))
+    if amount < -1_000_000_000_000 || amount > 1_000_000_000_000 {
+        fail("Amount must be between -1000000000000 and 1000000000000")
+    }
+    return models.Sale{category: category, amount: amount}
+}

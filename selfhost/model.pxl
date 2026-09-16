@@ -1,0 +1,38 @@
+export record Token { kind: string, text: string, value: string, start: int, end: int, line: int, column: int }
+export record Diagnostic { source: string, phase: string, message: string, start: int, end: int, line: int, column: int }
+export record Lexed { tokens: [Token], diagnostics: [Diagnostic] }
+// AST links are arena indices; there are no hidden host AST objects.
+export record Node { kind: string, text: string, children: [int], start: int, end: int }
+export record Parsed { tokens: [Token], nodes: [Node], roots: [int], diagnostics: [Diagnostic] }
+export record Import { alias: string, target: string, node: int }
+export record Declaration { name: string, kind: string, node: int, exported: bool }
+export record Module { path: string, syntax: Parsed, imports: [Import], declarations: [Declaration] }
+export record Project { modules: [Module], diagnostics: [Diagnostic] }
+// Type and symbol identities are indices in their respective project arenas.
+// -1 denotes an unresolved type, absent parent, or module-level function owner.
+export record TypeField { name: string, typeId: int }
+export record TypeVariant { name: string, fields: [TypeField] }
+export record TypeInfo { kind: string, name: string, module: int, declaration: int, arguments: [int], fields: [TypeField], variants: [TypeVariant] }
+export record Symbol { name: string, kind: string, module: int, node: int, scope: int, typeId: int, mutable: bool, exported: bool }
+export record Scope { parent: int, owner: int, symbols: map[int] }
+export record Reference { module: int, node: int, symbol: int }
+export record Capture { module: int, function: int, symbol: int }
+export record CheckedProject { project: Project, types: [TypeInfo], symbols: [Symbol], references: [Reference], captures: [Capture], diagnostics: [Diagnostic] }
+export record BoundProject { project: Project, scopes: [Scope], symbols: [Symbol], references: [Reference], captures: [Capture], diagnostics: [Diagnostic] }
+
+export record NodeType { module: int, node: int, typeId: int }
+export record FunctionSignature { module: int, node: int, parameters: [int], typeId: int }
+export record ResolvedTypes { bound: BoundProject, interned: map[int], types: [TypeInfo], signatures: [FunctionSignature], annotations: [NodeType], definitions: [NodeType], diagnostics: [Diagnostic] }
+export record CallResolution { module: int, node: int, symbol: int, kind: string, arguments: [int], functionType: int }
+export record ExpressionCheck { resolved: ResolvedTypes, calls: [CallResolution], expressions: [NodeType], diagnostics: [Diagnostic] }
+export record FunctionInstance { symbol: int, arguments: [int], typeId: int }
+export record InstanceEdge { caller: int, node: int, target: int, kind: string }
+export record InstancePlan { checked: ExpressionCheck, instances: [FunctionInstance], edges: [InstanceEdge], entry: int, diagnostics: [Diagnostic] }
+export record CaptureSlot { symbol: int, typeId: int, mutable: bool }
+export record ClosureInstance { owner: int, module: int, node: int, parent: int, typeId: int, captures: [CaptureSlot] }
+export record ClosurePlan { named: InstancePlan, closures: [ClosureInstance], diagnostics: [Diagnostic] }
+export record NominalSchema { typeId: int, fields: [TypeField], variants: [TypeVariant] }
+export record SchemaPlan { schemas: [NominalSchema], diagnostics: [Diagnostic] }
+export record BindingSlot { symbol: int, typeId: int, kind: string, mutable: bool }
+export record FunctionFrame { owner: int, closure: int, module: int, node: int, typeId: int, parameters: int, captures: int, slots: [BindingSlot] }
+export record FramePlan { functions: [FunctionFrame], entry: int, diagnostics: [Diagnostic] }

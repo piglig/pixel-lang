@@ -1,0 +1,20 @@
+export fn Describe(sorted: [int]) -> [string] {
+    assert(len(sorted) > 0)
+    var sum = 0
+    var i = 0
+    while i < len(sorted) {
+        sum = sum + sorted[i]
+        i = i + 1
+    }
+    var hundredths = sum * 100 / len(sorted)
+    var sign = ""
+    if hundredths < 0 {
+        sign = "-"
+        hundredths = -hundredths
+    }
+    var fraction = string(hundredths % 100)
+    if len(fraction) == 1 {
+        fraction = "0" + fraction
+    }
+    return ["min=" + string(sorted[0]), "max=" + string(sorted[len(sorted) - 1]), "sum=" + string(sum), "mean=" + sign + string(hundredths / 100) + "." + fraction]
+}

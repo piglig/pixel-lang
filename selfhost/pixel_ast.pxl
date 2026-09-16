@@ -1,0 +1,218 @@
+import "debug_info.pxl" as debugInfo
+import "model.pxl" as model
+import "instances.pxl" as instances
+import "spatial_layout.pxl" as layout
+import "pixel_ast_state.pxl" as state
+import "pixel_ast_expr.pxl" as expression
+import "literal_pixels.pxl" as literals
+
+export record Bundle { version: string, entry: string, modules: map[layout.Source] }
+export record Document { magic: string, versions: map[string], encoding: string, dimensions: [int], pixels: [layout.Pixel], spatial: layout.Spatial, metadata: map[json], bundle: Bundle }
+export record Output { source: Document, diagnostics: [model.Diagnostic] }
+fn DocumentFrom(source: layout.Source, bundle: Bundle) -> Document {
+    return Document{magic: source.magic, versions: source.versions, encoding: source.encoding, dimensions: source.dimensions, pixels: source.pixels, spatial: source.spatial, metadata: source.metadata, bundle}
+}
+fn Print(c: state.Context, colors: [[int]], node: int) -> bool {
+    let nodes = c.checked.resolved.bound.project.modules[c.module].syntax.nodes
+    let value = nodes[node]
+    if value.kind != "call" { return false }
+    let callee = value.children[0]
+    if !has(c.references, string(callee)) { return false }
+    let symbol = c.checked.resolved.bound.symbols[c.references[string(callee)]]
+    if symbol.kind != "builtin" || symbol.name != "print" { return false }
+    state.Token(colors, 64, "print"); expression.Emit(c, colors, value.children[1]); return true
+}
+fn Statement(c: state.Context, index: int, parent: int, exported: bool, entry: int) {
+    if len(c.diagnostics) > 0 { return }
+    let resolved = c.checked.resolved
+    let nodes = resolved.bound.project.modules[c.module].syntax.nodes
+    let node = nodes[index]
+    let children = node.children
+    if node.kind == "export" { Statement(c, children[0], parent, true, entry); return }
+    if node.kind == "block" { for child in children { Statement(c, child, parent, false, entry) }; return }
+    let colors: [[int]] = []
+    if node.kind == "import" {
+        let module = resolved.bound.project.modules[c.module]
+        for imported in module.imports {
+            if imported.node != index { continue }
+            for target, item in resolved.bound.project.modules {
+                if item.path != imported.target { continue }
+                state.Import(c, target, index); return
+            }
+        }
+        state.Report(c, index, "Missing pixel import target"); return
+    }
+    if node.kind == "fn" || node.kind == "lambda" {
+        var typeId = -1
+        if node.kind == "lambda" {
+            typeId = state.ExpressionType(c, index)
+            state.Token(colors, 64, "lambda_body"); state.Id(c, colors, index, index)
+        } else {
+            let symbol = state.Declare(c, index)
+            if symbol < 0 { return }
+            typeId = resolved.bound.symbols[symbol].typeId
+            if exported { state.Token(colors, 64, "export") }
+            if symbol == entry { state.Token(colors, 64, "entry") }
+            state.Token(colors, 64, "fn"); state.Id(c, colors, symbol, index)
+            for signature in resolved.signatures { if signature.module == c.module && signature.node == index { state.Generics(c, colors, signature.parameters, index) } }
+        }
+        if typeId < 0 { return }
+        let typ = resolved.types[typeId]
+        state.Token(colors, 80, "(")
+        var count = 0
+        for child in children {
+            if nodes[child].kind != "parameter" { continue }
+            if count > 0 { state.Token(colors, 80, ",") }
+            let parameter = state.Declare(c, child)
+            if parameter < 0 { return }
+            state.Id(c, colors, parameter, child); state.Token(colors, 80, ":")
+            state.Type(c, colors, resolved.bound.symbols[parameter].typeId, child)
+            count += 1
+        }
+        state.Token(colors, 80, ")"); state.Token(colors, 80, "->")
+        state.Type(c, colors, typ.arguments[len(typ.arguments) - 1], index)
+        let row = state.Row(c, colors, parent, index)
+        Statement(c, children[len(children) - 1], row, false, entry); return
+    }
+    if node.kind == "record" || node.kind == "enum" {
+        let symbol = state.Declare(c, index)
+        if symbol < 0 { return }
+        if exported { state.Token(colors, 64, "export") }
+        state.Token(colors, 64, node.kind); state.Id(c, colors, symbol, index)
+        let typ = resolved.types[resolved.bound.symbols[symbol].typeId]
+        state.Generics(c, colors, typ.arguments, index)
+        state.Token(colors, 80, "(")
+        for position, field in typ.fields {
+            if position > 0 { state.Token(colors, 80, ",") }
+            for color in literals.Text(field.name) { append(colors, color) }
+            state.Token(colors, 80, ":"); state.Type(c, colors, field.typeId, index)
+        }
+        for position, variant in typ.variants {
+            if position > 0 { state.Token(colors, 80, ",") }
+            for color in literals.Text(variant.name) { append(colors, color) }
+            state.Token(colors, 80, "(")
+            for fieldIndex, field in variant.fields {
+                if fieldIndex > 0 { state.Token(colors, 80, ",") }
+                for color in literals.Text(field.name) { append(colors, color) }
+                state.Token(colors, 80, ":"); state.Type(c, colors, field.typeId, index)
+            }
+            state.Token(colors, 80, ")")
+        }
+        state.Token(colors, 80, ")")
+    } else if node.kind == "match_stmt" {
+        state.Token(colors, 64, "match"); expression.Emit(c, colors, children[0])
+        let row = state.Row(c, colors, parent, index)
+        let typeId = state.ExpressionType(c, children[0])
+        for armId in slice(children, 1, len(children)) {
+            let arm = nodes[armId]
+            let pattern: [[int]] = []
+            state.Token(pattern, 64, "case"); expression.Pattern(c, pattern, armId, typeId)
+            let caseRow = state.Row(c, pattern, row, armId)
+            Statement(c, arm.children[len(arm.children) - 1], caseRow, false, entry)
+        }
+        return
+    } else if node.kind == "let" || node.kind == "var" {
+        let symbol = state.Declare(c, index)
+        if symbol < 0 { return }
+        state.Token(colors, 64, node.kind); state.Id(c, colors, symbol, index); state.Token(colors, 80, ":")
+        state.Type(c, colors, resolved.bound.symbols[symbol].typeId, index); state.Token(colors, 80, "=")
+        expression.Emit(c, colors, children[len(children) - 1])
+    } else if node.kind == "assign" || node.kind == "update" {
+        state.Token(colors, 64, "set"); expression.Emit(c, colors, children[0])
+        var op = node.text
+        if op == "++" { op = "+=" }
+        if op == "--" { op = "-=" }
+        state.Token(colors, 80, op)
+        if node.kind == "update" { for color in literals.Integer(1) { append(colors, color) } }
+        else { expression.Emit(c, colors, children[1]) }
+    } else if node.kind == "return" || node.kind == "expression_body" {
+        state.Token(colors, 64, "return")
+        if len(children) > 0 { expression.Emit(c, colors, children[0]) }
+    } else if node.kind == "expression_stmt" {
+        if !Print(c, colors, children[0]) { state.Token(colors, 64, "do"); expression.Emit(c, colors, children[0]) }
+    } else if node.kind == "if" || node.kind == "while" {
+        state.Token(colors, 64, node.kind); expression.Emit(c, colors, children[0])
+        let row = state.Row(c, colors, parent, index)
+        Statement(c, children[1], row, false, entry)
+        if len(children) > 2 {
+            let otherwise: [[int]] = []
+            state.Token(otherwise, 64, "else")
+            let otherRow = state.Row(c, otherwise, parent, index)
+            Statement(c, children[2], otherRow, false, entry)
+        }
+        return
+    } else if node.kind == "for" {
+        state.Token(colors, 64, "for")
+        var position = 0
+        while position < len(children) - 2 {
+            if position > 0 { state.Token(colors, 80, ",") }
+            state.Id(c, colors, state.Declare(c, children[position]), index); position += 1
+        }
+        state.Token(colors, 64, "in"); expression.Emit(c, colors, children[len(children) - 2])
+        let row = state.Row(c, colors, parent, index)
+        Statement(c, children[len(children) - 1], row, false, entry); return
+    } else if node.kind == "try" {
+        state.Token(colors, 64, "try")
+        let row = state.Row(c, colors, parent, index)
+        Statement(c, children[0], row, false, entry)
+        let handler: [[int]] = []
+        state.Token(handler, 64, "catch"); state.Id(c, handler, state.Declare(c, index), index)
+        let catchRow = state.Row(c, handler, parent, index)
+        Statement(c, children[1], catchRow, false, entry); return
+    } else if node.kind == "break" || node.kind == "continue" { state.Token(colors, 64, node.kind) }
+    else { state.Report(c, index, "Statement pixel emission is not implemented: " + node.kind); return }
+    state.Row(c, colors, parent, index)
+}
+export fn Build(checked: model.ExpressionCheck) -> Output { return BuildOptions(checked, 0) }
+export fn BuildMapped(checked: model.ExpressionCheck) -> Output { return BuildOptions(checked, 2) }
+export fn BuildNamed(checked: model.ExpressionCheck) -> Output { return BuildOptions(checked, 1) }
+fn BuildOptions(checked: model.ExpressionCheck, mapped: int) -> Output {
+    let planned = instances.Build(checked)
+    let modules = checked.resolved.bound.project.modules
+    let bundle = Bundle{version: "0.8", entry: "main.pxl", modules: map[layout.Source]{}}
+    if len(modules) > 0 { bundle.entry = modules[len(modules) - 1].path }
+    let output = Output{source: DocumentFrom(layout.Build([], 1, false), bundle), diagnostics: slice(planned.diagnostics, 0, len(planned.diagnostics))}
+    if len(output.diagnostics) > 0 { return output }
+    let entry = planned.instances[planned.entry].symbol
+    let calls = map[int]{}
+    for index, call in checked.calls {
+        let key = state.Key(call.module, call.node)
+        if len(call.arguments) > 0 && !has(calls, key) { calls[key] = index }
+    }
+    let annotations = map[int]{}
+    for annotation in checked.resolved.annotations {
+        let key = state.Key(annotation.module, annotation.node)
+        if !has(annotations, key) { annotations[key] = annotation.typeId }
+    }
+    let symbolIds = map[int]{}
+    for index, symbol in checked.resolved.bound.symbols {
+        let key = state.Key(symbol.module, symbol.node)
+        if !has(symbolIds, key) { symbolIds[key] = index }
+    }
+    var main = layout.Build([], 1, false)
+    for module, source in modules {
+        let c = state.Context{checked, module, regions: [], origins: [], references: map[int]{}, declarations: map[int]{}, expressions: map[int]{}, calls, annotations, symbolIds, lambdas: [], imports: map[bool]{}, diagnostics: output.diagnostics}
+        for reference in checked.resolved.bound.references { if reference.module == module { c.references[string(reference.node)] = reference.symbol } }
+        for index, symbol in checked.resolved.bound.symbols { if symbol.module == module { c.declarations[string(symbol.node)] = index } }
+        for item in checked.expressions { if item.module == module { c.expressions[string(item.node)] = item.typeId } }
+        for root in source.syntax.roots { Statement(c, root, -1, false, entry) }
+        var lambdaIndex = 0
+        while lambdaIndex < len(c.lambdas) && len(c.diagnostics) == 0 {
+            Statement(c, c.lambdas[lambdaIndex], -1, false, entry)
+            lambdaIndex += 1
+        }
+        if len(c.diagnostics) > 0 { bundle.modules = map[layout.Source]{}; return output }
+        let document = layout.Compact(c.regions)
+        if mapped > 0 {
+            document.metadata["filename"] = jsonFrom(source.path)
+            if mapped == 2 { debugInfo.MapDocument(source, document, c.regions, c.origins) }
+            let symbols = map[string]{}
+            for id, symbol in checked.resolved.bound.symbols { if symbol.module == module { symbols[string(id)] = symbol.name } }
+            document.metadata["symbols"] = jsonFrom(symbols)
+        }
+        if module == len(modules) - 1 { main = document }
+        else { bundle.modules[string(state.ModuleId(c, module))] = document }
+    }
+    output.source = DocumentFrom(main, bundle)
+    return output
+}

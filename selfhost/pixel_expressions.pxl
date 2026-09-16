@@ -1,0 +1,267 @@
+import "pixel_reader.pxl" as reader
+import "pixel_decode.pxl" as decoder
+import "pixel_types.pxl" as types
+
+fn Precedence(op: string) -> int {
+    if op == "or" { return 1 }
+    if op == "and" { return 2 }
+    if op == "==" || op == "!=" { return 3 }
+    if op == "<" || op == "<=" || op == ">" || op == ">=" { return 4 }
+    if op == "+" || op == "-" { return 5 }
+    if op == "*" || op == "/" || op == "%" { return 6 }
+    return 0
+}
+fn Text(op: string) -> string {
+    if op == "and" { return "&&" }
+    if op == "or" { return "||" }
+    if op == "not" { return "!" }
+    return op
+}
+export fn Parse(r: reader.Reader) -> int = Expression(r, 1, 0)
+fn Array(r: reader.Reader, depth: int, start: int) -> int {
+    reader.Need(r, "punct", "[")
+    let items: [int] = []
+    if !reader.At(r, "punct", "]") {
+        while len(r.diagnostics) == 0 {
+            append(items, Expression(r, 1, depth + 1))
+            if !reader.Take(r, "punct", ",") { break }
+        }
+    }
+    reader.Need(r, "punct", "]")
+    return reader.Add(r, "array", "", items, start)
+}
+fn TypeTarget(r: reader.Reader, typeId: int, start: int) -> int {
+    let typ = r.nodes[typeId]
+    let parts = split(typ.text, ".")
+    var target = reader.Add(r, "name", parts[0], [], start)
+    if len(parts) == 2 { target = reader.Add(r, "field", parts[1], [target], start) }
+    if len(typ.children) > 0 {
+        let arguments = [target]
+        for child in typ.children { append(arguments, child) }
+        target = reader.Add(r, "specialize", "", arguments, start)
+    }
+    return target
+}
+fn InferredMap(r: reader.Reader, depth: int, start: int) -> int {
+    let entries: [int] = []
+    reader.Need(r, "punct", "{")
+    if !reader.At(r, "punct", "}") {
+        while len(r.diagnostics) == 0 {
+            let at = r.index
+            let key = Expression(r, 1, depth + 1); reader.Need(r, "punct", ":")
+            let value = Expression(r, 1, depth + 1)
+            append(entries, reader.Add(r, "map_entry", "", [key, value], at))
+            if !reader.Take(r, "punct", ",") { break }
+        }
+    }
+    reader.Need(r, "punct", "}")
+    return reader.Add(r, "map_inferred", "", entries, start)
+}
+fn Typed(r: reader.Reader, depth: int, start: int) -> int {
+    let typeId = types.Parse(r)
+    let typ = r.nodes[typeId]
+    reader.Need(r, "punct", "(")
+    var value = -1
+    if typ.kind == "type_array" {
+        value = Array(r, depth, start)
+        value = reader.Add(r, "annotate", "", [value, typeId], start)
+    } else if typ.kind == "type" && typ.text == "map" {
+        let items = [typ.children[0]]
+        reader.Need(r, "punct", "{")
+        if !reader.At(r, "punct", "}") {
+            while len(r.diagnostics) == 0 {
+                let fieldStart = r.index
+                let key = Expression(r, 1, depth + 1); reader.Need(r, "punct", ":")
+                let item = Expression(r, 1, depth + 1)
+                append(items, reader.Add(r, "map_entry", "", [key, item], fieldStart))
+                if !reader.Take(r, "punct", ",") { break }
+            }
+        }
+        reader.Need(r, "punct", "}")
+        value = reader.Add(r, "map", "", items, start)
+    } else if typ.kind == "type" && (typ.text == "Error" || (len(typ.text) >= 7 && slice(typ.text, 0, 7) == "_pixel_") || (len(typ.text) >= 8 && slice(typ.text, 0, 8) == "_module_")) {
+        let items = [TypeTarget(r, typeId, start)]
+        reader.Need(r, "punct", "{")
+        if !reader.At(r, "punct", "}") {
+            while len(r.diagnostics) == 0 {
+                let fieldStart = r.index
+                let key = decoder.ReadLiteral(r.tokens, r.index, r.source)
+                if key.kind != "str" || len(key.diagnostics) > 0 { reader.Problem(r, "Record constructor requires named fields"); break }
+                r.index = key.next; reader.Need(r, "punct", ":")
+                let item = Expression(r, 1, depth + 1)
+                append(items, reader.Add(r, "initializer", jsonAsString(key.value), [item], fieldStart))
+                if !reader.Take(r, "punct", ",") { break }
+            }
+        }
+        reader.Need(r, "punct", "}")
+        value = reader.Add(r, "construct", "", items, start)
+    } else {
+        reader.Problem(r, "Typed expression requires an array, map or record literal")
+        value = reader.Add(r, "invalid", "", [], start)
+    }
+    reader.Need(r, "punct", ")")
+    return value
+}
+fn Variant(r: reader.Reader, depth: int, start: int) -> int {
+    reader.Need(r, "punct", "(")
+    let typeId = types.Parse(r); reader.Need(r, "punct", ",")
+    let name = decoder.ReadLiteral(r.tokens, r.index, r.source)
+    if name.kind != "str" || len(name.diagnostics) > 0 {
+        reader.Problem(r, "Variant requires a UTF-8 name"); return reader.Add(r, "invalid", "", [], start)
+    }
+    r.index = name.next
+    let variant = jsonAsString(name.value)
+    let typ = r.nodes[typeId]
+    var target = -1
+    if typ.kind == "type" && typ.text == "Option" {
+        target = reader.Add(r, "name", variant, [], start)
+    } else { target = reader.Add(r, "field", variant, [TypeTarget(r, typeId, start)], start) }
+    let arguments = [target]
+    while len(r.diagnostics) == 0 && reader.Take(r, "punct", ",") { append(arguments, Expression(r, 1, depth + 1)) }
+    reader.Need(r, "punct", ")")
+    if typ.kind == "type" && typ.text == "Option" {
+        if (variant != "Some" && variant != "None") || (variant == "Some" && len(arguments) != 2) || (variant == "None" && len(arguments) != 1) {
+            reader.Problem(r, "Invalid Option variant or payload arity")
+        }
+    }
+    if len(arguments) > 1 { target = reader.Add(r, "call", "", arguments, start) }
+    target = reader.Add(r, "annotate", "", [target, typeId], start)
+    return target
+}
+export fn Pattern(r: reader.Reader) -> [int] {
+    let start = r.index
+    if reader.Take(r, "keyword", "otherwise") { return [reader.Add(r, "type", "_", [], start)] }
+    let typeId = types.Parse(r)
+    let name = decoder.ReadLiteral(r.tokens, r.index, r.source)
+    if name.kind != "str" || len(name.diagnostics) > 0 {
+        reader.Problem(r, "Pattern requires a UTF-8 variant name"); return [reader.Add(r, "invalid", "", [], start)]
+    }
+    r.index = name.next
+    let pattern = reader.Add(r, "variant_pattern", jsonAsString(name.value), [typeId], start)
+    let children = [pattern]
+    reader.Need(r, "punct", "(")
+    if !reader.At(r, "punct", ")") {
+        while len(r.diagnostics) == 0 {
+            let bindingStart = r.index
+            let id = reader.Identity(r)
+            append(children, reader.Add(r, "binding", reader.Name(id), [], bindingStart))
+            if !reader.Take(r, "punct", ",") { break }
+        }
+    }
+    reader.Need(r, "punct", ")")
+    return children
+}
+fn Match(r: reader.Reader, depth: int, start: int) -> int {
+    reader.Need(r, "punct", "(")
+    let children = [Expression(r, 1, depth + 1)]
+    reader.Need(r, "punct", ")"); reader.Need(r, "punct", "{")
+    while len(r.diagnostics) == 0 && !reader.At(r, "punct", "}") {
+        let armStart = r.index
+        reader.Need(r, "keyword", "case")
+        let arm = Pattern(r); reader.Need(r, "punct", "=>")
+        append(arm, Expression(r, 1, depth + 1))
+        append(children, reader.Add(r, "arm", "", arm, armStart))
+        if !reader.Take(r, "punct", ",") { break }
+    }
+    reader.Need(r, "punct", "}")
+    return reader.Add(r, "match", "", children, start)
+}
+fn Expression(r: reader.Reader, minimum: int, depth: int) -> int {
+    let start = r.index
+    if depth > 128 { reader.Problem(r, "Expression nesting exceeds 128") }
+    if r.index >= len(r.tokens) { reader.Problem(r, "Expected expression") }
+    if len(r.diagnostics) > 0 { return reader.Add(r, "invalid", "", [], start) }
+    let token = r.tokens[r.index]
+    var left = -1
+    if reader.Take(r, "keyword", "lambda") {
+        reader.Need(r, "punct", "(")
+        let id = reader.Identity(r); reader.Need(r, "punct", ")")
+        left = reader.Add(r, "lambda_ref", reader.Name(id), [], start)
+    } else if reader.Take(r, "keyword", "variant") {
+        left = Variant(r, depth, start)
+    } else if reader.Take(r, "keyword", "match") {
+        left = Match(r, depth, start)
+    } else if token.kind == "type" {
+        left = Typed(r, depth, start)
+    } else if reader.At(r, "punct", "[") {
+        left = Array(r, depth, start)
+    } else if reader.At(r, "punct", "{") {
+        left = InferredMap(r, depth, start)
+    } else if reader.Take(r, "punct", "(") {
+        left = Expression(r, 1, depth + 1); reader.Need(r, "punct", ")")
+    } else if token.kind == "op" && (reader.At(r, "op", "-") || reader.At(r, "op", "not")) {
+        r.index += 1
+        let operand = Expression(r, 7, depth + 1)
+        left = reader.Add(r, "unary", Text(jsonAsString(token.value)), [operand], start)
+    } else if token.kind == "id" {
+        let id = reader.Identity(r)
+        if reader.Take(r, "punct", ".") {
+            let member = reader.Identity(r)
+            if id == r.module { left = reader.Add(r, "name", reader.Name(member), [], start) }
+            else {
+                let module = reader.Add(r, "name", "_module_" + string(id), [], start)
+                left = reader.Add(r, "field", reader.Name(member), [module], start)
+            }
+        } else { left = reader.Add(r, "name", reader.Name(id), [], start) }
+    } else if token.kind == "builtin" {
+        r.index += 1; left = reader.Add(r, "name", jsonAsString(token.value), [], start)
+    } else if token.kind == "int" || token.kind == "bool" || token.kind == "integer_head" || token.kind == "string_head" || token.kind == "float_head" {
+        let literal = decoder.ReadLiteral(r.tokens, r.index, r.source)
+        for diagnostic in literal.diagnostics { append(r.diagnostics, diagnostic) }
+        if len(r.diagnostics) > 0 { return reader.Add(r, "invalid", "", [], start) }
+        r.index = literal.next
+        var kind = "literal_" + literal.kind
+        var text = jsonStringify(literal.value)
+        if literal.kind == "str" { text = jsonAsString(literal.value) }
+        if literal.kind == "bool" { kind = "literal_keyword" }
+        if literal.kind == "int" && jsonAsInt(literal.value) < 0 {
+            let magnitude = reader.Add(r, "literal_int", slice(text, 1, len(text)), [], start)
+            left = reader.Add(r, "unary", "-", [magnitude], start)
+        } else { left = reader.Add(r, kind, text, [], start) }
+    } else {
+        reader.Problem(r, "Unsupported or invalid pixel expression"); return reader.Add(r, "invalid", "", [], start)
+    }
+    while len(r.diagnostics) == 0 && r.index < len(r.tokens) {
+        if reader.Take(r, "punct", "(") {
+            let arguments = [left]
+            if !reader.At(r, "punct", ")") {
+                while len(r.diagnostics) == 0 {
+                    append(arguments, Expression(r, 1, depth + 1))
+                    if !reader.Take(r, "punct", ",") { break }
+                }
+            }
+            reader.Need(r, "punct", ")")
+            left = reader.Add(r, "call", "", arguments, start); continue
+        }
+        if reader.Take(r, "punct", "[") {
+            if r.index < len(r.tokens) && r.tokens[r.index].kind == "type" {
+                let arguments = [left]
+                while len(r.diagnostics) == 0 {
+                    append(arguments, types.Parse(r))
+                    if !reader.Take(r, "punct", ",") { break }
+                }
+                reader.Need(r, "punct", "]")
+                left = reader.Add(r, "specialize", "", arguments, start)
+            } else {
+                let index = Expression(r, 1, depth + 1); reader.Need(r, "punct", "]")
+                left = reader.Add(r, "index", "", [left, index], start)
+            }
+            continue
+        }
+        if reader.Take(r, "punct", "@") {
+            let name = decoder.ReadLiteral(r.tokens, r.index, r.source)
+            if name.kind != "str" || len(name.diagnostics) > 0 { reader.Problem(r, "Field name requires UTF-8 string pixels"); return left }
+            r.index = name.next
+            left = reader.Add(r, "field", jsonAsString(name.value), [left], start); continue
+        }
+        let next = r.tokens[r.index]
+        if next.kind != "op" { break }
+        let op = jsonAsString(next.value)
+        let precedence = Precedence(op)
+        if precedence < minimum { break }
+        r.index += 1
+        let right = Expression(r, precedence + 1, depth + 1)
+        left = reader.Add(r, "binary", Text(op), [left, right], start)
+    }
+    return left
+}

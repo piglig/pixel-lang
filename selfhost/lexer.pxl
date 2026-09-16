@@ -1,0 +1,137 @@
+import "model.pxl" as model
+
+record Cursor { source: string, text: string, offset: int, line: int, column: int, tokens: [model.Token], diagnostics: [model.Diagnostic] }
+
+fn Peek(c: Cursor, ahead: int) -> string {
+    if c.offset + ahead >= len(c.text) { return "" }
+    return c.text[c.offset + ahead]
+}
+fn Advance(c: Cursor) {
+    if Peek(c, 0) == "\n" { c.line += 1; c.column = 1 } else { c.column += 1 }
+    c.offset += 1
+}
+fn Digit(value: string) -> bool = len(value) == 1 && value >= "0" && value <= "9"
+fn Letter(value: string) -> bool {
+    if value == "_" { return true }
+    if len(value) != 1 { return false }
+    return unicodeCategory(value)[0] == "L"
+}
+fn Continuation(value: string) -> bool {
+    if Letter(value) { return true }
+    if len(value) != 1 { return false }
+    return unicodeCategory(value)[0] == "N"
+}
+fn Contains(values: [string], value: string) -> bool {
+    for item in values { if item == value { return true } }
+    return false
+}
+fn Emit(c: Cursor, kind: string, value: string, start: int, line: int, column: int) {
+    append(c.tokens, model.Token{kind, text: slice(c.text, start, c.offset), value, start, end: c.offset, line, column})
+}
+fn ReportError(c: Cursor, message: string, start: int, line: int, column: int) {
+    append(c.diagnostics, model.Diagnostic{source: c.source, phase: "lex", message, start, end: c.offset, line, column})
+}
+fn DigitsValid(text: string) -> bool {
+    if len(text) == 0 { return false }
+    var previous = "_"
+    for character in text {
+        if character == "_" && previous == "_" { return false }
+        if character != "_" && !Digit(character) { return false }
+        previous = character
+    }
+    return previous != "_"
+}
+fn Digits(c: Cursor) {
+    while Digit(Peek(c, 0)) || Peek(c, 0) == "_" { Advance(c) }
+}
+fn Number(c: Cursor, start: int, line: int, column: int) {
+    Digits(c)
+    var valid = DigitsValid(slice(c.text, start, c.offset))
+    var floating = false
+    if Peek(c, 0) == "." && Digit(Peek(c, 1)) {
+        floating = true
+        Advance(c)
+        let fraction = c.offset
+        Digits(c)
+        valid = valid && DigitsValid(slice(c.text, fraction, c.offset))
+    }
+    if Peek(c, 0) == "e" || Peek(c, 0) == "E" {
+        floating = true
+        Advance(c)
+        if Peek(c, 0) == "+" || Peek(c, 0) == "-" { Advance(c) }
+        let exponent = c.offset
+        Digits(c)
+        valid = valid && DigitsValid(slice(c.text, exponent, c.offset))
+    }
+    if !valid { ReportError(c, "Invalid numeric literal separators or exponent", start, line, column); return }
+    let value = replace(slice(c.text, start, c.offset), "_", "")
+    if floating {
+        try { parseFloat64(value) }
+        catch error { ReportError(c, "Float64 literal exceeds finite range", start, line, column); return }
+        Emit(c, "float64", value, start, line, column)
+    } else {
+        if len(value) > 20 { ReportError(c, "Integer literal exceeds supported magnitude", start, line, column); return }
+        Emit(c, "int", value, start, line, column)
+    }
+}
+fn Quoted(c: Cursor, start: int, line: int, column: int) {
+    Advance(c)
+    while c.offset < len(c.text) && Peek(c, 0) != "\"" {
+        if Peek(c, 0) == "\\" {
+            Advance(c)
+            if c.offset < len(c.text) { Advance(c) }
+        } else {
+            if Peek(c, 0) == "\n" { ReportError(c, "Use an escape inside a quoted string", start, line, column); return }
+            Advance(c)
+        }
+    }
+    if c.offset >= len(c.text) { ReportError(c, "Unterminated string", start, line, column); return }
+    Advance(c)
+    try { Emit(c, "str", jsonDecode[string](slice(c.text, start, c.offset)), start, line, column) }
+    catch error { ReportError(c, "Invalid string escape or Unicode scalar", start, line, column) }
+}
+export fn Scan(source: string, text: string) -> model.Lexed {
+    let c = Cursor{source, text, offset: 0, line: 1, column: 1, tokens: [], diagnostics: []}
+    let pairs = ["=>", "->", ":=", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "++", "--"]
+    let keywords = ["fn", "let", "var", "if", "else", "for", "in", "while", "break", "continue", "return", "import", "export", "as", "record", "enum", "match", "try", "catch", "true", "false"]
+    while c.offset < len(text) && len(c.diagnostics) == 0 {
+        let start = c.offset
+        let line = c.line
+        let column = c.column
+        let character = Peek(c, 0)
+        if character == " " || character == "\t" || character == "\r" { Advance(c); continue }
+        if character == "\n" { Advance(c); Emit(c, "separator", "\n", start, line, column); continue }
+        if character == "/" && Peek(c, 1) == "/" {
+            while c.offset < len(text) && Peek(c, 0) != "\n" { Advance(c) }
+            continue
+        }
+        if character == "/" && Peek(c, 1) == "*" {
+            Advance(c); Advance(c)
+            while c.offset < len(text) && !(Peek(c, 0) == "*" && Peek(c, 1) == "/") { Advance(c) }
+            if c.offset >= len(text) { ReportError(c, "Unterminated block comment", start, line, column); continue }
+            Advance(c); Advance(c)
+            if c.line != line { Emit(c, "separator", "\n", start, line, column) }
+            continue
+        }
+        if character == "\"" { Quoted(c, start, line, column); continue }
+        if Digit(character) { Number(c, start, line, column); continue }
+        if Letter(character) {
+            Advance(c)
+            while Continuation(Peek(c, 0)) { Advance(c) }
+            let value = slice(text, start, c.offset)
+            var kind = "name"
+            if Contains(keywords, value) { kind = "keyword" }
+            Emit(c, kind, value, start, line, column)
+            continue
+        }
+        let pair = character + Peek(c, 1)
+        if Contains(pairs, pair) { Advance(c); Advance(c); Emit(c, "symbol", pair, start, line, column); continue }
+        if Contains(["(", ")", "{", "}", "[", "]", ",", ":", ";", ".", "+", "-", "*", "/", "%", "<", ">", "=", "!"], character) {
+            Advance(c); Emit(c, "symbol", character, start, line, column); continue
+        }
+        Advance(c)
+        ReportError(c, "Unexpected character", start, line, column)
+    }
+    if len(c.diagnostics) == 0 { Emit(c, "eof", "<eof>", c.offset, c.line, c.column) }
+    return model.Lexed{tokens: c.tokens, diagnostics: c.diagnostics}
+}

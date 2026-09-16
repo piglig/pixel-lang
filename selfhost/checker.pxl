@@ -1,0 +1,498 @@
+import "model.pxl" as model
+import "types.pxl" as types
+import "inference.pxl" as inference
+
+import "checker_state.pxl" as state
+import "checker_builtins.pxl" as builtins
+import "checker_rules.pxl" as rules
+
+record Frame { result: int, loopDepth: int }
+fn Call(c: state.State, module: int, index: int, expected: int) -> int {
+    let nodes = c.resolved.bound.project.modules[module].syntax.nodes
+    let node = nodes[index]
+    let callee = node.children[0]
+    let symbol = state.Reference(c, module, callee)
+    let arguments = slice(node.children, 1, len(node.children))
+    if nodes[callee].kind == "specialize" {
+        let specialized = nodes[callee]
+        let base = state.Reference(c, module, specialized.children[0])
+        if base >= 0 && c.resolved.bound.symbols[base].name == "jsonDecode" && c.resolved.bound.symbols[base].kind == "builtin" {
+            if len(specialized.children) != 2 { state.Report(c, module, callee, "jsonDecode needs one type argument"); return -1 }
+            let target = state.Annotation(c, module, specialized.children[1])
+            if target >= 0 && c.resolved.types[target].kind == "function" { state.Report(c, module, callee, "Cannot decode a function type") }
+            return builtins.Fixed(c, module, index, arguments, [state.Scalar(c, "string")], target, Expr)
+        }
+    }
+    var function = -1
+    var parameters: [int] = []
+    if symbol >= 0 {
+        let target = c.resolved.bound.symbols[symbol]
+        if target.kind == "builtin" { return builtins.Builtin(c, module, index, target.name, arguments, expected, Expr) }
+        function = target.typeId
+        parameters = state.ParameterTypes(c, symbol)
+    } else {
+        function = Expression(c, module, callee, -1, true)
+        if nodes[callee].kind == "field" && function >= 0 && c.resolved.types[function].kind == "function" {
+            let base = nodes[callee].children[0]
+            let baseType = Expression(c, module, base, -1, true)
+            if baseType >= 0 && c.resolved.types[baseType].kind == "enum" && nodes[base].kind != "specialize" { parameters = c.resolved.types[baseType].arguments }
+        }
+    }
+    if function < 0 { state.Report(c, module, callee, "Unresolved callable type"); return -1 }
+    let signature = c.resolved.types[function]
+    if signature.kind != "function" || len(signature.arguments) != len(arguments) + 1 { state.Report(c, module, index, "Call argument count or callable type mismatch"); return -1 }
+    let context = inference.Begin(c.resolved, parameters)
+    inference.Constrain(context, signature.arguments[len(arguments)], expected, "result")
+    let actuals: [int] = []
+    for argument in arguments { append(actuals, -1) }
+    for pass in [0, 1] {
+        for position, argument in arguments {
+            let deferred = nodes[argument].kind == "lambda" || ((nodes[argument].kind == "array" || nodes[argument].kind == "map_inferred") && len(nodes[argument].children) == 0)
+            if (pass == 0 && deferred) || (pass == 1 && !deferred) { continue }
+            let hint = types.Substitute(c.resolved, signature.arguments[position], parameters, context.arguments)
+            let actual = Expr(c, module, argument, hint)
+            actuals[position] = actual
+            inference.Constrain(context, signature.arguments[position], actual, "argument." + string(position))
+        }
+    }
+    let completed = inference.Complete(context, function)
+    for conflict in completed.conflicts { state.Report(c, module, index, conflict.message + " at " + conflict.path) }
+    if completed.typeId < 0 { return -1 }
+    let result = c.resolved.types[completed.typeId]
+    var targetSymbol = symbol
+    var typeArguments = completed.arguments
+    if nodes[callee].kind == "specialize" {
+        targetSymbol = state.Reference(c, module, nodes[callee].children[0])
+        typeArguments = []
+        var cursor = 1
+        while cursor < len(nodes[callee].children) { append(typeArguments, state.Annotation(c, module, nodes[callee].children[cursor])); cursor += 1 }
+    }
+    append(c.calls, model.CallResolution{module, node: index, symbol: targetSymbol, kind: "call", arguments: typeArguments, functionType: completed.typeId})
+    for position, actual in actuals { state.Match(c, module, arguments[position], result.arguments[position], actual) }
+    return result.arguments[len(arguments)]
+}
+fn IsType(c: state.State, module: int, index: int) -> bool {
+    let nodes = c.resolved.bound.project.modules[module].syntax.nodes
+    var target = index
+    if nodes[target].kind == "specialize" { target = nodes[target].children[0] }
+    let symbol = state.Reference(c, module, target)
+    if symbol < 0 { return false }
+    let item = c.resolved.bound.symbols[symbol]
+    return item.kind == "record" || item.kind == "enum" || (item.kind == "builtin" && item.name == "Error")
+}
+fn Expr(c: state.State, module: int, index: int, expected: int) -> int {
+    return Expression(c, module, index, expected, false)
+}
+// Type names and payload variant selectors are permitted only in constructor/callee positions.
+fn Expression(c: state.State, module: int, index: int, expected: int, allowDesignator: bool) -> int {
+    let nodes = c.resolved.bound.project.modules[module].syntax.nodes
+    let node = nodes[index]
+    let kind = node.kind
+    var result = -1
+    if !allowDesignator && IsType(c, module, index) {
+        state.Report(c, module, index, "Type name cannot be used as a value")
+        return state.Save(c, module, index, -1)
+    }
+    if kind == "literal_int" { result = rules.IntegerLiteral(c, module, index, false) }
+    else if kind == "literal_float64" { result = state.Scalar(c, "float64") }
+    else if kind == "literal_str" { result = state.Scalar(c, "string") }
+    else if kind == "literal_keyword" { result = state.Scalar(c, "bool") }
+    else if kind == "name" {
+        let symbol = state.Reference(c, module, index)
+        if symbol >= 0 {
+            let target = c.resolved.bound.symbols[symbol]
+            result = target.typeId
+            if target.kind == "builtin" && target.name == "Error" { result = types.ErrorType(c.resolved) }
+            if target.kind == "builtin" && target.name == "None" {
+                if expected >= 0 && c.resolved.types[expected].name == "Option" { result = expected }
+                else { state.Report(c, module, index, "None requires an expected Option type") }
+            }
+            if len(state.ParameterTypes(c, symbol)) > 0 { state.Report(c, module, index, "Generic function value requires explicit specialization"); result = -1 }
+        }
+        if result < 0 { state.Report(c, module, index, "Unresolved value type: " + node.text) }
+    } else if kind == "annotate" {
+        result = state.Annotation(c, module, node.children[1])
+        state.Match(c, module, index, result, Expr(c, module, node.children[0], result))
+    } else if kind == "array" {
+        var element = -1
+        if expected >= 0 && c.resolved.types[expected].kind == "array" { element = c.resolved.types[expected].arguments[0] }
+        for child in node.children {
+            let actual = Expr(c, module, child, element)
+            if actual == state.Scalar(c, "unit") { state.Report(c, module, child, "Array elements require a value") }
+            if element < 0 { element = actual } else { state.Match(c, module, child, element, actual) }
+        }
+        if element < 0 { state.Report(c, module, index, "Cannot infer array element type") }
+        else { result = types.Structural(c.resolved, "array", [element]) }
+    } else if kind == "index" {
+        let target = Expr(c, module, node.children[0], -1)
+        if target >= 0 {
+            let typ = c.resolved.types[target]
+            if typ.kind == "array" || typ.name == "string" {
+                state.Match(c, module, node.children[1], state.Scalar(c, "int"), Expr(c, module, node.children[1], state.Scalar(c, "int")))
+                if typ.kind == "array" { result = typ.arguments[0] } else { result = state.Scalar(c, "string") }
+            } else if typ.kind == "map" {
+                state.Match(c, module, node.children[1], state.Scalar(c, "string"), Expr(c, module, node.children[1], state.Scalar(c, "string")))
+                result = typ.arguments[0]
+            } else { state.Report(c, module, index, "Value cannot be indexed") }
+        }
+    } else if kind == "map" || kind == "map_inferred" {
+        var element = -1
+        var cursor = 0
+        if kind == "map" { element = state.Annotation(c, module, node.children[0]); cursor = 1 }
+        else if expected >= 0 && c.resolved.types[expected].kind == "map" { element = c.resolved.types[expected].arguments[0] }
+        while cursor < len(node.children) {
+            let entry = nodes[node.children[cursor]]
+            state.Match(c, module, entry.children[0], state.Scalar(c, "string"), Expr(c, module, entry.children[0], state.Scalar(c, "string")))
+            let actual = Expr(c, module, entry.children[1], element)
+            if actual == state.Scalar(c, "unit") { state.Report(c, module, entry.children[1], "Map entries require a value") }
+            if element < 0 { element = actual } else { state.Match(c, module, entry.children[1], element, actual) }
+            cursor += 1
+        }
+        if element < 0 { state.Report(c, module, index, "Cannot infer map value type") }
+        else { result = types.Structural(c.resolved, "map", [element]) }
+    } else if kind == "field" {
+        let symbol = state.Reference(c, module, index)
+        if symbol >= 0 {
+            result = c.resolved.bound.symbols[symbol].typeId
+            if len(state.ParameterTypes(c, symbol)) > 0 { state.Report(c, module, index, "Generic function value requires explicit specialization"); result = -1 }
+        }
+        else {
+            let base = node.children[0]
+            let isType = IsType(c, module, base)
+            let target = Expression(c, module, base, -1, true)
+            if target >= 0 {
+                if c.resolved.types[target].kind == "enum" {
+                    if !isType { state.Report(c, module, index, "Enum variants require a type name"); return state.Save(c, module, index, -1) }
+                    for variant in types.VariantTypes(c.resolved, target) {
+                        if variant.name != node.text { continue }
+                        if len(variant.fields) == 0 { result = target }
+                        else {
+                            if !allowDesignator { state.Report(c, module, index, "Enum payload variant requires constructor arguments"); return state.Save(c, module, index, -1) }
+                            let parameters: [int] = []
+                            for field in variant.fields { append(parameters, field.typeId) }
+                            append(parameters, target)
+                            result = types.Structural(c.resolved, "function", parameters)
+                        }
+                    }
+                } else {
+                    if isType { state.Report(c, module, index, "Record fields require an instance"); return state.Save(c, module, index, -1) }
+                    for field in types.FieldTypes(c.resolved, target) { if field.name == node.text { result = field.typeId; break } }
+                }
+                if result < 0 { state.Report(c, module, index, "Unknown record field: " + node.text) }
+            }
+        }
+    } else if kind == "construct" { result = Construct(c, module, index, expected) }
+    else if kind == "unary" {
+        if node.text == "-" && nodes[node.children[0]].kind == "literal_int" {
+            result = rules.IntegerLiteral(c, module, node.children[0], true)
+            state.Save(c, module, node.children[0], result)
+        } else { result = Expr(c, module, node.children[0], expected) }
+        if node.text == "-" {
+            if result >= 0 && result != state.Scalar(c, "int") && result != state.Scalar(c, "float64") { state.Report(c, module, index, "Negation requires a number") }
+        } else { state.Match(c, module, index, state.Scalar(c, "bool"), result); result = state.Scalar(c, "bool") }
+    } else if kind == "binary" {
+        let left = Expr(c, module, node.children[0], -1)
+        let right = Expr(c, module, node.children[1], left)
+        result = rules.Binary(c, module, index, node.text, left, right)
+    } else if kind == "match" { result = MatchExpression(c, module, index, expected) }
+    else if kind == "call" { result = Call(c, module, index, expected) }
+    else if kind == "lambda" { result = Function(c, module, index, expected) }
+    else if kind == "specialize" {
+        let target = state.Reference(c, module, node.children[0])
+        if target >= 0 {
+            var parameters = state.ParameterTypes(c, target)
+            let baseType = c.resolved.bound.symbols[target].typeId
+            if baseType >= 0 && (c.resolved.bound.symbols[target].kind == "record" || c.resolved.bound.symbols[target].kind == "enum") { parameters = c.resolved.types[baseType].arguments }
+            let arguments: [int] = []
+            var cursor = 1
+            while cursor < len(node.children) { append(arguments, state.Annotation(c, module, node.children[cursor])); cursor += 1 }
+            if len(parameters) != len(arguments) || len(parameters) == 0 { state.Report(c, module, index, "Invalid explicit specialization") }
+            else {
+                result = types.Substitute(c.resolved, c.resolved.bound.symbols[target].typeId, parameters, arguments)
+                if c.resolved.bound.symbols[target].kind == "fn" { append(c.calls, model.CallResolution{module, node: index, symbol: target, kind: "value", arguments, functionType: result}) }
+            }
+        }
+    } else { state.Report(c, module, index, "Unsupported expression checking: " + kind) }
+    return state.Save(c, module, index, result)
+}
+fn Arm(c: state.State, module: int, index: int, subject: int) -> string {
+    let nodes = c.resolved.bound.project.modules[module].syntax.nodes
+    let node = nodes[index]
+    let pattern = nodes[node.children[0]]
+    if pattern.kind == "type" && pattern.text == "_" && len(pattern.children) == 0 {
+        if len(node.children) != 2 { state.Report(c, module, index, "Wildcard pattern cannot bind payload values") }
+        return "*"
+    }
+    if subject < 0 { return "?" }
+    let typ = c.resolved.types[subject]
+    if typ.kind != "enum" { state.Report(c, module, index, "Match requires an enum value"); return "?" }
+    var variantName = pattern.text
+    var qualified = false
+    if pattern.kind == "variant_pattern" {
+        let before = len(c.resolved.diagnostics)
+        let patternType = types.ResolveUse(c.resolved, module, pattern.children[0])
+        var cursor = before
+        while cursor < len(c.resolved.diagnostics) { append(c.diagnostics, c.resolved.diagnostics[cursor]); cursor += 1 }
+        if patternType < 0 { return "?" }
+        if patternType != subject { state.Report(c, module, index, "Pattern type does not match subject") }
+        qualified = true
+    } else {
+        let parts = split(pattern.text, ".")
+        variantName = parts[len(parts) - 1]
+        qualified = typ.name == "Option" && len(parts) == 1
+        if len(parts) == 2 && parts[0] == typ.name && typ.module == module { qualified = true }
+        if len(parts) == 3 && parts[1] == typ.name && typ.module >= 0 {
+            for imported in c.resolved.bound.project.modules[module].imports {
+                if imported.alias == parts[0] && imported.target == c.resolved.bound.project.modules[typ.module].path { qualified = true }
+            }
+        }
+    }
+    if !qualified { state.Report(c, module, index, "Pattern enum qualifier does not match subject") }
+    for variant in types.VariantTypes(c.resolved, subject) {
+        if variant.name != variantName { continue }
+        if len(variant.fields) != len(node.children) - 2 { state.Report(c, module, index, "Pattern payload arity mismatch"); return variantName }
+        for position, field in variant.fields {
+            let symbol = state.Declared(c, module, node.children[position + 1])
+            if symbol >= 0 { c.resolved.bound.symbols[symbol].typeId = field.typeId }
+        }
+        return variantName
+    }
+    state.Report(c, module, index, "Unknown enum variant: " + variantName)
+    return variantName
+}
+fn Exhaustive(c: state.State, module: int, index: int, subject: int, seen: map[bool]) -> bool {
+    if subject < 0 { return false }
+    if c.resolved.types[subject].kind != "enum" { state.Report(c, module, index, "Match requires an enum value"); return false }
+    if has(seen, "*") { return true }
+    var complete = true
+    for variant in types.VariantTypes(c.resolved, subject) {
+        if !has(seen, variant.name) { state.Report(c, module, index, "Missing match arm: " + variant.name); complete = false }
+    }
+    return complete
+}
+fn MatchExpression(c: state.State, module: int, index: int, expected: int) -> int {
+    let nodes = c.resolved.bound.project.modules[module].syntax.nodes
+    let node = nodes[index]
+    let subject = Expr(c, module, node.children[0], -1)
+    let seen = map[bool]{}
+    var result = expected
+    var cursor = 1
+    while cursor < len(node.children) {
+        let arm = nodes[node.children[cursor]]
+        let name = Arm(c, module, node.children[cursor], subject)
+        if has(seen, name) || has(seen, "*") { state.Report(c, module, node.children[cursor], "Duplicate or unreachable match arm") }
+        seen[name] = true
+        let actual = Expr(c, module, arm.children[len(arm.children) - 1], result)
+        if result < 0 { result = actual } else { state.Match(c, module, node.children[cursor], result, actual) }
+        cursor += 1
+    }
+    Exhaustive(c, module, index, subject, seen)
+    return result
+}
+fn MatchStatement(c: state.State, module: int, index: int, frame: Frame) -> bool {
+    let nodes = c.resolved.bound.project.modules[module].syntax.nodes
+    let node = nodes[index]
+    let subject = Expr(c, module, node.children[0], -1)
+    let seen = map[bool]{}
+    var returns = true
+    var cursor = 1
+    while cursor < len(node.children) {
+        let arm = nodes[node.children[cursor]]
+        let name = Arm(c, module, node.children[cursor], subject)
+        if has(seen, name) || has(seen, "*") { state.Report(c, module, node.children[cursor], "Duplicate or unreachable match arm") }
+        seen[name] = true
+        let actual = Statement(c, module, arm.children[len(arm.children) - 1], frame)
+        returns = returns && actual
+        cursor += 1
+    }
+    let complete = Exhaustive(c, module, index, subject, seen)
+    return returns && complete
+}
+fn Construct(c: state.State, module: int, index: int, expected: int) -> int {
+    let nodes = c.resolved.bound.project.modules[module].syntax.nodes
+    let node = nodes[index]
+    if !IsType(c, module, node.children[0]) { state.Report(c, module, index, "Constructor requires a record type name"); return -1 }
+    let target = Expression(c, module, node.children[0], -1, true)
+    if target < 0 { return -1 }
+    let typ = c.resolved.types[target]
+    if typ.kind != "record" { state.Report(c, module, index, "Constructor requires a record type"); return -1 }
+    var parameters: [int] = []
+    if nodes[node.children[0]].kind != "specialize" { parameters = typ.arguments }
+    let context = inference.Begin(c.resolved, parameters)
+    inference.Constrain(context, target, expected, "record")
+    let fields = types.FieldTypes(c.resolved, target)
+    let seen = map[bool]{}
+    var cursor = 1
+    while cursor < len(node.children) {
+        let child = node.children[cursor]
+        let item = nodes[child]
+        if has(seen, item.text) { state.Report(c, module, child, "Duplicate initializer: " + item.text) }
+        seen[item.text] = true
+        var formal = -1
+        for field in fields { if field.name == item.text { formal = field.typeId; break } }
+        if formal < 0 { state.Report(c, module, child, "Unknown initializer: " + item.text) }
+        var actual = -1
+        if len(item.children) == 0 {
+            let symbol = state.Reference(c, module, child)
+            if symbol >= 0 {
+                actual = c.resolved.bound.symbols[symbol].typeId
+                if IsType(c, module, child) { state.Report(c, module, child, "Type name cannot be used as an initializer"); actual = -1 }
+            }
+            state.Save(c, module, child, actual)
+        } else { actual = Expr(c, module, item.children[0], types.Substitute(c.resolved, formal, parameters, context.arguments)) }
+        inference.Constrain(context, formal, actual, "field." + item.text)
+        cursor += 1
+    }
+    if typ.name != "Error" || typ.module != -1 {
+        for field in fields { if !has(seen, field.name) { state.Report(c, module, index, "Missing initializer: " + field.name) } }
+    }
+    let completed = inference.Complete(context, target)
+    for conflict in completed.conflicts { state.Report(c, module, index, conflict.message + " at " + conflict.path) }
+    return completed.typeId
+}
+fn Statement(c: state.State, module: int, index: int, frame: Frame) -> bool {
+    let nodes = c.resolved.bound.project.modules[module].syntax.nodes
+    let node = nodes[index]
+    if node.kind == "block" {
+        var returns = false
+        for child in node.children { let childReturns = Statement(c, module, child, frame); returns = returns || childReturns }
+        return returns
+    }
+    if node.kind == "let" || node.kind == "var" {
+        let symbol = state.Declared(c, module, index)
+        var expected = -1
+        if symbol >= 0 { expected = c.resolved.bound.symbols[symbol].typeId }
+        let value = Expr(c, module, node.children[len(node.children) - 1], expected)
+        if value == state.Scalar(c, "unit") { state.Report(c, module, index, "Variable initializer requires a value") }
+        state.Match(c, module, index, expected, value)
+        if symbol >= 0 && expected < 0 { c.resolved.bound.symbols[symbol].typeId = value }
+        return false
+    }
+    if node.kind == "return" || node.kind == "expression_body" {
+        var actual = state.Scalar(c, "unit")
+        if len(node.children) > 0 { actual = Expr(c, module, node.children[0], frame.result) }
+        if frame.result < 0 { frame.result = actual } else { state.Match(c, module, index, frame.result, actual) }
+        return true
+    }
+    if node.kind == "expression_stmt" {
+        Expr(c, module, node.children[0], -1)
+        let expression = nodes[node.children[0]]
+        if expression.kind == "call" {
+            let symbol = state.Reference(c, module, expression.children[0])
+            if symbol >= 0 && c.resolved.bound.symbols[symbol].kind == "builtin" && c.resolved.bound.symbols[symbol].name == "fail" { return true }
+        }
+        return false
+    }
+    if node.kind == "assign" || node.kind == "update" {
+        let left = nodes[node.children[0]]
+        if left.kind != "name" && left.kind != "field" && left.kind != "index" { state.Report(c, module, node.children[0], "Invalid assignment target") }
+        let target = Expr(c, module, node.children[0], -1)
+        if left.kind == "index" {
+            let container = Expr(c, module, left.children[0], -1)
+            if container == state.Scalar(c, "string") { state.Report(c, module, node.children[0], "Strings are immutable") }
+        }
+        if node.kind == "assign" {
+            let value = Expr(c, module, node.children[1], target)
+            if node.text == "=" { state.Match(c, module, index, target, value) }
+            else { rules.Binary(c, module, index, slice(node.text, 0, len(node.text) - 1), target, value) }
+        }
+        if node.kind == "update" && target >= 0 && target != state.Scalar(c, "int") { state.Report(c, module, index, "Update requires an integer") }
+        return false
+    }
+    if node.kind == "if" || node.kind == "while" {
+        state.Match(c, module, index, state.Scalar(c, "bool"), Expr(c, module, node.children[0], state.Scalar(c, "bool")))
+        if node.kind == "while" { frame.loopDepth += 1 }
+        let first = Statement(c, module, node.children[1], frame)
+        if node.kind == "while" { frame.loopDepth -= 1; return false }
+        if len(node.children) == 3 { let second = Statement(c, module, node.children[2], frame); return first && second }
+        return false
+    }
+    if node.kind == "for" {
+        let count = len(node.children)
+        let source = Expr(c, module, node.children[count - 2], -1)
+        var keyType = state.Scalar(c, "int")
+        var valueType = -1
+        if source >= 0 {
+            let typ = c.resolved.types[source]
+            if typ.kind == "array" { valueType = typ.arguments[0] }
+            else if typ.kind == "map" { keyType = state.Scalar(c, "string"); valueType = typ.arguments[0] }
+            else if typ.name == "string" { valueType = state.Scalar(c, "string") }
+            else { state.Report(c, module, index, "Value is not iterable") }
+        }
+        var cursor = 0
+        while cursor < count - 2 {
+            let symbol = state.Declared(c, module, node.children[cursor])
+            var typ = valueType
+            if count == 4 && cursor == 0 { typ = keyType }
+            if count == 3 && source >= 0 && c.resolved.types[source].kind == "map" { typ = keyType }
+            if symbol >= 0 { c.resolved.bound.symbols[symbol].typeId = typ }
+            cursor += 1
+        }
+        frame.loopDepth += 1
+        Statement(c, module, node.children[count - 1], frame)
+        frame.loopDepth -= 1
+        return false
+    }
+    if node.kind == "try" {
+        let first = Statement(c, module, node.children[0], frame)
+        let symbol = state.Declared(c, module, index)
+        if symbol >= 0 { c.resolved.bound.symbols[symbol].typeId = types.ErrorType(c.resolved) }
+        let second = Statement(c, module, node.children[1], frame)
+        return first && second
+    }
+    if node.kind == "match_stmt" { return MatchStatement(c, module, index, frame) }
+    if node.kind == "break" || node.kind == "continue" {
+        if frame.loopDepth == 0 { state.Report(c, module, index, "Loop control outside a loop") }
+        return false
+    }
+    if node.kind == "fn" { Function(c, module, index, -1); return false }
+    state.Report(c, module, index, "Unsupported statement checking: " + node.kind)
+    return false
+}
+fn Function(c: state.State, module: int, index: int, expected: int) -> int {
+    let nodes = c.resolved.bound.project.modules[module].syntax.nodes
+    let node = nodes[index]
+    let parameters: [int] = []
+    let frame = Frame{result: -1, loopDepth: 0}
+    var hint: [int] = []
+    if expected >= 0 && c.resolved.types[expected].kind == "function" { hint = c.resolved.types[expected].arguments }
+    if node.kind == "fn" { frame.result = state.Scalar(c, "unit") }
+    for child in node.children {
+        let item = nodes[child]
+        if item.kind == "parameter" {
+            let symbol = state.Declared(c, module, child)
+            var typ = -1
+            if symbol >= 0 { typ = c.resolved.bound.symbols[symbol].typeId }
+            if typ < 0 && len(parameters) + 1 < len(hint) { typ = hint[len(parameters)] }
+            if typ < 0 { state.Report(c, module, child, "Cannot infer parameter type") }
+            if symbol >= 0 { c.resolved.bound.symbols[symbol].typeId = typ }
+            append(parameters, typ)
+        }
+        if item.kind == "result" { frame.result = state.Annotation(c, module, item.children[0]) }
+    }
+    if frame.result < 0 && len(hint) == len(parameters) + 1 { frame.result = hint[len(parameters)] }
+    var returns = false
+    for child in node.children {
+        if nodes[child].kind == "block" || nodes[child].kind == "expression_body" { returns = Statement(c, module, child, frame) }
+    }
+    if frame.result < 0 { frame.result = state.Scalar(c, "unit") }
+    if frame.result != state.Scalar(c, "unit") && !returns { state.Report(c, module, index, "Not every path returns a value") }
+    append(parameters, frame.result)
+    return types.Structural(c.resolved, "function", parameters)
+}
+export fn Check(resolved: model.ResolvedTypes) -> model.ExpressionCheck {
+    return CheckModules(resolved, map[bool]{}, true)
+}
+export fn CheckModules(resolved: model.ResolvedTypes, selected: map[bool], all: bool) -> model.ExpressionCheck {
+    let c = state.State{calls: [], resolved, references: map[int]{}, declarations: map[int]{}, annotations: map[int]{}, signatures: map[int]{}, expressions: [], diagnostics: []}
+    if len(resolved.diagnostics) > 0 { return model.ExpressionCheck{resolved, calls: [], expressions: [], diagnostics: resolved.diagnostics} }
+    for reference in resolved.bound.references { c.references[state.Key(reference.module, reference.node)] = reference.symbol }
+    for index, symbol in resolved.bound.symbols { if symbol.module >= 0 { c.declarations[state.Key(symbol.module, symbol.node)] = index } }
+    for annotation in resolved.annotations { c.annotations[state.Key(annotation.module, annotation.node)] = annotation.typeId }
+    for index, signature in resolved.signatures { c.signatures[state.Key(signature.module, signature.node)] = index }
+    for module, item in resolved.bound.project.modules {
+        if !all && !has(selected, item.path) { continue }
+        for declaration in item.declarations { if declaration.kind == "fn" { Function(c, module, declaration.node, -1) } }
+    }
+    return model.ExpressionCheck{resolved, calls: c.calls, expressions: c.expressions, diagnostics: c.diagnostics}
+}

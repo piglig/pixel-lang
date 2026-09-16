@@ -1,0 +1,24 @@
+import "models.pxl" as models
+import "std/stats.pxl" as stats
+import "std/collections.pxl" as collections
+
+export fn Summarize(sales: [models.Sale], problems: [models.Problem], filtered: int) -> models.Report {
+    let categories = map[[int]]{}
+    for sale in sales {
+        if !has(categories, sale.category) { categories[sale.category] = []: [int] }
+        append(categories[sale.category], sale.amount)
+    }
+    let groups: [models.Group] = []
+    for category in categories {
+        let summary = stats.Summary(categories[category])
+        append(groups, models.Group{
+            category: category,
+            count: summary["count"], total: summary["total"],
+            min: summary["min"], max: summary["max"], mean: float64(summary["total"]) / float64(summary["count"]),
+        })
+    }
+    return models.Report{
+        accepted: len(sales), rejected: len(problems), filtered: filtered,
+        groups: collections.Sort(groups, fn(a, b) = a.total > b.total || (a.total == b.total && a.category < b.category)), errors: problems,
+    }
+}

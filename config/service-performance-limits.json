@@ -1,0 +1,14 @@
+{
+  "profile": "preview-small-project-v1",
+  "scope": "Fixed two-file installed-service workload; coarse regression ceilings, not UI SLOs or full-compiler PNG budgets",
+  "baseline": "docs/studio-preview-progress.json nativeRecoveryIncrement.developmentPerformance",
+  "phases": {
+    "cold-check": {"seconds": 12, "steps": 4000000},
+    "warm-check": {"seconds": 0.5, "steps": 50000},
+    "body-edit": {"seconds": 0.75, "steps": 120000},
+    "build": {"seconds": 1, "steps": 150000},
+    "png-export": {"seconds": 2, "steps": 600000},
+    "png-recover": {"seconds": 3, "steps": 1000000}
+  },
+  "peakRssBytes": 536870912
+}

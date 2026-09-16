@@ -1,0 +1,4 @@
+export record Config { files: [string], output: string, since: Option[string], until: Option[string], minimum_level: Option[string] }
+export record Event { timestamp: string, level: string, service: string, duration_ms: int, message: string }
+export record Problem { source: string, line: int, message: string, code: string, path: string }
+export record Report { count: int, errors: int, excluded: int, duration_total_ms: int, duration_mean_ms: float64, duration_max_ms: int, services: map[int], levels: map[int], minutes: map[int], problems: [Problem] }

@@ -1,0 +1,13 @@
+// Integer statistics. Mean truncates toward zero; no implicit floating point.
+export fn Summary(values: [int]) -> map[int] {
+    if len(values) == 0 { fail("Statistics require at least one value") }
+    var total = 0
+    var minimum = values[0]
+    var maximum = values[0]
+    for value in values {
+        total += value
+        if value < minimum { minimum = value }
+        if value > maximum { maximum = value }
+    }
+    return map[int]{"count": len(values), "total": total, "min": minimum, "max": maximum, "mean": total / len(values)}
+}

@@ -1,0 +1,88 @@
+// Copy the outer array; referenced elements retain their identity.
+export fn Copy[T](values: [T]) -> [T] = slice(values, 0, len(values))
+
+// Repeated mutable values share the same object, as ordinary assignment does.
+export fn Repeat[T](value: T, count: int) -> [T] {
+    if count < 0 { fail("repeat count must be nonnegative") }
+    let result: [T] = []
+    var index = 0
+    while index < count {
+        append(result, value)
+        index += 1
+    }
+    return result
+}
+
+// Visit the entry snapshot in order; return a fresh outer array.
+export fn Map[T, U](values: [T], transform: fn(T) -> U) -> [U] {
+    let result: [U] = []
+    for value in values { append(result, transform(value)) }
+    return result
+}
+
+export fn Filter[T](values: [T], predicate: fn(T) -> bool) -> [T] {
+    let result: [T] = []
+    for value in values {
+        if predicate(value) { append(result, value) }
+    }
+    return result
+}
+
+export fn Fold[T, A](values: [T], initial: A, combine: fn(A, T) -> A) -> A {
+    var result = initial
+    for value in values { result = combine(result, value) }
+    return result
+}
+
+// Group order follows first occurrence; each group's items preserve input order.
+export fn GroupBy[T](values: [T], keyOf: fn(T) -> string) -> map[[T]] {
+    let result = map[[T]]{}
+    for value in values {
+        let key = keyOf(value)
+        if !has(result, key) { result[key] = [] }
+        append(result[key], value)
+    }
+    return result
+}
+
+// Stable bottom-up merge sort. The comparator defines a strict ordering.
+// Copy before invoking callbacks; never reorder the caller's outer array.
+export fn Sort[T](values: [T], less: fn(T, T) -> bool) -> [T] {
+    var source = Copy[T](values)
+    var target = Copy[T](values)
+    let count = len(source)
+    var width = 1
+    while width < count {
+        var start = 0
+        while start < count {
+            var middle = start + width
+            if middle > count { middle = count }
+            var end = middle + width
+            if end > count { end = count }
+            var left = start
+            var right = middle
+            var output = start
+            while output < end {
+                if left >= middle {
+                    target[output] = source[right]
+                    right += 1
+                } else {
+                    if right < end && less(source[right], source[left]) {
+                        target[output] = source[right]
+                        right += 1
+                    } else {
+                        target[output] = source[left]
+                        left += 1
+                    }
+                }
+                output += 1
+            }
+            start = end
+        }
+        let temporary = source
+        source = target
+        target = temporary
+        width *= 2
+    }
+    return source
+}

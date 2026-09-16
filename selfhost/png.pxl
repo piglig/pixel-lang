@@ -1,0 +1,176 @@
+// PNG container encoding. PixelLang owns scanlines, chunks and checksums;
+// the runtime supplies only general-purpose zlib and CRC primitives.
+export fn U32(output: [int], value: int) {
+    if value < 0 || value > 4294967295 { fail("PNG unsigned word out of range") }
+    append(output, value / 16777216)
+    append(output, value / 65536 % 256)
+    append(output, value / 256 % 256)
+    append(output, value % 256)
+}
+fn Copy(output: [int], bytes: [int]) {
+    extend(output, bytes)
+}
+fn Chunk(output: [int], kind: string, data: [int]) {
+    U32(output, len(data))
+    let checked = utf8Encode(kind)
+    Copy(checked, data)
+    Copy(output, checked)
+    U32(output, crc32(checked))
+}
+fn Compress(bytes: [int]) -> [int] {
+    try { return zlibCompress(bytes) }
+    catch error {
+        if error.code == "bytes.range" { fail("PNG byte out of range") }
+        fail(error.message)
+    }
+    return []
+}
+export fn Encode(width: int, height: int, rgba: [int]) -> [int] {
+    if width < 1 || height < 1 || width > 32000000 || height > 32000000 {
+        fail("PNG dimensions out of range")
+    }
+    if width * height > 32000000 { fail("PNG exceeds physical pixel limit") }
+    if len(rgba) != width * height * 4 { fail("PNG RGBA length mismatch") }
+    let scanlines: [int] = []
+    var row = 0
+    while row < height {
+        append(scanlines, 0)
+        // zlibCompress validates the byte range for the complete buffer.
+        extend(scanlines, slice(rgba, row * width * 4, (row + 1) * width * 4))
+        row += 1
+    }
+    let output = [137, 80, 78, 71, 13, 10, 26, 10]
+    let header: [int] = []
+    U32(header, width)
+    U32(header, height)
+    Copy(header, [8, 6, 0, 0, 0])
+    Chunk(output, "IHDR", header)
+    Chunk(output, "IDAT", Compress(scanlines))
+    Chunk(output, "IEND", ([]: [int]))
+    return output
+}
+
+export record Image { width: int, height: int, rgba: [int] }
+fn ReadWord(bytes: [int], start: int) -> int {
+    if start < 0 || start + 4 > len(bytes) { fail("Truncated PNG word") }
+    return bytes[start] * 16777216 + bytes[start + 1] * 65536 + bytes[start + 2] * 256 + bytes[start + 3]
+}
+fn Slice(bytes: [int], start: int, end: int) -> [int] {
+    return slice(bytes, start, end)
+}
+fn Distance(value: int) -> int {
+    if value < 0 { return -value }
+    return value
+}
+fn Paeth(left: int, above: int, corner: int) -> int {
+    let prediction = left + above - corner
+    let a = Distance(prediction - left)
+    let b = Distance(prediction - above)
+    let c = Distance(prediction - corner)
+    if a <= b && a <= c { return left }
+    if b <= c { return above }
+    return corner
+}
+export fn Decode(bytes: [int], outputLimit: int) -> Image {
+    if outputLimit < 0 { fail("PNG output limit out of range") }
+    for byte in bytes { if byte < 0 || byte > 255 { fail("PNG byte out of range") } }
+    let signature = [137, 80, 78, 71, 13, 10, 26, 10]
+    if len(bytes) < 8 { fail("Truncated PNG signature") }
+    var index = 0
+    while index < 8 {
+        if bytes[index] != signature[index] { fail("Invalid PNG signature") }
+        index += 1
+    }
+    var offset = 8
+    var width = 0
+    var height = 0
+    var channels = 0
+    var hasData = false
+    var hasPalette = false
+    var dataClosed = false
+    var ended = false
+    let compressed: [int] = []
+    while offset < len(bytes) {
+        if len(bytes) - offset < 12 { fail("Truncated PNG chunk") }
+        let size = ReadWord(bytes, offset)
+        if size > 2147483647 || size > len(bytes) - offset - 12 { fail("Invalid PNG chunk length") }
+        let end = offset + 8 + size
+        let kindBytes = Slice(bytes, offset + 4, offset + 8)
+        for byte in kindBytes {
+            if !((byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122)) { fail("Invalid PNG chunk type") }
+        }
+        if kindBytes[2] >= 97 { fail("Invalid PNG reserved chunk bit") }
+        let kind = utf8Decode(kindBytes)
+        if crc32(Slice(bytes, offset + 4, end)) != ReadWord(bytes, end) { fail("PNG CRC mismatch") }
+        if offset == 8 && kind != "IHDR" { fail("PNG must start with IHDR") }
+        if kind == "IHDR" {
+            if offset != 8 || size != 13 { fail("Invalid PNG IHDR") }
+            width = ReadWord(bytes, offset + 8)
+            height = ReadWord(bytes, offset + 12)
+            if width < 1 || height < 1 || width > 32000000 || height > 32000000 { fail("PNG dimensions out of range") }
+            if width * height > 32000000 || width * height * 4 > outputLimit { fail("PNG output limit exceeded") }
+            let color = bytes[offset + 17]
+            if bytes[offset + 16] != 8 || (color != 2 && color != 6) { fail("Unsupported PNG color format") }
+            channels = 3
+            if color == 6 { channels = 4 }
+            if bytes[offset + 18] != 0 || bytes[offset + 19] != 0 || bytes[offset + 20] != 0 { fail("Unsupported PNG compression, filter or interlace method") }
+        } else if kind == "IDAT" {
+            if dataClosed { fail("Nonconsecutive PNG IDAT chunks") }
+            hasData = true
+            Copy(compressed, Slice(bytes, offset + 8, end))
+        } else if kind == "IEND" {
+            if size != 0 || !hasData || end + 4 != len(bytes) { fail("Invalid PNG IEND") }
+            ended = true
+        } else {
+            if hasData { dataClosed = true }
+            if kind == "PLTE" {
+                if hasPalette || hasData || size == 0 || size > 768 || size % 3 != 0 { fail("Invalid PNG palette") }
+                hasPalette = true
+            } else if kind == "tRNS" { fail("Unsupported PNG transparency chunk") }
+            else if kindBytes[0] < 97 { fail("Unknown critical PNG chunk") }
+        }
+        offset = end + 4
+    }
+    if !ended { fail("Missing PNG IEND") }
+    let stride = width * channels
+    let expected = (stride + 1) * height
+    let scanlines = zlibDecompress(compressed, expected)
+    if len(scanlines) != expected { fail("PNG scanline length mismatch") }
+    let raw: [int] = []
+    let rgba: [int] = []
+    var row = 0
+    while row < height {
+        let filter = scanlines[row * (stride + 1)]
+        if filter > 4 { fail("Unknown PNG scanline filter") }
+        if filter == 0 {
+            extend(raw, slice(scanlines, row * (stride + 1) + 1, (row + 1) * (stride + 1)))
+            row += 1
+            continue
+        }
+        var column = 0
+        while column < stride {
+            let position = row * stride + column
+            var left = 0
+            var above = 0
+            var corner = 0
+            if column >= channels { left = raw[position - channels] }
+            if row > 0 { above = raw[position - stride] }
+            if row > 0 && column >= channels { corner = raw[position - stride - channels] }
+            var predictor = 0
+            if filter == 1 { predictor = left }
+            else if filter == 2 { predictor = above }
+            else if filter == 3 { predictor = (left + above) / 2 }
+            else if filter == 4 { predictor = Paeth(left, above, corner) }
+            let value = (scanlines[row * (stride + 1) + column + 1] + predictor) % 256
+            append(raw, value)
+            column += 1
+        }
+        row += 1
+    }
+    if channels == 4 { return Image{width, height, rgba: raw} }
+    for index, value in raw {
+        append(rgba, value)
+        if index % 3 == 2 { append(rgba, 255) }
+    }
+    return Image{width, height, rgba}
+}

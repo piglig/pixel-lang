@@ -1,0 +1,82 @@
+// Region order is semantic statement order; parent IDs refer to earlier regions.
+export record Region { colors: [[int]], parent: int }
+export record Pixel { position: [int], rgba: [int] }
+export record Link { kind: string, from: [int], to: [int] }
+export record Spatial { links: [Link] }
+export record Source { magic: string, versions: map[string], encoding: string, dimensions: [int], pixels: [Pixel], spatial: Spatial, metadata: map[json] }
+export fn Build(regions: [Region], spacing: int, reverse: bool) -> Source {
+    if spacing < 1 || spacing > 256 { fail("Spatial spacing must be from 1 to 256") }
+    if len(regions) > 500000 { fail("Spatial canvas exceeds one million cells") }
+    let depths: [int] = []
+    var width = 1
+    var height = 1
+    for index, region in regions {
+        if len(region.colors) == 0 { fail("A semantic region must contain at least one pixel") }
+        if region.parent < -1 || region.parent >= index { fail("Region parent must be absent or an earlier region") }
+        var depth = 0
+        if region.parent >= 0 { depth = depths[region.parent] + 1 }
+        append(depths, depth)
+        let right = depth * 2 + (len(region.colors) - 1) * spacing + 1
+        if right > width { width = right }
+        height = index * 2 + 1
+        if width > 1000000 / height { fail("Spatial canvas exceeds one million cells") }
+    }
+    let source = Source{magic: "PIXELLANG", versions: map[string]{"language": "0.8", "encoding": "0.8", "format": "0.8"}, encoding: "rgba8", dimensions: [width, height], pixels: [], spatial: Spatial{links: []}, metadata: map[json]{}}
+    let anchors: [[int]] = []
+    for index, region in regions {
+        let positions: [[int]] = []
+        for ordinal, color in region.colors {
+            if len(color) != 4 { fail("Semantic RGBA must contain four bytes") }
+            for channel in color { if channel < 0 || channel > 255 { fail("RGBA channels must be bytes") } }
+            if color[3] != 255 { fail("Semantic region pixels must be opaque") }
+            var column = ordinal
+            if reverse { column = len(region.colors) - 1 - ordinal }
+            let position = [depths[index] * 2 + column * spacing, index * 2]
+            append(source.pixels, Pixel{position, rgba: slice(color, 0, 4)})
+            if ordinal > 0 { append(source.spatial.links, Link{kind: "next", from: positions[ordinal - 1], to: position}) }
+            append(positions, position)
+        }
+        append(anchors, positions[0])
+        if region.parent >= 0 { append(source.spatial.links, Link{kind: "child", from: anchors[region.parent], to: positions[0]}) }
+    }
+    return source
+}
+
+// Each explicit region is one token chain; row-major marker order preserves
+// statement order, while child links preserve scope independently of indentation.
+export fn Compact(regions: [Region]) -> Source {
+    if len(regions) == 0 { return Build([], 1, false) }
+    var area = 0
+    var width = 1
+    for index, region in regions {
+        if len(region.colors) == 0 || region.parent < -1 || region.parent >= index { fail("Invalid compact region") }
+        area += len(region.colors) + 2
+        if area > 1000000 { fail("Compact source exceeds logical cell limit") }
+        if len(region.colors) > width { width = len(region.colors) }
+    }
+    var target = 1
+    while target * target < area { target += 1 }
+    if target > width { width = target }
+    let source = Source{magic: "PIXELLANG", versions: map[string]{"language": "0.8", "encoding": "0.8", "format": "0.8"}, encoding: "rgba8", dimensions: [width, 1], pixels: [], spatial: Spatial{links: []}, metadata: map[json]{}}
+    let anchors: [[int]] = []
+    var x = 0
+    var y = 0
+    for region in regions {
+        if x > 0 && len(region.colors) > width - x { x = 0; y += 1 }
+        if width > 1000000 / (y + 1) { fail("Compact source exceeds logical cell limit") }
+        let anchor = [x, y]
+        append(source.spatial.links, Link{kind: "region", from: anchor, to: anchor})
+        for index, color in region.colors {
+            if len(color) != 4 { fail("Semantic RGBA requires four bytes") }
+            for channel in color { if channel < 0 || channel > 255 { fail("RGBA channels must be bytes") } }
+            if color[3] != 255 { fail("Semantic region pixels must be opaque") }
+            let position = [x + index, y]
+            append(source.pixels, Pixel{position, rgba: slice(color, 0, 4)})
+        }
+        if region.parent >= 0 { append(source.spatial.links, Link{kind: "child", from: anchors[region.parent], to: anchor}) }
+        append(anchors, anchor)
+        x += len(region.colors) + 2
+    }
+    source.dimensions[1] = y + 1
+    return source
+}

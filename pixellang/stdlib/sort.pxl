@@ -1,0 +1,34 @@
+// Stable bottom-up merge sort. Returns a array; preserves the input.
+export fn Ints(values: [int]) -> [int] {
+    var result = slice(values, 0, len(values))
+    var buffer = slice(values, 0, len(values))
+    var width = 1
+    while width < len(result) {
+        var start = 0
+        while start < len(result) {
+            var middle = start + width
+            if middle > len(result) { middle = len(result) }
+            var end = middle + width
+            if end > len(result) { end = len(result) }
+            var left = start
+            var right = middle
+            var output = start
+            while output < end {
+                if left < middle && (right >= end || result[left] <= result[right]) {
+                    buffer[output] = result[left]
+                    left += 1
+                } else {
+                    buffer[output] = result[right]
+                    right += 1
+                }
+                output += 1
+            }
+            start = end
+        }
+        let swap = result
+        result = buffer
+        buffer = swap
+        width *= 2
+    }
+    return result
+}

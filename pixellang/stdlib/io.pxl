@@ -1,0 +1,3 @@
+// Paths stay inside explicit host-granted roots. Replay never repeats disk writes.
+export fn Read(path: string) -> string = readText(path)
+export fn Write(path: string, text: string) -> bool = writeText(path, text)

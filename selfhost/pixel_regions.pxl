@@ -1,0 +1,179 @@
+import "pixel_decode.pxl" as decoder
+import "spatial_layout.pxl" as layout
+
+export record Region { id: int, tokens: [decoder.Token], indent: int, parent: int, explicitParent: bool }
+export record Output { regions: [Region], diagnostics: [decoder.Diagnostic] }
+fn Key(position: [int]) -> string = string(position[0]) + ":" + string(position[1])
+fn Named(token: decoder.Token, name: string) -> bool = jsonKind(token.value) == "string" && jsonAsString(token.value) == name
+fn Before(a: decoder.Token, b: decoder.Token) -> bool {
+    return a.position[1] < b.position[1] || (a.position[1] == b.position[1] && a.position[0] <= b.position[0])
+}
+fn Order(tokens: [decoder.Token]) -> [decoder.Token] {
+    var sorted = true
+    var index = 1
+    while index < len(tokens) { if !Before(tokens[index - 1], tokens[index]) { sorted = false; break }; index += 1 }
+    if sorted { return tokens }
+    let middle = len(tokens) / 2
+    let left = Order(slice(tokens, 0, middle))
+    let right = Order(slice(tokens, middle, len(tokens)))
+    let result: [decoder.Token] = []
+    var a = 0
+    var b = 0
+    while a < len(left) || b < len(right) {
+        if b == len(right) || (a < len(left) && Before(left[a], right[b])) { append(result, left[a]); a += 1 }
+        else { append(result, right[b]); b += 1 }
+    }
+    return result
+}
+fn Report(output: Output, source: string, position: [int], message: string) {
+    append(output.diagnostics, decoder.Diagnostic{source, phase: "spatial", message, position: slice(position, 0, len(position))})
+    output.regions = []
+}
+export fn Analyze(decoded: decoder.Output, links: [layout.Link], source: string) -> Output {
+    let output = Output{regions: [], diagnostics: slice(decoded.diagnostics, 0, len(decoded.diagnostics))}
+    if len(output.diagnostics) > 0 { return output }
+    for link in links { if link.kind == "region" { return Explicit(decoded, links, source) } }
+    let tokens = Order(decoded.tokens)
+    let positions = map[int]{}
+    let regionAt = map[int]{}
+    for index, token in tokens {
+        let key = Key(token.position)
+        positions[key] = index
+        if len(output.regions) == 0 || output.regions[len(output.regions) - 1].tokens[0].position[1] != token.position[1] {
+            append(output.regions, Region{id: len(output.regions), tokens: [], indent: token.position[0], parent: -1, explicitParent: false})
+        }
+        let region = output.regions[len(output.regions) - 1]
+        append(region.tokens, token)
+        regionAt[key] = region.id
+    }
+    let next = map[int]{}
+    let incoming = map[bool]{}
+    let explicitRows = map[bool]{}
+    for link in links {
+        if link.kind != "next" && link.kind != "child" { Report(output, source, link.from, "Unknown connection kind"); return output }
+        if len(link.from) != 2 || len(link.to) != 2 { Report(output, source, link.from, "Connection requires two-dimensional endpoints"); return output }
+        let from = Key(link.from)
+        let to = Key(link.to)
+        if !has(positions, from) || !has(positions, to) { Report(output, source, link.from, "Connection endpoint is not a semantic pixel"); return output }
+        if link.kind == "next" {
+            if link.from[1] != link.to[1] || has(next, from) || has(incoming, to) {
+                Report(output, source, link.from, "Next links must form one unbranched chain within a region"); return output
+            }
+            next[from] = positions[to]; incoming[to] = true; explicitRows[string(regionAt[from])] = true
+        }
+    }
+    for region in output.regions {
+        if has(explicitRows, string(region.id)) {
+            var first = -1
+            for token in region.tokens {
+                if !has(incoming, Key(token.position)) {
+                    if first >= 0 { Report(output, source, token.position, "Next links contain a disconnected chain"); return output }
+                    first = positions[Key(token.position)]
+                }
+            }
+            if first < 0 { Report(output, source, region.tokens[0].position, "Next links contain a cycle"); return output }
+            let ordered: [decoder.Token] = []
+            let seen = map[bool]{}
+            var cursor = first
+            while cursor >= 0 {
+                let token = tokens[cursor]
+                let key = Key(token.position)
+                if has(seen, key) { Report(output, source, token.position, "Cyclic next connection"); return output }
+                seen[key] = true; append(ordered, token)
+                if has(next, key) { cursor = next[key] } else { cursor = -1 }
+            }
+            if len(ordered) != len(region.tokens) { Report(output, source, region.tokens[0].position, "Explicit next chain must cover every token"); return output }
+            region.tokens = ordered
+        } else {
+            var index = 1
+            while index < len(region.tokens) {
+                if region.tokens[index].position[0] - region.tokens[index - 1].position[0] > 3 {
+                    Report(output, source, region.tokens[index].position, "Disconnected row requires explicit next connections"); return output
+                }
+                index += 1
+            }
+        }
+    }
+    return Parents(output, links, regionAt, source, true)
+}
+fn Parents(output: Output, links: [layout.Link], regionAt: map[int], source: string, infer: bool) -> Output {
+    if infer {
+        let stack: [int] = []
+        for region in output.regions {
+            while len(stack) > 0 && output.regions[stack[len(stack) - 1]].indent >= region.indent { pop(stack) }
+            if len(stack) > 0 { region.parent = stack[len(stack) - 1] }
+            append(stack, region.id)
+        }
+    }
+    for link in links {
+        if link.kind != "child" { continue }
+        let parent = regionAt[Key(link.from)]
+        let child = regionAt[Key(link.to)]
+        let region = output.regions[child]
+        if parent >= child || region.explicitParent { Report(output, source, link.to, "Child must follow one unique parent region"); return output }
+        region.parent = parent; region.explicitParent = true
+    }
+    let openers = ["if", "else", "while", "fn", "lambda_body", "try", "catch", "for", "match", "case"]
+    for region in output.regions {
+        if region.parent < 0 { continue }
+        let parent = output.regions[region.parent]
+        var index = 0
+        while index + 1 < len(parent.tokens) && (Named(parent.tokens[index], "export") || Named(parent.tokens[index], "entry")) { index += 1 }
+        var valid = false
+        for opener in openers { if Named(parent.tokens[index], opener) { valid = true } }
+        if !valid { Report(output, source, region.tokens[0].position, "Nested region requires a condition, loop or function parent"); return output }
+    }
+    return output
+}
+
+fn Explicit(decoded: decoder.Output, links: [layout.Link], source: string) -> Output {
+    let output = Output{regions: [], diagnostics: []}
+    let tokens = Order(decoded.tokens)
+    let positions = map[int]{}
+    for index, token in tokens { positions[Key(token.position)] = index }
+    let heads = map[bool]{}
+    let next = map[int]{}
+    let incoming = map[bool]{}
+    let explicitRows = map[bool]{}
+    for link in links {
+        if len(link.from) != 2 || len(link.to) != 2 { Report(output, source, link.from, "Connection requires two-dimensional endpoints"); return output }
+        let from = Key(link.from)
+        let to = Key(link.to)
+        if !has(positions, from) || !has(positions, to) { Report(output, source, link.from, "Connection endpoint is not a semantic pixel"); return output }
+        if link.kind == "region" {
+            if from != to || has(heads, from) { Report(output, source, link.from, "Region marker must uniquely point to itself"); return output }
+            heads[from] = true
+        } else if link.kind == "next" {
+            if link.from[1] != link.to[1] || has(next, from) || has(incoming, to) { Report(output, source, link.from, "Invalid explicit region chain"); return output }
+            next[from] = positions[to]; incoming[to] = true
+            explicitRows[string(link.from[1])] = true
+        } else if link.kind != "child" { Report(output, source, link.from, "Unknown connection kind"); return output }
+    }
+    var index = 1
+    while index < len(tokens) {
+        let a = tokens[index - 1].position
+        let b = tokens[index].position
+        if a[1] == b[1] && !has(explicitRows, string(a[1])) && !has(heads, Key(b)) && b[0] - a[0] <= 3 {
+            next[Key(a)] = index; incoming[Key(b)] = true
+        }
+        index += 1
+    }
+    let regionAt = map[int]{}
+    for token in tokens {
+        let head = Key(token.position)
+        if !has(heads, head) { continue }
+        if has(incoming, head) { Report(output, source, token.position, "Region head cannot have an incoming next link"); return output }
+        let region = Region{id: len(output.regions), tokens: [], indent: token.position[0], parent: -1, explicitParent: false}
+        var cursor = positions[head]
+        while cursor >= 0 {
+            let item = tokens[cursor]
+            let key = Key(item.position)
+            if has(regionAt, key) { Report(output, source, item.position, "Cyclic or overlapping explicit regions"); return output }
+            regionAt[key] = region.id; append(region.tokens, item)
+            if has(next, key) { cursor = next[key] } else { cursor = -1 }
+        }
+        append(output.regions, region)
+    }
+    if len(regionAt) != len(tokens) { Report(output, source, [], "Explicit regions must cover every semantic pixel"); return output }
+    return Parents(output, links, regionAt, source, false)
+}

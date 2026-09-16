@@ -1,0 +1,3 @@
+export record Sample { name: string, category: string, value: float64 }
+export record Request { minimum: Option[float64], samples: [Sample] }
+export record Report { names: [string], mean: float64, categories: map[int] }

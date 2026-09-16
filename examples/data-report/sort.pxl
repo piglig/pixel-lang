@@ -1,0 +1,13 @@
+export fn InsertionSort(values: [int]) {
+    var i = 1
+    while i < len(values) {
+        let current = values[i]
+        var j = i - 1
+        while j >= 0 && values[j] > current {
+            values[j + 1] = values[j]
+            j = j - 1
+        }
+        values[j + 1] = current
+        i = i + 1
+    }
+}

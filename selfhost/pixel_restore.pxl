@@ -1,0 +1,67 @@
+import "model.pxl" as model
+import "pixel_decode.pxl" as decoder
+
+export record Output { syntax: model.Parsed, entries: [int], diagnostics: [decoder.Diagnostic] }
+record Context { source: string, raw: model.Parsed, nodes: [model.Node], tokens: [model.Token], bodies: map[int], used: map[bool], mapping: map[int], diagnostics: [decoder.Diagnostic] }
+fn Report(c: Context, index: int, message: string) {
+    if len(c.diagnostics) > 0 { return }
+    let node = c.raw.nodes[index]
+    var point: [int] = []
+    if node.start < len(c.raw.tokens) { let token = c.raw.tokens[node.start]; point = [token.column - 1, token.line - 1] }
+    append(c.diagnostics, decoder.Diagnostic{source: c.source, phase: "parse", message, position: point})
+}
+fn Copy(c: Context, index: int, depth: int, fallback: int) -> int {
+    if depth > 128 { Report(c, index, "AST nesting exceeds 128"); return -1 }
+    if len(c.diagnostics) > 0 { return -1 }
+    let node = c.raw.nodes[index]
+    var kind = node.kind
+    var text = node.text
+    var children = node.children
+    if kind == "lambda_body" { Report(c, index, "Lambda body must be a separate root region"); return -1 }
+    if kind == "lambda_ref" {
+        if !has(c.bodies, text) { Report(c, index, "Missing lambda body"); return -1 }
+        if has(c.used, text) { Report(c, index, "Reused or cyclic lambda body"); return -1 }
+        c.used[text] = true
+        children = c.raw.nodes[c.bodies[text]].children
+        kind = "lambda"; text = ""
+    }
+    var origin = fallback
+    if node.start < len(c.raw.tokens) && node.end > node.start { origin = node.start }
+    let token = c.raw.tokens[origin]
+    let points: [[int]] = []
+    var cursor = origin
+    while cursor < node.end && cursor < len(c.raw.tokens) && c.raw.tokens[cursor].line == token.line {
+        let item = c.raw.tokens[cursor]
+        append(points, [item.column - 1, item.line - 1]); cursor += 1
+    }
+    if len(points) == 0 { append(points, [token.column - 1, token.line - 1]) }
+    // Logical preorder intervals are separate from immutable physical origins.
+    let start = len(c.tokens)
+    append(c.tokens, model.Token{kind: "pixel", text: "", value: jsonStringify(jsonFrom(points)), start, end: start + 1, line: token.line, column: token.column})
+    let copied: [int] = []
+    for child in children { append(copied, Copy(c, child, depth + 1, origin)) }
+    let result = len(c.nodes)
+    append(c.nodes, model.Node{kind, text, children: copied, start, end: len(c.tokens)})
+    c.mapping[string(index)] = result
+    return result
+}
+export fn Build(syntax: model.Parsed, entries: [int], source: string) -> Output {
+    let c = Context{source, raw: syntax, nodes: [], tokens: [], bodies: map[int]{}, used: map[bool]{}, mapping: map[int]{}, diagnostics: []}
+    for root in syntax.roots {
+        let node = syntax.nodes[root]
+        if node.kind == "lambda_body" {
+            if has(c.bodies, node.text) { Report(c, root, "Duplicate lambda body") }
+            else { c.bodies[node.text] = root }
+        }
+    }
+    let roots: [int] = []
+    for root in syntax.roots {
+        if syntax.nodes[root].kind != "lambda_body" { append(roots, Copy(c, root, 0, 0)) }
+    }
+    for name, node in c.bodies { if !has(c.used, name) { Report(c, node, "Unreferenced lambda body") } }
+    var mapped: [int] = []
+    for entry in entries { if has(c.mapping, string(entry)) { append(mapped, c.mapping[string(entry)]) } }
+    let result = model.Parsed{tokens: c.tokens, nodes: c.nodes, roots, diagnostics: []}
+    if len(c.diagnostics) > 0 { result.roots = []; mapped = [] }
+    return Output{syntax: result, entries: mapped, diagnostics: c.diagnostics}
+}

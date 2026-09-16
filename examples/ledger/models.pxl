@@ -1,0 +1,12 @@
+export record Config {
+    source: string
+    output: string
+    categories: [string]
+    minimum: int
+    maximum: Option[int]
+}
+
+export record Sale { category: string, amount: int }
+export record Problem { row: int, message: string }
+export record Group { category: string, count: int, total: int, min: int, max: int, mean: float64 }
+export record Report { accepted: int, rejected: int, filtered: int, groups: [Group], errors: [Problem] }

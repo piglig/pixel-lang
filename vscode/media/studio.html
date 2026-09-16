@@ -1,0 +1,93 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src data:; style-src {{csp}}; script-src 'nonce-{{nonce}}';"
+    />
+    <link rel="stylesheet" href="{{css}}" />
+    <title>PixelLang Studio</title>
+  </head>
+  <body>
+    <header>
+      <strong>PixelLang <span>Studio</span></strong>
+      <div>
+        <button id="build">Build</button><button id="run">▶ Run</button
+        ><button id="pause">Pause</button><button id="cancel">Cancel</button><button id="step">Step →</button>
+      </div>
+    </header>
+    <section class="input">
+      <label for="input">Runtime input</label
+      ><textarea
+        id="input"
+        rows="2"
+        placeholder="input() reads this text"
+      ></textarea>
+    </section>
+    <nav>
+      <div>
+        <button id="time-view" aria-pressed="true">3D · Time</button
+        ><button id="image-view" aria-pressed="false">Program image</button>
+        <button id="spatial-view" aria-pressed="false">2D · Edit</button>
+      </div>
+      <button id="export">Export PNG ↗</button>
+    </nav>
+    <main>
+      <canvas
+        id="space"
+        aria-label="Three-dimensional program execution. Drag to orbit; scroll to zoom. Click a voxel to select its time."
+        tabindex="0"
+      ></canvas
+      ><img id="image" alt="Executable PixelLang program pixels" hidden />
+      <div id="empty">Build a program to explore its space and time.</div>
+      <div id="axes">X · source column　Y · source row　Z · logical time</div>
+    </main>
+    <section id="spatial-editor" hidden>
+      <div class="tools"><label for="spatial-module">Module</label><select id="spatial-module"></select><button id="spatial-refresh">Refresh</button></div>
+      <div id="spatial-error" role="alert"></div>
+      <div id="spatial-grid" aria-label="Semantic pixel regions"></div>
+      <label for="spatial-target">Selected semantics</label><select id="spatial-target"></select>
+      <pre id="spatial-explanation">Select a pixel or a source expression.</pre>
+      <div class="tools"><input id="spatial-value" aria-label="Replacement literal or operator" placeholder="Literal or operator" />
+        <button id="spatial-literal">Set literal</button><button id="spatial-operator">Set operator</button>
+        <button id="spatial-up">Move ↑</button><button id="spatial-down">Move ↓</button>
+      </div>
+      <p>Changes are type checked before applying. Use VS Code Undo to revert.</p>
+    </section>
+    <section class="timeline">
+      <button id="back" title="Previous time">←</button
+      ><input
+        id="time"
+        aria-label="Logical time Z"
+        type="range"
+        min="0"
+        max="0"
+        value="0"
+      /><button id="forward" title="Next time">→</button
+      ><output id="time-label">Z 0 / 0</output
+      ><button id="play">▷ Replay</button>
+    </section>
+    <div class="tools">
+      <span id="status">Ready</span><button id="reveal">Reveal source</button
+      ><button id="record">Save timeline</button>
+    </div>
+    <div id="error" role="alert" hidden></div>
+    <section class="inspection">
+      <div>
+        <h3>Output</h3>
+        <pre id="output">Run to see output.</pre>
+      </div>
+      <details>
+        <summary>State at selected time</summary>
+        <pre id="state"></pre>
+      </details>
+      <details id="ir-panel">
+        <summary>Compiler · IR</summary>
+        <pre id="ir"></pre>
+      </details>
+    </section>
+    <script nonce="{{nonce}}" src="{{script}}"></script>
+  </body>
+</html>

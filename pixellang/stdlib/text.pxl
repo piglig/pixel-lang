@@ -1,0 +1,3 @@
+// LF, CRLF and CR delimit physical lines. Preserve empty and trailing lines.
+// No whitespace trimming: callers decide which empty/blank lines to ignore.
+export fn Lines(value: string) -> [string] = split(replace(replace(value, "\r\n", "\n"), "\r", "\n"), "\n")

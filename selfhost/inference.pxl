@@ -1,0 +1,76 @@
+import "model.pxl" as model
+import "types.pxl" as types
+
+export record Conflict { path: string, message: string, formal: int, actual: int }
+export record Context { resolved: model.ResolvedTypes, parameters: [int], arguments: [int], conflicts: [Conflict] }
+export record Result { arguments: [int], typeId: int, conflicts: [Conflict] }
+export fn Begin(resolved: model.ResolvedTypes, parameters: [int]) -> Context {
+    let arguments: [int] = []
+    for parameter in parameters { append(arguments, -1) }
+    return Context{resolved, parameters, arguments, conflicts: []}
+}
+fn Known(context: Context, typeId: int) -> bool {
+    if typeId < 0 { return false }
+    for argument in context.resolved.types[typeId].arguments { if !Known(context, argument) { return false } }
+    return true
+}
+fn Reject(context: Context, formal: int, actual: int, path: string, message: string) {
+    append(context.conflicts, Conflict{path, message, formal, actual})
+}
+export fn Constrain(context: Context, formal: int, actual: int, path: string) {
+    if formal < 0 || actual < 0 { return }
+    for index, parameter in context.parameters {
+        if formal == parameter {
+            if !Known(context, actual) { return }
+            if context.arguments[index] < 0 { context.arguments[index] = actual }
+            else if context.arguments[index] != actual { Reject(context, context.arguments[index], actual, path, "Conflicting type parameter constraints") }
+            return
+        }
+    }
+    if formal == actual { return }
+    let expected = context.resolved.types[formal]
+    let received = context.resolved.types[actual]
+    if expected.kind != received.kind || expected.name != received.name || expected.module != received.module || expected.declaration != received.declaration {
+        Reject(context, formal, actual, path, "Type shapes do not match")
+        return
+    }
+    if len(expected.arguments) != len(received.arguments) {
+        Reject(context, formal, actual, path, "Type arities do not match")
+        return
+    }
+    for index, argument in expected.arguments {
+        Constrain(context, argument, received.arguments[index], path + "." + string(index))
+    }
+}
+export fn Preview(context: Context, typeId: int) -> int {
+    let arguments: [int] = []
+    for index, parameter in context.parameters {
+        var actual = context.arguments[index]
+        if actual < 0 { actual = parameter }
+        append(arguments, actual)
+    }
+    return types.Substitute(context.resolved, typeId, context.parameters, arguments)
+}
+export fn Complete(context: Context, typeId: int) -> Result {
+    let conflicts = slice(context.conflicts, 0, len(context.conflicts))
+    for index, argument in context.arguments {
+        if argument < 0 { append(conflicts, Conflict{path: "type_argument." + string(index), message: "Cannot infer type parameter", formal: context.parameters[index], actual: -1}) }
+    }
+    if len(conflicts) > 0 { return Result{arguments: slice(context.arguments, 0, len(context.arguments)), typeId: -1, conflicts} }
+    return Result{arguments: slice(context.arguments, 0, len(context.arguments)), typeId: Preview(context, typeId), conflicts}
+}
+export fn Call(resolved: model.ResolvedTypes, signature: model.FunctionSignature, arguments: [int], expected: int) -> Result {
+    let context = Begin(resolved, signature.parameters)
+    if signature.typeId < 0 {
+        Reject(context, -1, -1, "callee", "Callee signature is unresolved")
+        return Complete(context, -1)
+    }
+    let function = resolved.types[signature.typeId]
+    if function.kind != "function" || len(function.arguments) != len(arguments) + 1 {
+        Reject(context, signature.typeId, -1, "arguments", "Call argument count mismatch")
+        return Complete(context, signature.typeId)
+    }
+    for index, argument in arguments { Constrain(context, function.arguments[index], argument, "argument." + string(index)) }
+    Constrain(context, function.arguments[len(arguments)], expected, "result")
+    return Complete(context, signature.typeId)
+}

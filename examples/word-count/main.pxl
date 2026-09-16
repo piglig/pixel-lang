@@ -1,0 +1,31 @@
+fn main() {
+    var text = trim(input())
+    if len(text) == 0 {
+        text = "space is code && code is space"
+    }
+    let words = split(text, " ")
+    let unique: [string] = []
+    let counts: [int] = []
+    var i = 0
+    while i < len(words) {
+        let word = trim(words[i])
+        if len(word) > 0 {
+            var j = 0
+            while j < len(unique) && unique[j] != word {
+                j = j + 1
+            }
+            if j == len(unique) {
+                append(unique, word)
+                append(counts, 1)
+            } else {
+                counts[j] = counts[j] + 1
+            }
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < len(unique) {
+        print(unique[i] + ": " + string(counts[i]))
+        i = i + 1
+    }
+}

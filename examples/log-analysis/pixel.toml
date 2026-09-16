@@ -1,0 +1,28 @@
+format = 1
+[project]
+name = "log-analysis"
+entry = "main.pxl"
+
+[[test]]
+name = "multiple sources, calendar validation and missing fields"
+entry = "main.pxl"
+input = "fixtures/config.json"
+expected = "fixtures/expected.json"
+read_root = "fixtures"
+written = { "report.json" = "fixtures/report.json" }
+
+[[test]]
+name = "empty sources"
+entry = "main.pxl"
+input = "fixtures/empty-config.json"
+expected = "fixtures/empty-expected.json"
+read_root = "fixtures"
+written = { "report.json" = "fixtures/empty-report.json" }
+
+[[test]]
+name = "minimum severity across multiple sources"
+entry = "main.pxl"
+input = "fixtures/severity-config.json"
+expected = "fixtures/severity-expected.json"
+read_root = "fixtures"
+written = { "report.json" = "fixtures/severity-report.json" }

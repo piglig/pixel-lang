@@ -1,0 +1,67 @@
+import "model.pxl" as model
+import "types.pxl" as types
+
+fn Key(module: int, node: int) -> string = string(module) + ":" + string(node)
+fn Contains(outer: model.Node, inner: model.Node) -> bool = outer.start <= inner.start && outer.end >= inner.end
+fn Report(plan: model.ClosurePlan, module: int, index: int, message: string) {
+    let source = plan.named.checked.resolved.bound.project.modules[module]
+    let node = source.syntax.nodes[index]
+    var line = 1
+    var column = 1
+    for token in source.syntax.tokens { if token.start >= node.start { line = token.line; column = token.column; break } }
+    append(plan.diagnostics, model.Diagnostic{source: source.path, phase: "closures", message, start: node.start, end: node.end, line, column})
+}
+export fn Build(named: model.InstancePlan) -> model.ClosurePlan {
+    let result = model.ClosurePlan{named, closures: [], diagnostics: slice(named.diagnostics, 0, len(named.diagnostics))}
+    if len(result.diagnostics) > 0 { return result }
+    let resolved = named.checked.resolved
+    let expressionTypes = map[int]{}
+    let signatures = map[int]{}
+    for expression in named.checked.expressions { expressionTypes[Key(expression.module, expression.node)] = expression.typeId }
+    for index, signature in resolved.signatures { signatures[Key(signature.module, signature.node)] = index }
+    for owner, instance in named.instances {
+        let symbol = resolved.bound.symbols[instance.symbol]
+        let nodes = resolved.bound.project.modules[symbol.module].syntax.nodes
+        let function = nodes[symbol.node]
+        let signature = resolved.signatures[signatures[Key(symbol.module, symbol.node)]]
+        for candidate in resolved.signatures {
+            if candidate.module != symbol.module { continue }
+            let node = nodes[candidate.node]
+            if node.kind != "lambda" || !Contains(function, node) { continue }
+            var belongs = true
+            for other in resolved.signatures {
+                if other.module != symbol.module || other.node == symbol.node { continue }
+                let inner = nodes[other.node]
+                if inner.kind == "fn" && Contains(function, inner) && Contains(inner, node) { belongs = false; break }
+            }
+            if !belongs { continue }
+            let key = Key(symbol.module, candidate.node)
+            if !has(expressionTypes, key) { Report(result, symbol.module, candidate.node, "Closure has no checked expression type"); continue }
+            let typeId = types.Substitute(resolved, expressionTypes[key], signature.parameters, instance.arguments)
+            if !types.Concrete(resolved, typeId, 0) { Report(result, symbol.module, candidate.node, "Closure type is not concrete or exceeds depth 32"); continue }
+            let captures: [model.CaptureSlot] = []
+            for capture in resolved.bound.captures {
+                if capture.module != symbol.module || capture.function != candidate.node { continue }
+                let captured = resolved.bound.symbols[capture.symbol]
+                let captureType = types.Substitute(resolved, captured.typeId, signature.parameters, instance.arguments)
+                if !types.Concrete(resolved, captureType, 0) { Report(result, symbol.module, candidate.node, "Capture type is not concrete: " + captured.name) }
+                append(captures, model.CaptureSlot{symbol: capture.symbol, typeId: captureType, mutable: captured.mutable})
+            }
+            append(result.closures, model.ClosureInstance{owner, module: symbol.module, node: candidate.node, parent: -1, typeId, captures})
+        }
+    }
+    for index, closure in result.closures {
+        let nodes = resolved.bound.project.modules[closure.module].syntax.nodes
+        for parent, candidate in result.closures {
+            if parent == index || candidate.owner != closure.owner { continue }
+            if !Contains(nodes[candidate.node], nodes[closure.node]) { continue }
+            if closure.parent < 0 { closure.parent = parent }
+            else {
+                let previous = nodes[result.closures[closure.parent].node]
+                let next = nodes[candidate.node]
+                if next.end - next.start < previous.end - previous.start { closure.parent = parent }
+            }
+        }
+    }
+    return result
+}

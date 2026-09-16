@@ -1,0 +1,122 @@
+import "model.pxl" as model
+import "parser.pxl" as parser
+
+record Builder { files: map[string], parsed: map[model.Parsed], states: map[int], modules: [model.Module], diagnostics: [model.Diagnostic] }
+fn Report(b: Builder, source: string, message: string, start: int, end: int) {
+    var line = 1
+    var column = 1
+    if has(b.files, source) {
+        let text = b.files[source]
+        var index = 0
+        while index < start && index < len(text) {
+            if text[index] == "\n" { line += 1; column = 1 }
+            else { column += 1 }
+            index += 1
+        }
+    }
+    append(b.diagnostics, model.Diagnostic{source, phase: "project", message, start, end, line, column})
+}
+export fn Normalize(path: string) -> Option[string] {
+    if len(path) == 0 || path[0] == "/" { return None }
+    for char in path { if char == "\\" || char == "\u0000" { return None } }
+    let parts: [string] = []
+    for part in split(path, "/") {
+        if part == "" || part == "." { continue }
+        if part == ".." {
+            if len(parts) == 0 { return None }
+            pop(parts)
+        } else { append(parts, part) }
+    }
+    let result = join(parts, "/")
+    if len(result) < 5 || slice(result, len(result) - 4, len(result)) != ".pxl" { return None }
+    return Some(result)
+}
+fn Directory(path: string) -> string {
+    var end = 0
+    for index, char in path { if char == "/" { end = index + 1 } }
+    return slice(path, 0, end)
+}
+fn DefaultAlias(path: string) -> string {
+    let parts = split(path, "/")
+    let name = parts[len(parts) - 1]
+    return slice(name, 0, len(name) - 4)
+}
+export fn Resolve(from: string, path: string) -> Option[string] {
+    if len(path) >= 4 && slice(path, 0, 4) == "std/" { return Normalize(path) }
+    if len(path) > 0 && path[0] == "/" { return None }
+    return Normalize(Directory(from) + path)
+}
+fn Visit(b: Builder, path: string, origin: string, start: int, end: int) {
+    if has(b.states, path) {
+        if b.states[path] == 1 { Report(b, origin, "Cyclic import: " + path, start, end) }
+        return
+    }
+    if !has(b.files, path) { Report(b, origin, "Module not found: " + path, start, end); return }
+    b.states[path] = 1
+    var syntax = model.Parsed{tokens: [], nodes: [], roots: [], diagnostics: []}
+    if has(b.parsed, path) { syntax = b.parsed[path] }
+    else { syntax = parser.Parse(path, b.files[path]) }
+    if len(syntax.diagnostics) > 0 {
+        for diagnostic in syntax.diagnostics { append(b.diagnostics, diagnostic) }
+        b.states[path] = 2
+        return
+    }
+    let imports: [model.Import] = []
+    let declarations: [model.Declaration] = []
+    let names = map[bool]{}
+    for root in syntax.roots {
+        var index = root
+        var exported = false
+        if syntax.nodes[index].kind == "export" { exported = true; index = syntax.nodes[index].children[0] }
+        let node = syntax.nodes[index]
+        if node.kind == "import" {
+            let target = Resolve(path, node.text)
+            match target {
+                Some(value) => {
+                    var alias = DefaultAlias(value)
+                    if len(node.children) > 0 { alias = syntax.nodes[node.children[0]].text }
+                    if has(names, alias) { Report(b, path, "Duplicate module name: " + alias, node.start, node.end) }
+                    names[alias] = true
+                    append(imports, model.Import{alias, target: value, node: index})
+                    Visit(b, value, path, node.start, node.end)
+                }
+                None => { Report(b, path, "Invalid import path: " + node.text, node.start, node.end) }
+            }
+        } else if node.kind == "fn" || node.kind == "record" || node.kind == "enum" {
+            if has(names, node.text) { Report(b, path, "Duplicate module name: " + node.text, node.start, node.end) }
+            names[node.text] = true
+            append(declarations, model.Declaration{name: node.text, kind: node.kind, node: index, exported})
+        } else {
+            Report(b, path, "Expected a module declaration", node.start, node.end)
+        }
+    }
+    b.states[path] = 2
+    append(b.modules, model.Module{path, syntax, imports, declarations})
+}
+export fn Build(files: map[string], entry: string) -> model.Project {
+    return BuildParsed(files, entry, map[model.Parsed]{})
+}
+// Trusted exact-source parsed inputs supplied by the version-matched compiler service.
+export fn BuildParsed(files: map[string], entry: string, parsed: map[model.Parsed]) -> model.Project {
+    let b = Builder{files: map[string]{}, parsed, states: map[int]{}, modules: [], diagnostics: []}
+    if len(files) > 128 {
+        Report(b, entry, "Project exceeds 128 files", 0, 0)
+        return model.Project{modules: [], diagnostics: b.diagnostics}
+    }
+    for path in files {
+        match Normalize(path) {
+            Some(normalized) => {
+                if has(b.files, normalized) { Report(b, path, "Duplicate normalized path: " + normalized, 0, 0) }
+                else { b.files[normalized] = files[path] }
+            }
+            None => { Report(b, path, "Invalid module path: " + path, 0, 0) }
+        }
+    }
+    if len(b.diagnostics) == 0 {
+        match Normalize(entry) {
+            Some(normalized) => { Visit(b, normalized, normalized, 0, 0) }
+            None => { Report(b, entry, "Invalid entry path", 0, 0) }
+        }
+    }
+    return model.Project{modules: b.modules, diagnostics: b.diagnostics}
+}

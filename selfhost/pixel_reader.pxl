@@ -1,0 +1,39 @@
+import "model.pxl" as model
+import "pixel_decode.pxl" as decoder
+
+// Offsets here are traversal-token indices. Pixel origins remain on tokens;
+// the project adapter must preserve them when assigning lexical AST intervals.
+export record Reader { source: string, module: int, tokens: [decoder.Token], index: int, nodes: [model.Node], diagnostics: [decoder.Diagnostic], depth: int }
+export fn New(source: string, module: int, tokens: [decoder.Token]) -> Reader {
+    return Reader{source, module, tokens, index: 0, nodes: [], diagnostics: [], depth: 0}
+}
+export fn At(r: Reader, kind: string, value: string) -> bool {
+    return r.index < len(r.tokens) && r.tokens[r.index].kind == kind && jsonKind(r.tokens[r.index].value) == "string" && jsonAsString(r.tokens[r.index].value) == value
+}
+export fn Take(r: Reader, kind: string, value: string) -> bool {
+    if !At(r, kind, value) { return false }
+    r.index += 1; return true
+}
+export fn Problem(r: Reader, message: string) {
+    if len(r.diagnostics) > 0 { return }
+    var position: [int] = []
+    if r.index < len(r.tokens) { position = r.tokens[r.index].position }
+    else if len(r.tokens) > 0 { position = r.tokens[len(r.tokens) - 1].position }
+    append(r.diagnostics, decoder.Diagnostic{source: r.source, phase: "parse", message, position: slice(position, 0, len(position))})
+}
+export fn Need(r: Reader, kind: string, value: string) { if !Take(r, kind, value) { Problem(r, "Expected " + kind + " " + value) } }
+export fn Identity(r: Reader) -> int {
+    if r.index >= len(r.tokens) || r.tokens[r.index].kind != "id" { Problem(r, "Expected identifier pixel"); return -1 }
+    let value = jsonAsInt(r.tokens[r.index].value)
+    r.index += 1; return value
+}
+export fn Name(id: int) -> string = "_pixel_" + string(id)
+export fn Qualified(r: Reader, module: int, id: int) -> string {
+    if module == r.module { return Name(id) }
+    return "_module_" + string(module) + "." + Name(id)
+}
+export fn Add(r: Reader, kind: string, text: string, children: [int], start: int) -> int {
+    let index = len(r.nodes)
+    append(r.nodes, model.Node{kind, text, children, start, end: r.index})
+    return index
+}

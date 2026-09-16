@@ -1,0 +1,10 @@
+format = 1
+[project]
+name = "callback-analysis"
+entry = "main.pxl"
+
+[[test]]
+name = "optional threshold with stable record sorting and statistics"
+entry = "main.pxl"
+input = "input.json"
+expected = "expected.json"

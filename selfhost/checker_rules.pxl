@@ -1,0 +1,34 @@
+import "checker_state.pxl" as state
+
+export fn IntegerLiteral(c: state.State, module: int, index: int, negative: bool) -> int {
+    let node = c.resolved.bound.project.modules[module].syntax.nodes[index]
+    var start = 0
+    while start + 1 < len(node.text) && node.text[start] == "0" { start += 1 }
+    let magnitude = slice(node.text, start, len(node.text))
+    var limit = "9223372036854775807"
+    if negative { limit = "9223372036854775808" }
+    if len(magnitude) > len(limit) || (len(magnitude) == len(limit) && magnitude > limit) {
+        state.Report(c, module, index, "Integer literal is outside signed 64-bit range")
+    }
+    return state.Scalar(c, "int")
+}
+export fn Binary(c: state.State, module: int, index: int, op: string, left: int, right: int) -> int {
+    state.Match(c, module, index, left, right)
+    let boolean = state.Scalar(c, "bool")
+    if op == "&&" || op == "||" || op == "and" || op == "or" {
+        state.Match(c, module, index, boolean, left)
+        return boolean
+    }
+    let numeric = left == state.Scalar(c, "int") || left == state.Scalar(c, "float64")
+    let text = left == state.Scalar(c, "string")
+    if op == "==" || op == "!=" {
+        if left >= 0 && !numeric && !text && left != boolean { state.Report(c, module, index, "Equality requires scalar operands") }
+        return boolean
+    }
+    if op == "<" || op == "<=" || op == ">" || op == ">=" {
+        if left >= 0 && !numeric && !text { state.Report(c, module, index, "Ordering requires numbers or strings") }
+        return boolean
+    }
+    if left >= 0 && !numeric && !(op == "+" && text) { state.Report(c, module, index, "Arithmetic requires numbers or string concatenation") }
+    return left
+}

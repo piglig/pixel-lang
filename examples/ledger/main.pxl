@@ -1,0 +1,30 @@
+import "config.pxl" as config
+import "models.pxl" as models
+import "rows.pxl" as rows
+import "report.pxl" as report
+import "std/csv.pxl" as csv
+import "std/io.pxl" as io
+import "std/json.pxl" as json
+
+fn main() {
+    let settings = config.Parse(input())
+    let records = csv.Parse(io.Read(settings.source))
+    if len(records) > 0 { rows.Header(records[0]) }
+    let sales: [models.Sale] = []
+    let problems: [models.Problem] = []
+    var filtered = 0
+    for index, fields in records {
+        let row_number = index + 1
+        if row_number > 1 {
+            try {
+                let sale = rows.Parse(fields)
+                if config.Includes(settings, sale) { append(sales, sale) } else { filtered += 1 }
+            } catch problem {
+                append(problems, models.Problem{row: row_number, message: problem.message})
+            }
+        }
+    }
+    let result = report.Summarize(sales, problems, filtered)
+    io.Write(settings.output, json.Stringify(jsonFrom(result)) + "\n")
+    print(result)
+}

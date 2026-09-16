@@ -1,0 +1,46 @@
+// Semantic literal colors, independent of PNG/display palette and placement.
+fn Color(category: int, payload: int) -> [int] = [category, payload / 256, payload % 256, 255]
+fn Words(bytes: [int], colors: [[int]]) {
+    var index = 0
+    while index < len(bytes) {
+        var word = bytes[index] * 256
+        if index + 1 < len(bytes) { word += bytes[index + 1] }
+        append(colors, Color(112, word))
+        index += 2
+    }
+}
+export fn Integer(value: int) -> [[int]] {
+    if value >= -32768 && value <= 32767 {
+        var payload = value
+        if payload < 0 { payload += 65536 }
+        return [Color(16, payload)]
+    }
+    let colors = [Color(18, 0)]
+    let words: [int] = []
+    var remaining = value
+    for index in [0, 1, 2, 3] {
+        var word = remaining % 65536
+        remaining = remaining / 65536
+        if word < 0 { word += 65536; remaining -= 1 }
+        append(words, word)
+    }
+    var index = 3
+    while index >= 0 { append(colors, Color(112, words[index])); index -= 1 }
+    return colors
+}
+export fn Boolean(value: bool) -> [[int]] {
+    if value { return [Color(17, 1)] }
+    return [Color(17, 0)]
+}
+export fn Text(value: string) -> [[int]] {
+    let bytes = utf8Encode(value)
+    if len(bytes) > 65535 { fail("String literal exceeds 65535 UTF-8 bytes") }
+    let colors = [Color(19, len(bytes))]
+    Words(bytes, colors)
+    return colors
+}
+export fn Float(value: float64) -> [[int]] {
+    let colors = [Color(20, 0)]
+    Words(float64Bytes(value), colors)
+    return colors
+}

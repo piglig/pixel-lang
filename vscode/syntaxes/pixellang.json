@@ -1,0 +1,45 @@
+{
+  "scopeName": "source.pixellang",
+  "patterns": [
+    {
+      "name": "comment.line.double-slash.pixellang",
+      "match": "//.*$"
+    },
+    {
+      "name": "comment.block.pixellang",
+      "begin": "/\\*",
+      "end": "\\*/"
+    },
+    {
+      "name": "string.quoted.double.pixellang",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.pixellang",
+          "match": "\\\\."
+        }
+      ]
+    },
+    {
+      "name": "keyword.control.pixellang",
+      "match": "\\b(fn|let|var|if|else|while|for|in|break|continue|return|export|import|as|try|catch|record|enum|match)\\b"
+    },
+    {
+      "name": "storage.type.pixellang",
+      "match": "\\b(int|float64|bool|string|map|json|Error|Option)\\b"
+    },
+    {
+      "name": "constant.language.pixellang",
+      "match": "\\b(true|false|Some|None)\\b"
+    },
+    {
+      "name": "constant.numeric.pixellang",
+      "match": "\\b[0-9][0-9_]*(?:\\.[0-9][0-9_]*)?(?:[eE][+-]?[0-9][0-9_]*)?\\b"
+    },
+    {
+      "name": "entity.name.function.pixellang",
+      "match": "[\\p{L}_][\\p{L}\\p{N}_]*(?=\\s*\\()"
+    }
+  ]
+}

@@ -1,0 +1,123 @@
+import "picture_colors.pxl" as colors
+import "png.pxl" as png
+import "picture_layout.pxl" as packing
+import "spatial_layout.pxl" as layout
+import "pixel_decode.pxl" as decode
+
+export record Spec { magic: string, versions: map[string], encoding: string, dimensions: [int], spatial: layout.Spatial, linkChunks: Option[[string]], metadata: map[json] }
+export record Entry { id: string, origin: [int], source: Spec }
+export record Header { format: string, version: string, scale: int, canvas: [int], entry: string, modules: [Entry] }
+// Each chunk stays within the general JSON node and string budgets.
+export fn PackLinks(links: [layout.Link]) -> [string] {
+    if len(links) > 1000000 { fail("Picture exceeds link limit") }
+    let chunks: [string] = []
+    let digits = "0123456789abcdef"
+    var start = 0
+    while start < len(links) {
+        var end = start + 512
+        if end > len(links) { end = len(links) }
+        let raw = utf8Encode(jsonStringify(jsonFrom(slice(links, start, end))))
+        if len(raw) > 100000 { fail("Picture link chunk exceeds limit") }
+        let packed = zlibCompress(raw)
+        let parts: [string] = []
+        for byte in packed { append(parts, digits[byte / 16]); append(parts, digits[byte % 16]) }
+        append(chunks, join(parts, ""))
+        start = end
+    }
+    return chunks
+}
+export fn UnpackLinks(chunks: [string]) -> [layout.Link] {
+    if len(chunks) > 1954 { fail("Picture exceeds link chunk limit") }
+    let values = map[int]{"0": 0, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "a": 10, "b": 11, "c": 12, "d": 13, "e": 14, "f": 15}
+    let links: [layout.Link] = []
+    for chunk in chunks {
+        if len(chunk) < 2 || len(chunk) > 200000 || len(chunk) % 2 != 0 { fail("Invalid picture link chunk length") }
+        let bytes: [int] = []
+        var index = 0
+        while index < len(chunk) {
+            let high = chunk[index]; let low = chunk[index + 1]
+            if !has(values, high) || !has(values, low) { fail("Invalid picture link chunk hex") }
+            append(bytes, values[high] * 16 + values[low]); index += 2
+        }
+        let decoded = jsonDecode[[layout.Link]](utf8Decode(zlibDecompress(bytes, 100000)))
+        if len(decoded) < 1 || len(decoded) > 512 || len(links) + len(decoded) > 1000000 { fail("Picture exceeds link limit") }
+        extend(links, decoded)
+    }
+    return links
+}
+export fn Encode(root: layout.Source, modules: map[layout.Source], entry: string, scale: int) -> [int] {
+    if scale < 4 || scale > 24 { fail("Picture tile scale must be 4..24") }
+    if len(modules) > 127 { fail("Picture exceeds 128 modules") }
+    let sources = [root]
+    let names = ["main"]
+    for name in keys(modules) {
+        let id = parseInt(name)
+        if id < 0 || id > 65535 || string(id) != name { fail("Invalid picture module ID") }
+        append(names, name); append(sources, modules[name])
+    }
+    var total = 0
+    var width = 192
+    let dimensions: [[int]] = []
+    for source in sources {
+        let validated = decode.Decode(source, "picture")
+        if len(validated.diagnostics) > 0 { fail(validated.diagnostics[0].message) }
+        total += source.dimensions[0] * source.dimensions[1]
+        if total > 1000000 { fail("Picture exceeds logical cell limit") }
+        append(dimensions, source.dimensions)
+    }
+    let chunks: [[string]] = []
+    for source in sources { append(chunks, PackLinks(source.spatial.links)) }
+    var rows = 2
+    var height = 0
+    var entries: [Entry] = []
+    var raw: [int] = []
+    var packed: [int] = []
+    while true {
+        entries = []
+        let placement = packing.Plan(dimensions, scale, rows)
+        width = placement.width
+        height = placement.height
+        for index, source in sources {
+            let spec = Spec{magic: source.magic, versions: source.versions, encoding: source.encoding, dimensions: source.dimensions, spatial: layout.Spatial{links: []}, linkChunks: Some(chunks[index]), metadata: source.metadata}
+            append(entries, Entry{id: names[index], origin: placement.origins[index], source: spec})
+        }
+        let header = Header{format: "pixel-image", version: "0.9", scale, canvas: [width, height], entry, modules: entries}
+        raw = utf8Encode(jsonStringify(jsonFrom(header)))
+        if len(raw) > 16000000 { fail("Picture header exceeds limit") }
+        packed = zlibCompress(raw)
+        if len(packed) > 16000000 { fail("Compressed picture header exceeds limit") }
+        let required = (20 + len(packed) + width * 3 - 1) / (width * 3)
+        if required <= rows { break }
+        rows = required + 1
+    }
+    let palette = colors.Build()
+    let canvas = arrayRepeat([16, 20, 24, 255], width * height)
+    for index, source in sources {
+        let origin = entries[index].origin
+        for item in source.pixels {
+            if item.rgba[3] == 0 { continue }
+            let mapping = palette.forward[string(item.rgba[0])]
+            let red = mapping.red
+            let green = mapping.green[item.rgba[1]]
+            let blue = mapping.blue[item.rgba[2]]
+            let left = origin[0] + item.position[0] * scale + 1
+            let top = origin[1] + item.position[1] * scale + 1
+            var y = 0
+            while y < scale - 2 {
+                var x = 0
+                while x < scale - 2 {
+                    let offset = ((top + y) * width + left + x) * 4
+                    canvas[offset] = red; canvas[offset + 1] = green; canvas[offset + 2] = blue
+                    x += 1
+                }
+                y += 1
+            }
+        }
+    }
+    let payload = [80, 88, 73, 77, 71, 8, 13, 10]
+    png.U32(payload, len(packed)); png.U32(payload, len(raw)); png.U32(payload, crc32(packed))
+    extend(payload, packed)
+    while len(payload) % 3 != 0 { append(payload, 0) }
+    for index, byte in payload { canvas[(index / 3) * 4 + index % 3] = byte }
+    return png.Encode(width, height, canvas)
+}

@@ -1,0 +1,120 @@
+import "model.pxl" as model
+import "types.pxl" as types
+
+export record Position { line: int, column: int, offset: int }
+export record Span { source: string, kind: string, points: [[int]], min: [int], max: [int], start: Position, end: Position }
+export record Instruction { op: string, arg: json, module: int, node: int, span: Span }
+export record Function { params: [string], captures: [string], locals: int, result: string, instructions: [Instruction] }
+export record Program { version: string, records: map[map[string]], enums: map[map[map[string]]], entry: [string], functions: map[Function] }
+export record Output { ir: Program, diagnostics: [model.Diagnostic] }
+export record Context { planned: model.ClosurePlan, frames: model.FramePlan, frame: model.FunctionFrame, code: [Instruction], diagnostics: [model.Diagnostic], expressionTypes: map[int], targets: map[int], callTypes: map[int], references: map[int], declarations: map[int], parameters: [int], arguments: [int], spans: map[Span], labels: int, breaks: [int], continues: [int], loopHandlers: [int], handlers: int, locals: int }
+export fn Key(module: int, node: int) -> string = string(module) + ":" + string(node)
+export fn Point(tokens: [model.Token], offset: int) -> Position {
+    var low = 0
+    var high = len(tokens)
+    while low < high {
+        let middle = (low + high) / 2
+        if tokens[middle].start <= offset { low = middle + 1 } else { high = middle }
+    }
+    var index = low - 1
+    if index < 0 { index = 0 }
+    let token = tokens[index]
+    var line = token.line
+    var column = token.column
+    var cursor = 0
+    while cursor < offset - token.start {
+        if cursor < len(token.text) && token.text[cursor] == "\n" { line += 1; column = 1 } else { column += 1 }
+        cursor += 1
+    }
+    return Position{line, column, offset}
+}
+export fn Emit(c: Context, op: string, arg: json, node: int) {
+    let key = Key(c.frame.module, node)
+    if has(c.spans, key) { append(c.code, Instruction{op, arg, module: c.frame.module, node, span: c.spans[key]}); return }
+    let source = c.planned.named.checked.resolved.bound.project.modules[c.frame.module]
+    let origin = source.syntax.nodes[node]
+    if origin.start < len(source.syntax.tokens) && source.syntax.tokens[origin.start].kind == "pixel" {
+        let token = source.syntax.tokens[origin.start]
+        var points = [[token.column - 1, token.line - 1]]
+        if token.value != "" { points = jsonDecode[[[int]]](token.value) }
+        var left = points[0][0]
+        var right = left
+        var top = points[0][1]
+        var bottom = top
+        for point in points {
+            if point[0] < left { left = point[0] }
+            if point[0] > right { right = point[0] }
+            if point[1] < top { top = point[1] }
+            if point[1] > bottom { bottom = point[1] }
+        }
+        let start = Position{line: token.line, column: token.column, offset: origin.start}
+        let end = Position{line: bottom + 1, column: right + 1, offset: origin.end}
+        let span = Span{source: source.path, kind: "spatial", points, min: [left, top], max: [right, bottom], start, end}
+        c.spans[key] = span
+        append(c.code, Instruction{op, arg, module: c.frame.module, node, span}); return
+    }
+    let start = Point(source.syntax.tokens, origin.start)
+    let end = Point(source.syntax.tokens, origin.end)
+    var left = start.column - 1
+    var right = end.column - 1
+    if left > right { let previous = left; left = right; right = previous }
+    let span = Span{source: source.path, kind: "text", points: [[start.column - 1, start.line - 1], [end.column - 1, end.line - 1]], min: [left, start.line - 1], max: [right, end.line - 1], start, end}
+    c.spans[key] = span
+    append(c.code, Instruction{op, arg, module: c.frame.module, node, span})
+}
+export fn Op(c: Context, op: string, node: int) { Emit(c, op, jsonNull(), node) }
+export fn Label(c: Context) -> int { let value = c.labels; c.labels += 1; return value }
+export fn Report(c: Context, index: int, message: string) {
+    let source = c.planned.named.checked.resolved.bound.project.modules[c.frame.module]
+    let node = source.syntax.nodes[index]
+    var line = 1
+    var column = 1
+    for token in source.syntax.tokens { if token.start >= node.start { line = token.line; column = token.column; break } }
+    append(c.diagnostics, model.Diagnostic{source: source.path, phase: "ir", message, start: node.start, end: node.end, line, column})
+}
+export fn TypeName(resolved: model.ResolvedTypes, typeId: int) -> string {
+    let typ = resolved.types[typeId]
+    if typ.kind == "primitive" { if typ.name == "string" { return "str" }; return typ.name }
+    let arguments: [string] = []
+    for argument in typ.arguments { append(arguments, TypeName(resolved, argument)) }
+    if typ.kind == "array" { return arguments[0] + "[]" }
+    if typ.kind == "map" { return arguments[0] + "{}" }
+    if typ.kind == "function" { return "fn(" + join(slice(arguments, 0, len(arguments) - 1), ",") + ")->(" + arguments[len(arguments) - 1] + ")" }
+    var name = typ.name
+    if typ.module >= 0 { name = "@" + string(typ.module) + ":" + string(typ.declaration) }
+    if len(arguments) > 0 { name += "<" + join(arguments, ",") + ">" }
+    return name
+}
+export fn ExpressionType(c: Context, node: int) -> int {
+    let key = Key(c.frame.module, node)
+    if !has(c.expressionTypes, key) { Report(c, node, "Missing expression type"); return -1 }
+    let resolved = c.planned.named.checked.resolved
+    let typeId = types.Substitute(resolved, c.expressionTypes[key], c.parameters, c.arguments)
+    if !types.Concrete(resolved, typeId, 0) { Report(c, node, "Runtime expression type is not concrete"); return -1 }
+    return typeId
+}
+export fn Slot(c: Context, symbol: int, node: int) -> int {
+    for slot, binding in c.frame.slots { if binding.symbol == symbol { return slot } }
+    Report(c, node, "Binding has no frame slot")
+    return -1
+}
+export fn Reference(c: Context, node: int) -> int {
+    let key = Key(c.frame.module, node)
+    if has(c.references, key) { return c.references[key] }
+    return -1
+}
+record Constant { type: string, value: json }
+export fn ConstantValue(c: Context, typ: string, value: json, node: int) { Emit(c, "CONST", jsonFrom(Constant{type: typ, value}), node) }
+export fn Unit(c: Context, node: int) { ConstantValue(c, "int", jsonFrom(0), node) }
+export fn Binary(op: string) -> string {
+    let names = map[string]{"+": "ADD", "-": "SUB", "*": "MUL", "/": "DIV", "%": "MOD", "==": "EQ", "!=": "NE", "<": "LT", "<=": "LE", ">": "GT", ">=": "GE"}
+    if has(names, op) { return names[op] }
+    return ""
+}
+
+export fn Temporary(c: Context, node: int) -> int {
+    let slot = c.locals
+    if slot >= 65536 { Report(c, node, "Function slot limit 65536 exceeded"); return -1 }
+    c.locals += 1
+    return slot
+}

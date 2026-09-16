@@ -1,0 +1,29 @@
+import "models.pxl" as models
+
+record Input { source: string, output: string, categories: Option[[string]], minimum_minor: Option[int], maximum_minor: Option[int] }
+
+export fn Parse(text: string) -> models.Config {
+    let requested = jsonDecode[Input](text)
+    let categories = match requested.categories { Some(values) => values, None => ([]: [string]) }
+    let minimum = match requested.minimum_minor { Some(value) => value, None => 0 }
+    match requested.maximum_minor {
+        Some(maximum) => {
+            if maximum < minimum { fail("maximum_minor must be greater than or equal to minimum_minor") }
+        }
+        None => {}
+    }
+    return models.Config{source: requested.source, output: requested.output, categories, minimum, maximum: requested.maximum_minor}
+}
+
+export fn Includes(config: models.Config, sale: models.Sale) -> bool {
+    if sale.amount < config.minimum { return false }
+    match config.maximum {
+        Some(maximum) => { if sale.amount > maximum { return false } }
+        None => {}
+    }
+    if len(config.categories) == 0 { return true }
+    for category in config.categories {
+        if category == sale.category { return true }
+    }
+    return false
+}
