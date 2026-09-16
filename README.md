@@ -140,3 +140,7 @@ uv run python scripts/verify_preview.py related \
 ```
 
 合并检查、完整自举、图片往返和真实编辑器验收分别运行，详见[分层验证](docs/zh-CN/contributing/verification.md)。文档同时维护中文和英文版本。
+
+## 许可证
+
+PixelLang 采用 [Apache License 2.0](LICENSE)。

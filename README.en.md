@@ -140,3 +140,7 @@ uv run python scripts/verify_preview.py related \
 ```
 
 Merge checks, full bootstrap, image roundtrips and real-editor acceptance run separately; see [layered verification](docs/en/contributing/verification.md). Documentation is maintained in both Chinese and English.
+
+## License
+
+PixelLang is licensed under the [Apache License 2.0](LICENSE).

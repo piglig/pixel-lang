@@ -11,6 +11,18 @@ def machine(text, **kwargs):
 
 
 class RuntimeMemoryTests(unittest.TestCase):
+    def test_leaf_containers_and_captured_bindings_survive_gc(self):
+        vm = machine('''fn main() {
+            var values = [1, 2, 3]
+            let read = fn() -> int { return values[0] }
+            values = [42]
+            var i = 0
+            while i < 1000 { let scratch = [[i]]; i += 1 }
+            print(read())
+            print(values)
+        }''')
+        self.assertEqual(vm.run(), [42, [42]])
+
     def test_warm_builtin_signature_checks_values_and_changed_types(self):
         vm = machine('fn main() {}')
         numbers = vm.allocate('int[]', [1], None)

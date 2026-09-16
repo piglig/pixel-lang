@@ -1,0 +1,7 @@
+{
+  "tag": "v0.9.0-alpha.1",
+  "pythonVersion": "0.9.0a1",
+  "extensionVersion": "0.9.0",
+  "prerelease": true,
+  "license": "Apache-2.0"
+}

@@ -70,3 +70,16 @@ related 和 merge 均支持 --workers。独立测试使用有限进程，编译�
 
 旧测试耗时只平衡分片，不跳过测试、不复用通过状态。比较进程数时保持测试集和调度耗时来源一致，
 同时记录时间和内存。各子进程峰值之和不代表同时总内存。--resume-from 是独立显式机制。
+
+## GitHub CI 与安装包
+
+PR 和 main 推送运行 `.github/workflows/ci.yml`：Linux/Python 3.11 与 macOS/Python 3.13 回归、双语文档检查、扩展检查、打包、干净安装与真实 VS Code 验收。完整自举与 PNG 往返由 `full-acceptance.yml` 手动或每周单独执行。固定哈希引用 GitHub 官方 Actions；失败日志与验证结果保存在 workflow artifacts 中。
+
+`preview-release.yml` 手动运行全部发布检查，成功后提供可下载的安装包。推送 `config/release.json` 声明的 alpha 标签时，运行相同检查，全部成功后才创建 GitHub 预览版。普通推送和手动验证不会发布版本；Marketplace 发布另行处理。
+
+```sh
+.venv/bin/python scripts/build_distribution.py --output /tmp/pixel-distribution-NEW
+.venv/bin/python tests/clean_install.py /tmp/pixel-distribution-NEW/pixellang-0.9.0a1-py3-none-any.whl --report /tmp/pixel-clean-NEW.json
+```
+
+`config/release.json` 明确映射 Python 的 `0.9.0a1`、扩展的 `0.9.0` 和预览标签 `v0.9.0-alpha.1`。产物包含 wheel、VSIX、安装包/编译器身份清单 `release.json` 与 `SHA256SUMS`。打包验证两种安装包中的许可证、编译器和版本，源码变化时失败。打包成功本身不代表完整发布验收通过。

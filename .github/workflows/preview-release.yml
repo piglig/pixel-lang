@@ -1,0 +1,78 @@
+name: Prepare preview release
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*-alpha.*']
+permissions:
+  contents: read
+concurrency:
+  group: preview-release
+  cancel-in-progress: false
+jobs:
+  verify-and-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+      - run: python -m pip install uv
+      - run: uv sync --locked
+      - run: npm --prefix vscode ci
+      - run: npm --prefix vscode run prepare-runtime
+      - name: Check release tag
+        if: github.ref_type == 'tag'
+        run: |
+          python - <<'PY'
+          import json, os
+          release = json.load(open('config/release.json'))
+          assert os.environ['GITHUB_REF_NAME'] == release['tag'], 'Tag differs from release metadata'
+          assert release['prerelease'] is True, 'This workflow only publishes previews'
+          PY
+      - run: uv run python scripts/check_docs.py
+      - run: npm --prefix vscode run check
+      - run: uv run python scripts/verify_preview.py release --workers 2 --output "$RUNNER_TEMP/acceptance"
+      - run: uv run python scripts/build_distribution.py --output "$RUNNER_TEMP/distribution"
+      - run: uv run python tests/clean_install.py "$RUNNER_TEMP"/distribution/*.whl --report "$RUNNER_TEMP/distribution/clean-install.json"
+      - name: Test packaged extension in VS Code
+        run: |
+          python -m zipfile -e "$RUNNER_TEMP"/distribution/*.vsix "$RUNNER_TEMP/vsix"
+          PIXELLANG_EXTENSION_PATH="$RUNNER_TEMP/vsix/extension" xvfb-run -a npm --prefix vscode test
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: verified-preview-delivery
+          path: ${{ runner.temp }}/distribution
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: preview-acceptance
+          path: ${{ runner.temp }}/acceptance
+          retention-days: 30
+  publish-preview:
+    if: github.ref_type == 'tag'
+    needs: verify-and-package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: verified-preview-delivery
+          path: ${{ runner.temp }}/delivery
+      - name: Publish verified preview
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cd "$RUNNER_TEMP/delivery"
+          sha256sum --check SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" ./*.whl ./*.vsix SHA256SUMS release.json clean-install.json \
+            --verify-tag --prerelease --title "PixelLang $GITHUB_REF_NAME" \
+            --notes "Development preview with the self-hosted compiler, executable PNG delivery and VS Code Studio. See the project README for installation and supported platforms."

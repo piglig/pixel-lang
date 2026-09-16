@@ -6,6 +6,8 @@
 
 | 命令 | 用途 |
 | --- | --- |
+| pixel init [目录] | 创建包含示例与测试的项目；目标目录必须为空 |
+| pixel doctor [--json] | 检查 Python、宿主、Pillow PNG 编解码与编译器校验和 |
 | pixel lock/test/build/run | 清单项目依赖、测试、构建和运行 |
 | pixelc | 编译源码或图片 |
 | pixelrun | 运行源码、图片或字节码 |

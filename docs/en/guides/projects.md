@@ -2,6 +2,19 @@
 
 [中文](../../zh-CN/guides/projects.md) · [English](projects.md) · [Documentation](../README.md)
 
+## Create a project
+
+```sh
+pixel doctor
+pixel init hello-pixels
+cd hello-pixels
+pixel run .
+pixel test .
+pixel build .
+```
+
+Use `--name` to specify a project name. Creation refuses existing files and does not download dependencies. Controlled compiler file access currently requires a POSIX host such as Linux or macOS.
+
 ## Commands
 
 Install the Python package, then use the unified `pixel` command (or `python -m pixellang`):

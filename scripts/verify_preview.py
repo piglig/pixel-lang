@@ -26,11 +26,11 @@ from pixellang.gate_cache import StageReuse, hashes, command_key
 
 def inputs():
     result=fingerprint(ROOT)
-    for directory in ('scripts','vscode/src','vscode/test','vscode/syntaxes','vscode/media','vscode/scripts'):
+    for directory in ('scripts','vscode/src','vscode/test','vscode/syntaxes','vscode/media','vscode/scripts','.github'):
         for path in (ROOT/directory).rglob('*'):
             if path.is_file() and '__pycache__' not in path.parts:
                 result[str(path.relative_to(ROOT))]=hashlib.sha256(path.read_bytes()).hexdigest()
-    for name in ('vscode/package.json','vscode/package-lock.json','config/service-performance-limits.json','uv.lock'):
+    for name in ('vscode/package.json','vscode/package-lock.json','config/service-performance-limits.json','config/release.json','LICENSE','uv.lock'):
         path=ROOT/name
         result[name]=hashlib.sha256(path.read_bytes()).hexdigest()
     return result
@@ -133,6 +133,7 @@ def main():
             generated('generated',artifact)
             run('bridge',['node','vscode/test/bridge-service.js'],timeout=120)
             run('dap',['node','vscode/test/debug-launch.js'],timeout=30)
+            run('onboarding',['node','vscode/test/onboarding.js'],timeout=60)
             perf=output/'performance.json'
             run('performance',[py,'scripts/benchmark_service.py','--output',str(perf),'--limits','config/service-performance-limits.json'],perf,required='gate',timeout=120)
             if args.level=='release':

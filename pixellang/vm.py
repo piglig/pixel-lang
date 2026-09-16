@@ -63,6 +63,9 @@ OPS = {
 }
 LIMIT = 2**63
 SCALAR_TYPES = {int: "int", float: "float64", bool: "bool", str: "str"}
+# These containers cannot contain heap references. Avoid copying/scanning PNG
+# channel arrays and text tables during every garbage collection.
+LEAF_CONTAINERS = frozenset(typ + suffix for typ in ("int", "float64", "bool", "str", "json") for suffix in ("[]", "{}"))
 
 
 @lru_cache(maxsize=4096)
@@ -591,7 +594,10 @@ class VM:
             value = pending.pop()
             if isinstance(value, Ref) and value.address not in reachable:
                 reachable.add(value.address)
-                items = self.heap[value.address]["items"]
+                obj = self.heap[value.address]
+                if not obj.get("cell") and obj["type"] in LEAF_CONTAINERS:
+                    continue
+                items = obj["items"]
                 pending.extend(items.values() if isinstance(items, dict) else items)
         removed = set(self.heap) - reachable
         for address in removed:

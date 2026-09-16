@@ -103,3 +103,16 @@ success into a new acceptance result. Use the same timing history and test colle
 when comparing worker counts; report wall time and memory together. The sum of worker
 peak RSS is a conservative sum of individual high-water marks, not a measurement of
 simultaneous total memory. `--resume-from` is a separate, explicitly recorded mechanism.
+
+## GitHub CI and distributions
+
+PRs and main pushes run `.github/workflows/ci.yml`: Linux/Python 3.11 and macOS/Python 3.13 regression, bilingual documentation checks, extension checks, packaging, clean installation and real VS Code acceptance. `full-acceptance.yml` runs full bootstrap and PNG roundtrips separately, manually or weekly. Official GitHub Actions are pinned by commit; logs and evidence are retained as workflow artifacts.
+
+Manually run `preview-release.yml` for all release checks and downloadable verified packages. Pushing the exact alpha tag declared in `config/release.json` runs the same checks, then publishes a GitHub prerelease only after every gate passes. Ordinary pushes and manual verification do not publish releases. Marketplace publication is separate.
+
+```sh
+.venv/bin/python scripts/build_distribution.py --output /tmp/pixel-distribution-NEW
+.venv/bin/python tests/clean_install.py /tmp/pixel-distribution-NEW/pixellang-0.9.0a1-py3-none-any.whl --report /tmp/pixel-clean-NEW.json
+```
+
+`config/release.json` explicitly maps Python `0.9.0a1`, extension `0.9.0` and preview tag `v0.9.0-alpha.1`. Deliveries include a wheel, VSIX, package/compiler identity manifest `release.json` and `SHA256SUMS`. Packaging checks both archives for matching licenses, compiler and versions and fails if inputs change. Successful packaging alone does not prove full release acceptance.

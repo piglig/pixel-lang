@@ -11,6 +11,8 @@ dist/
 node_modules/
 
 vscode/runtime/
+vscode/LICENSE
+vscode/media/icon.png
 vscode/.vscode-test/
 *.vsix
 

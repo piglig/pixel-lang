@@ -54,6 +54,12 @@ shutil.copytree(
     ignore=shutil.ignore_patterns("dist", "program.png"),
 )
 pixel = root / "env/bin/pixel"
+doctor = json.loads(run([pixel, "doctor", "--json"]))
+assert doctor["passed"], doctor
+created = json.loads(run([pixel, "init", root / "hello-pixels", "--json"]))
+assert created["passed"], created
+assert json.loads(run([pixel, "test", created["root"]]))["passed"]
+assert json.loads(run([pixel, "run", created["root"], "--json"]))["output"] == ["Hello, PixelLang!"]
 tests = json.loads(run([pixel, "test", root / "project"]))
 build = json.loads(run([pixel, "build", root / "project"]))
 original = json.loads(
@@ -260,6 +266,7 @@ print(
 )
 
 report=dict(verified=True,cleanEnvironment=str(root),installed=identity,
+    doctor=doctor,createdProjectVerified=True,
     wheelSha256=hashlib.sha256(args.wheel.read_bytes()).hexdigest(),
     dataTests=tests,ledgerTests=ledger_tests,logTests=log_tests,callbackTests=callback_tests,
     originalSourcesRemoved=True,installedStdlibRemoved=True,

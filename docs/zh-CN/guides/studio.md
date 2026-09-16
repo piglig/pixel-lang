@@ -53,3 +53,7 @@ npm --prefix vscode test
 
 输出 pixellang-studio-0.9.0.vsix，打包不发布。测试使用固定 VS Code 1.137.0，可通过 PIXELLANG_VSCODE 指定本机可执行文件。
 真实交互验证需要解锁桌面，详见[贡献指南](../contributing/README.md)。
+
+## 新项目与环境检查
+
+命令面板提供 `PixelLang: Create Project`、`PixelLang: Check Environment` 和 `PixelLang: Select Python Interpreter`。创建项目会在所选父目录下新建项目并在新窗口打开；环境检查将详情与修复建议写入 PixelLang 输出面板。解释器必须为 Python 3.11+，并安装 Pillow 10–12。

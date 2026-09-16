@@ -22,3 +22,5 @@ include config/service-performance-limits.json
 recursive-include tests/fixtures *.png
 
 include assets/branding/icon.png
+include LICENSE
+include config/release.json

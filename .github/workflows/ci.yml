@@ -1,0 +1,75 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  regression:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: '3.11'
+          - os: macos-latest
+            python: '3.13'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: vscode/package-lock.json
+      - run: python -m pip install uv
+      - run: uv sync --locked
+      - run: npm --prefix vscode ci
+      - run: uv run python scripts/check_docs.py
+      - run: npm --prefix vscode run check
+      - run: npm --prefix vscode run prepare-runtime
+      - name: Language, generated compiler, bridge and performance regression
+        run: uv run python scripts/verify_preview.py merge --workers 2 --output "$RUNNER_TEMP/pixel-merge"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: regression-${{ matrix.os }}-python-${{ matrix.python }}
+          path: ${{ runner.temp }}/pixel-merge
+          retention-days: 14
+  distribution:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: vscode/package-lock.json
+      - run: python -m pip install uv
+      - run: uv sync --locked
+      - run: npm --prefix vscode ci
+      - run: uv run python scripts/build_distribution.py --output "$RUNNER_TEMP/distribution"
+      - run: uv run python tests/clean_install.py "$RUNNER_TEMP"/distribution/*.whl --report "$RUNNER_TEMP/clean-install.json"
+      - name: Real VS Code acceptance
+        run: xvfb-run -a npm --prefix vscode test
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: preview-packages
+          path: |
+            ${{ runner.temp }}/distribution
+            ${{ runner.temp }}/clean-install.json
+          if-no-files-found: error
+          retention-days: 14

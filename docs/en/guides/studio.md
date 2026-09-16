@@ -68,3 +68,7 @@ npm --prefix vscode test
 The output is pixellang-studio-0.9.0.vsix; packaging does not publish. Tests use pinned
 VS Code 1.137.0, or PIXELLANG_VSCODE for an explicit local executable. Real interaction
 tests require an unlocked desktop; see [contributing](../contributing/README.md).
+
+## New projects and environment checks
+
+The command palette provides `PixelLang: Create Project`, `PixelLang: Check Environment` and `PixelLang: Select Python Interpreter`. Creation adds a project under the selected parent and opens a new window. Environment checks write details and fixes to the PixelLang output panel. Select Python 3.11+ with Pillow 10–12 installed.

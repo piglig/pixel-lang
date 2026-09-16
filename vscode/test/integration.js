@@ -23,6 +23,9 @@ async function run() {
   );
   assert(extension, "Extension discovered");
   const api = await extension.activate();
+  const commands = await vscode.commands.getCommands(true);
+  for (const command of ["pixellang.createProject", "pixellang.doctor", "pixellang.selectPython"])
+    assert(commands.includes(command), `Onboarding command registered: ${command}`);
   const root = vscode.workspace.workspaceFolders[0].uri;
   const uri = vscode.Uri.joinPath(root, "main.pxl");
   let doc = await vscode.workspace.openTextDocument(uri);

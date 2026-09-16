@@ -7,6 +7,8 @@ Commands have corresponding python -m pixellang entry points.
 
 | Command | Purpose |
 | --- | --- |
+| pixel init [directory] | Create a runnable project with a test; destination must be empty |
+| pixel doctor [--json] | Check Python, host support, Pillow PNG codec and compiler checksum |
 | pixel lock/test/build/run | Manifest dependencies, tests, builds and execution |
 | pixelc | Compile source or images |
 | pixelrun | Run source, images or bytecode |

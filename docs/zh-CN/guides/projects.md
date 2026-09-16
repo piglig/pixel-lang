@@ -2,6 +2,19 @@
 
 [中文](projects.md) · [English](../../en/guides/projects.md) · [文档首页](../README.md)
 
+## 创建项目
+
+```sh
+pixel doctor
+pixel init hello-pixels
+cd hello-pixels
+pixel run .
+pixel test .
+pixel build .
+```
+
+使用 `--name` 指定项目名。创建操作拒绝覆盖已有文件；初始化不下载依赖。当前编译器的受控文件访问需要 Linux 或 macOS 等 POSIX 宿主。
+
 ## 命令
 
 安装后使用 pixel（或 python -m pixellang）：

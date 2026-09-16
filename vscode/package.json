@@ -76,6 +76,18 @@
       {
         "command": "pixellang.lockProject",
         "title": "PixelLang: Save and Update Dependency Lock"
+      },
+      {
+        "command": "pixellang.createProject",
+        "title": "PixelLang: Create Project"
+      },
+      {
+        "command": "pixellang.doctor",
+        "title": "PixelLang: Check Environment"
+      },
+      {
+        "command": "pixellang.selectPython",
+        "title": "PixelLang: Select Python Interpreter"
       }
     ],
     "menus": {
@@ -166,12 +178,20 @@
   },
   "scripts": {
     "prepare-runtime": "node scripts/prepare.js",
-    "package": "npm run prepare-runtime && vsce package --pre-release --allow-missing-repository --skip-license",
-    "check": "node --check src/extension.js && node --check src/debug.js && node --check media/studio.js",
+    "package": "npm run prepare-runtime && vsce package --pre-release",
+    "check": "node --check src/extension.js && node --check src/debug.js && node --check media/studio.js && node --check src/onboarding.js",
     "test": "npm run prepare-runtime && node scripts/test.js"
   },
   "devDependencies": {
     "@vscode/vsce": "3.7.1",
     "@vscode/test-electron": "2.5.2"
-  }
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/piglig/pixel-lang.git",
+    "directory": "vscode"
+  },
+  "homepage": "https://github.com/piglig/pixel-lang",
+  "icon": "media/icon.png"
 }

@@ -4,9 +4,11 @@ const vscode = require("vscode"),
   crypto = require("node:crypto");
 const { Bridge } = require("./bridge");
 const { PixelDebug } = require("./debug");
+const onboarding = require("./onboarding");
 let api;
 function activate(context) {
   const log = vscode.window.createOutputChannel("PixelLang");
+  onboarding.register(vscode, context, log);
   const diagnostics = vscode.languages.createDiagnosticCollection("pixellang");
   let bridge,
     panel,
@@ -44,20 +46,7 @@ function activate(context) {
     if (!bridge) {
       const config = vscode.workspace.getConfiguration("pixellang"),
         root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-      const candidate =
-        root &&
-        path.join(
-          root,
-          ".venv",
-          process.platform === "win32" ? "Scripts/python.exe" : "bin/python",
-        );
-      const python =
-        config.get("pythonPath") ||
-        (candidate && fs.existsSync(candidate)
-          ? candidate
-          : process.platform === "win32"
-            ? "python"
-            : "python3");
+      const python = onboarding.pythonPath(config.get("pythonPath"), root);
       bridge = new Bridge(
         python,
         path.join(context.extensionPath, "runtime"),
@@ -67,6 +56,13 @@ function activate(context) {
     }
     return bridge;
   }
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
+    if (event.affectsConfiguration("pixellang.pythonPath")) {
+      bridge?.dispose();
+      bridge = undefined;
+      current = undefined;
+    }
+  }));
   async function collect(uri) {
     if (uri?.scheme === "pixellang-source") {
       const context = sourceContexts.get(uri.toString());

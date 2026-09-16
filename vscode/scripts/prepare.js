@@ -2,6 +2,8 @@ const fs = require("node:fs"),
   path = require("node:path");
 const root = path.resolve(__dirname, "../.."),
   dest = path.join(root, "vscode/runtime/pixellang");
+fs.copyFileSync(path.join(root, "LICENSE"), path.join(root, "vscode/LICENSE"));
+fs.copyFileSync(path.join(root, "assets/branding/icon.png"), path.join(root, "vscode/media/icon.png"));
 fs.rmSync(dest, { recursive: true, force: true });
 fs.mkdirSync(dest, { recursive: true });
 for (const name of fs.readdirSync(path.join(root, "pixellang")))

@@ -1,7 +1,6 @@
 {
   "profile": "preview-small-project-v1",
   "scope": "Fixed two-file installed-service workload; coarse regression ceilings, not UI SLOs or full-compiler PNG budgets",
-  "baseline": "docs/studio-preview-progress.json nativeRecoveryIncrement.developmentPerformance",
   "phases": {
     "cold-check": {"seconds": 12, "steps": 4000000},
     "warm-check": {"seconds": 0.5, "steps": 50000},

@@ -5,11 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from .codec import load, save
-from .compiler import compile_file, frontend, normalize
-from .fileaccess import FileAccess
 from .model import PixelError
-from .vm import VM
 
 
 def write_json(value, path=None):
@@ -21,6 +17,15 @@ def write_json(value, path=None):
 
 
 def main(command=None, argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    selected = command or (argv[0] if argv else None)
+    if selected in ("init", "doctor"):
+        from .onboarding import main as onboarding_main
+        return onboarding_main(selected, argv if command else argv[1:])
+    from .codec import load, save
+    from .compiler import compile_file, frontend, normalize
+    from .fileaccess import FileAccess
+    from .vm import VM
     p = argparse.ArgumentParser(prog=command or "pixellang")
     if command is None:
         p.add_argument(
@@ -37,6 +42,8 @@ def main(command=None, argv=None):
                 "lock",
                 "test",
                 "build",
+                "init",
+                "doctor",
             ],
         )
     p.add_argument("source", type=Path, nargs="?", default=Path("."))
