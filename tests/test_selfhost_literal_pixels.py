@@ -3,9 +3,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.native_compiler import compile_native_sources
 from pixellang.codec import encode_token
 from pixellang.model import PixelError
-from pixellang.project import compile_project
 from pixellang.vm import VM
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,18 +14,26 @@ ROOT = Path(__file__).resolve().parents[1]
 class SelfHostedLiteralPixelTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        files = {p.name: p.read_text() for p in (ROOT / 'selfhost').glob('*.pxl')}
+        files = {name: (ROOT / 'selfhost' / name).read_text()
+                 for name in ('literal_pixels.pxl', 'failures.pxl')}
         files['main.pxl'] = '''import "literal_pixels.pxl" as literals
 record Request { kind: string, value: string }
-fn main() {
- let request = jsonDecode[Request](input())
- if request.kind == "int" { print(literals.Integer(parseInt(request.value))) }
- else if request.kind == "float64" { print(literals.Float(parseFloat64(request.value))) }
- else if request.kind == "bool" { print(literals.Boolean(request.value == "true")) }
- else { print(literals.Text(request.value)) }
+effect fn main() {
+ match jsonDecode::[Request](input()) {
+  .Ok(request) => Encode(request),
+  .Err(error) => print(error)
+ }
+}
+effect fn Encode(request: Request) {
+ if request.kind == "int" {
+  match parseInt(request.value) { .Ok(value) => print(literals.Integer(value)), .Err(error) => print(error) }
+ } else if request.kind == "float64" {
+  match parseFloat64(request.value) { .Ok(value) => print(literals.Float(value)), .Err(error) => print(error) }
+ } else if request.kind == "bool" { print(literals.Boolean(request.value == "true")) }
+ else { match literals.Text(request.value) { .Ok(value) => print(value), .Err(error) => print(error) } }
 }
 '''
-        cls.bytecode = compile_project(files)[1].bytecode
+        cls.bytecode = compile_native_sources(files)
 
     def encode(self, kind, value):
         text = ('true' if value else 'false') if kind == 'bool' else str(value)
@@ -52,5 +60,7 @@ fn main() {
                 self.assertEqual(self.encode('float64', value), encode_token('float64', value))
 
     def test_length_limit_counts_utf8_bytes(self):
-        with self.assertRaisesRegex(PixelError, 'exceeds 65535 UTF-8 bytes'):
-            self.encode('str', '界' * 21846)
+        error = self.encode('str', '界' * 21846)
+        self.assertEqual(error['kind'], 'compiler')
+        self.assertEqual(error['code'], 'compiler.invalid_data')
+        self.assertIn('exceeds 65535 UTF-8 bytes', error['message'])

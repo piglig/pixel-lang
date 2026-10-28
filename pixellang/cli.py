@@ -16,14 +16,54 @@ def write_json(value, path=None):
         print(text, end="")
 
 
+def inspect_program(path, stage):
+    """Inspect artifacts produced by the native compiler, without host lowering."""
+    from .compiler_client import CompilerClient
+    from .vm import validate_bytecode
+
+    suffix = path.suffix.lower()
+    if suffix not in ('.pxl', '.png', '.pixel', '.json', '.pxb'):
+        raise PixelError('inspect', 'Inspection requires .pxl source, PNG, a pixel document, or .pxb bytecode')
+    if suffix != '.pxl' and stage not in ('all', 'bytecode'):
+        raise PixelError('inspect', 'This inspection stage requires .pxl source')
+    if suffix == '.pxb':
+        code = validate_bytecode(json.loads(path.read_text(encoding='utf-8')))
+        return {'bytecode': code} if stage == 'all' else code
+    with CompilerClient() as client:
+        if suffix == '.png':
+            code = client.request('compile-png', image=path.read_bytes())['result']['bytecode']
+            return {'bytecode': code} if stage == 'all' else code
+        if suffix in ('.pixel', '.json'):
+            code = client.request('compile-pixels', document=json.loads(path.read_text(encoding='utf-8')),
+                                  entry=path.name)['result']['bytecode']
+            return {'bytecode': code} if stage == 'all' else code
+        files, entry = client.read_project(path)
+        operations = {
+            'bytecode': ('compile', 'bytecode'),
+            'ir': ('inspect-ir', 'ir'),
+            'source': ('debug-pixels', 'document'),
+            'debug': ('debug-compile', 'debug'),
+            'graph': ('native-graphs', 'projection'),
+        }
+        if stage == 'all':
+            from .debug_artifact import prepare_debug
+            result = client.request('debug-bundle', files=files, entry=entry, includeIR=True)['result']
+            artifact = prepare_debug(result['bytecode'], result['debug'], result['document'])
+            artifact.ir = result['ir']
+            return artifact.inspect()
+        operation, field = operations[stage]
+        return client.request(operation, files=files, entry=entry)['result'][field]
+
+
 def main(command=None, argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     selected = command or (argv[0] if argv else None)
+    if selected == "application":
+        from .application_cli import main as application_main
+        return application_main(argv if command else argv[1:])
     if selected in ("init", "doctor"):
         from .onboarding import main as onboarding_main
         return onboarding_main(selected, argv if command else argv[1:])
-    from .codec import load, save
-    from .compiler import compile_file, frontend, normalize
     from .fileaccess import FileAccess
     from .vm import VM
     p = argparse.ArgumentParser(prog=command or "pixellang")
@@ -44,6 +84,7 @@ def main(command=None, argv=None):
                 "build",
                 "init",
                 "doctor",
+                "application",
             ],
         )
     p.add_argument("source", type=Path, nargs="?", default=Path("."))
@@ -52,6 +93,8 @@ def main(command=None, argv=None):
         "--json", action="store_true", help="Machine-readable output and errors"
     )
     p.add_argument("--max-steps", type=int, default=100_000)
+    p.add_argument("--filter", help="Select test names using a glob pattern")
+    p.add_argument("--list", action="store_true", help="List selected tests without executing them")
     p.add_argument("--trace", type=Path)
     p.add_argument(
         "--read-root",
@@ -64,21 +107,47 @@ def main(command=None, argv=None):
         help="Grant program writes inside this existing directory",
     )
     p.add_argument("--input", help="UTF-8 runtime input file, or - for stdin")
+    p.add_argument("--arg", action="append", default=[], help="Program argument; repeat, using --arg=--option for flags")
     p.add_argument(
         "--scale", type=int, default=8, help="Executable image tile size (4..24)"
     )
     p.add_argument(
         "--force", action="store_true", help="Allow unpack to replace existing files"
     )
-    p.add_argument("--no-optimize", action="store_true")
     p.add_argument(
         "--stage",
-        choices=["all", "spatial_ast", "canonical_ast", "ir", "bytecode"],
+        choices=["all", "source", "debug", "graph", "ir", "bytecode"],
         default="all",
     )
+    program_args = []
+    if selected in ("run", "debug") and "--" in argv:
+        delimiter = argv.index("--")
+        argv, program_args = argv[:delimiter], argv[delimiter + 1:]
     args = p.parse_args(argv)
+    args.arg.extend(program_args)
     command = command or args.command
     try:
+        if command == 'inspect':
+            write_json(inspect_program(args.source, args.stage), args.output)
+            return 0
+        if command == 'format' and args.source.suffix.lower() == '.pxl':
+            if args.output is None:
+                p.error('This command requires -o OUTPUT')
+            from .compiler_client import CompilerClient
+            from tempfile import NamedTemporaryFile
+            with CompilerClient() as client:
+                formatted = client.request('format', files={args.source.name: args.source.read_text(encoding='utf-8')},
+                                           entry=args.source.name)['result']['text']
+            temporary = None
+            try:
+                with NamedTemporaryFile(mode='w', encoding='utf-8', dir=args.output.parent, delete=False) as stream:
+                    temporary = Path(stream.name)
+                    stream.write(formatted)
+                temporary.replace(args.output)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+            return 0
         if command in ("lock", "test", "build") or (
             command == "run"
             and (args.source.is_dir() or args.source.name == "pixel.toml")
@@ -91,7 +160,7 @@ def main(command=None, argv=None):
             elif command == "build":
                 result = workspace.build(args.output)
             elif command == "test":
-                result = workspace.test(args.max_steps)
+                result = workspace.test(args.max_steps, pattern=args.filter, list_only=args.list)
             else:
                 data = (
                     sys.stdin.read(1_000_001)
@@ -101,7 +170,7 @@ def main(command=None, argv=None):
                     else ""
                 )
                 result = workspace.run(
-                    data, args.max_steps, FileAccess(args.read_root, args.write_root)
+                    data, args.max_steps, FileAccess(args.read_root, args.write_root, record=False), arguments=args.arg
                 )
             if command == "run" and not args.json:
                 text = "".join(display(v) + "\n" for v in result["output"])
@@ -115,87 +184,81 @@ def main(command=None, argv=None):
         if command in ("format", "render", "pack", "unpack"):
             if args.output is None:
                 p.error("This command requires -o OUTPUT")
-            if command in ('pack','render') and args.source.suffix.lower()=='.pxl':
-                from .compiler_client import CompilerClient
-                from tempfile import NamedTemporaryFile
-                with CompilerClient() as client:
-                    files,entry=client.read_project(args.source)
-                    image=client.request('export-debug-png',files=files,entry=entry,scale=args.scale)['result']['image']
-                args.output.parent.mkdir(parents=True,exist_ok=True)
-                temporary=None
-                try:
-                    with NamedTemporaryFile(dir=args.output.parent,delete=False) as stream:
-                        temporary=Path(stream.name);stream.write(image)
-                    temporary.replace(args.output)
-                finally:
-                    if temporary is not None:temporary.unlink(missing_ok=True)
-                return 0
-            native_recovery = command == "unpack" and args.source.suffix.lower() == ".png"
-            doc = None if native_recovery else (
-                compile_file(args.source).source
-                if args.source.suffix.lower() == ".pxl"
-                else load(args.source)
-            )
-            if command == "unpack":
-                from .project import project_text, safe_name
-
-                if native_recovery:
-                    from .compiler_client import CompilerClient
-                    with CompilerClient() as client:
-                        recovered = client.request('recover-png',image=args.source.read_bytes())['result']
+            from .compiler_client import CompilerClient
+            from .module_paths import safe_name
+            from tempfile import NamedTemporaryFile
+            with CompilerClient() as client:
+                suffix = args.source.suffix.lower()
+                if suffix == '.pxl':
+                    files, entry = client.read_project(args.source)
+                    if command == 'unpack':
+                        recovered = {'files': files, 'entry': entry}
+                    else:
+                        image = client.request('export-debug-png', files=files, entry=entry,
+                                               scale=args.scale)['result']['image']
                 else:
-                    recovered = project_text(doc)
+                    if suffix == '.png':
+                        recovered = client.request('recover-png', image=args.source.read_bytes())['result']
+                        document = None
+                    else:
+                        document = json.loads(args.source.read_text(encoding='utf-8'))
+                    if command == 'unpack' or command == 'format' and args.output.suffix.lower() == '.pxl':
+                        if document is not None:
+                            recovered = client.request('recover-pixels', document=document,
+                                                       entry=args.source.name)['result']
+                    elif command in ('pack', 'render'):
+                        if document is None:
+                            image = client.request('export-debug-png', files=recovered['files'],
+                                                   entry=recovered['entry'], scale=args.scale)['result']['image']
+                        else:
+                            image = client.request('export-pixel-png', document=document,
+                                                   entry=args.source.name, scale=args.scale)['result']['image']
+                    else:
+                        if document is None:
+                            document = client.request('pixels', files=recovered['files'],
+                                                      entry=recovered['entry'])['result']['document']
+                        else:
+                            document = client.request('normalize-pixels', document=document,
+                                                      entry=args.source.name)['result']['document']
+                        if args.output.suffix.lower() == '.png':
+                            image = client.request('export-pixel-png', document=document,
+                                                   entry=args.source.name, scale=args.scale)['result']['image']
+            if command == 'unpack':
                 root = args.output.resolve()
-                targets = [
-                    (root / safe_name(name), text)
-                    for name, text in recovered["files"].items()
-                ]
+                targets = [(root / safe_name(name), text) for name, text in recovered['files'].items()]
                 for target, _ in targets:
                     if not target.resolve().is_relative_to(root):
-                        raise PixelError("io", "Unpack path escapes output directory")
+                        raise PixelError('io', 'Unpack path escapes output directory')
                     if target.exists() and not args.force:
-                        raise PixelError(
-                            "io", f"Refusing to overwrite {target}; use --force"
-                        )
+                        raise PixelError('io', f'Refusing to overwrite {target}; use --force')
                 for target, text in targets:
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_text(text, encoding="utf-8")
+                    target.write_text(text, encoding='utf-8')
                 if args.json:
-                    write_json(
-                        {
-                            "entry": recovered["entry"],
-                            "files": [str(t) for t, _ in targets],
-                        }
-                    )
-            elif (
-                command == "pack"
-                or command == "render"
-                and (doc.get("bundle") or args.source.suffix.lower() == ".pxl")
-            ):
-                from .compiler import compile_source
-                from .picture import save_picture
-
-                compile_source(doc)
-                save_picture(doc, args.output, args.scale)
-            elif command == "format" and args.output.suffix == ".pxl":
-                from .project import project_text
-
-                recovered = project_text(doc)
-                args.output.write_text(
-                    recovered["files"][recovered["entry"]], encoding="utf-8"
-                )
+                    write_json({'entry': recovered['entry'], 'files': [str(t) for t, _ in targets]})
             else:
-                save(
-                    normalize(doc, str(args.source)) if command == "format" else doc,
-                    args.output,
-                )
-        elif (
-            command == "inspect"
-            and args.stage == "spatial_ast"
-            and args.source.suffix.lower() != ".pxl"
-        ):
-            _, spatial = frontend(load(args.source), str(args.source))
-            write_json(spatial, args.output)
+                if command == 'format':
+                    if args.output.suffix.lower() == '.pxl':
+                        if len(recovered['files']) != 1:
+                            raise PixelError('io', 'Multiple modules require unpack into a directory')
+                        payload = recovered['files'][recovered['entry']].encode('utf-8')
+                    elif args.output.suffix.lower() == '.png':
+                        payload = image
+                    else:
+                        payload = (json.dumps(document, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
+                else:
+                    payload = image
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                temporary = None
+                try:
+                    with NamedTemporaryFile(dir=args.output.parent, delete=False) as stream:
+                        temporary = Path(stream.name)
+                        stream.write(payload)
+                    temporary.replace(args.output)
+                finally:
+                    if temporary is not None:
+                        temporary.unlink(missing_ok=True)
+
         else:
             if command in ("run", "debug") and args.source.suffix == ".pxb":
                 bc = json.loads(args.source.read_text())
@@ -208,20 +271,18 @@ def main(command=None, argv=None):
                         files,entry=compiler.read_project(args.source)
                         bc=compiler.request("compile",files=files,entry=entry)["result"]["bytecode"]
             else:
-                result = compile_file(args.source, not args.no_optimize)
-                bc = result.bytecode
+                from .compiler_client import CompilerClient
+                with CompilerClient() as compiler:
+                    bc = compiler.request('compile-pixels',
+                        document=json.loads(args.source.read_text(encoding='utf-8')),
+                        entry=args.source.name)['result']['bytecode']
             if command == "compile":
                 write_json(bc, args.output or args.source.with_suffix(".pxb"))
-            elif command == "inspect":
-                inspection = result.inspect()
-                write_json(
-                    inspection if args.stage == "all" else inspection[args.stage],
-                    args.output,
-                )
             elif command in ("run", "debug"):
                 vm = VM(
                     bc,
-                    file_access=FileAccess(args.read_root, args.write_root),
+                    arguments=args.arg,
+                    file_access=FileAccess(args.read_root, args.write_root, record=bool(args.trace) or command == "debug"),
                     max_steps=args.max_steps,
                     trace=bool(args.trace) or command == "debug",
                     input_text=(

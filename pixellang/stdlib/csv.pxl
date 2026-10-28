@@ -1,7 +1,8 @@
+import "error.pxl" as errors
 // CSV records. Quoted commas, escaped quotes, multiline fields and Unicode are preserved.
-// A malformed CSV document raises a recoverable data error.
-export fn Parse(text: string) -> [[string]] {
-    let rows: [[string]] = []
+// Malformed CSV is a typed result with a stable code and character offset.
+export fn Parse(text: string) -> Result[[[string]], Error] {
+    var rows: [[string]] = []
     var row: [string] = []
     var field = ""
     var state = 0
@@ -15,24 +16,24 @@ export fn Parse(text: string) -> [[string]] {
         } else {
             if c == "\"" {
                 if state == 3 { field = field + "\""; state = 2 } else {
-                    if state == 0 { state = 2 } else { fail("CSV quote inside unquoted field at offset " + string(i)) }
+                    if state == 0 { state = 2 } else { return .Err(errors.New("csv.unexpected_quote", "CSV quote inside unquoted field", "Parse", string(i))) }
                 }
             } else {
                 if c == "," {
-                    append(row, field)
+                    row.append(field)
                     field = ""
                     state = 0
                 } else {
                     if c == "\n" || c == "\r" {
-                        append(row, field)
-                        append(rows, row)
+                        row.append(field)
+                        rows.append(row)
                         row = []: [string]
                         field = ""
                         state = 0
                         pending = false
                         if c == "\r" && i + 1 < len(text) && text[i + 1] == "\n" { i += 1 }
                     } else {
-                        if state == 3 { fail("CSV character after closing quote at offset " + string(i)) }
+                        if state == 3 { return .Err(errors.New("csv.trailing_character", "CSV character after closing quote", "Parse", string(i))) }
                         field = field + c
                         state = 1
                     }
@@ -41,20 +42,20 @@ export fn Parse(text: string) -> [[string]] {
         }
         i += 1
     }
-    if state == 2 { fail("CSV unterminated quoted field") }
-    if pending { append(row, field); append(rows, row) }
-    return rows
+    if state == 2 { return .Err(errors.New("csv.unterminated_quote", "CSV unterminated quoted field", "Parse", string(len(text)))) }
+    if pending { row.append(field); rows.append(row) }
+    return .Ok(rows)
 }
 
-export fn Encode(rows: [[string]]) -> string {
+export fn Encode(rows: [[string]]) -> Result[string, Error] {
     var result = ""
-    for row in rows {
-        if len(row) == 0 { fail("CSV rows require at least one field") }
-        let fields: [string] = []
+    for index, row in rows {
+        if len(row) == 0 { return .Err(errors.New("csv.empty_row", "CSV rows require at least one field", "Encode", string(index))) }
+        var fields: [string] = []
         for value in row {
-            append(fields, "\"" + replace(value, "\"", "\"\"") + "\"")
+            fields.append("\"" + replace(value, "\"", "\"\"") + "\"")
         }
         result = result + join(fields, ",") + "\r\n"
     }
-    return result
+    return .Ok(result)
 }

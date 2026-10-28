@@ -1,163 +1,217 @@
+import "model.pxl" as model
 import "pixel_ast_state.pxl" as state
 import "literal_pixels.pxl" as literals
 
-fn Literal(colors: [[int]], values: [[int]]) { for color in values { append(colors, color) } }
-fn EnumBase(c: state.Context, index: int) -> bool {
-    if !has(c.expressions, string(index)) { return false }
+fn Literal(values: [[int]], colors: inout [[int]]) { for color in values { colors.append(color) } }
+fn EnumBase(c: state.Context, index: int, checked: model.ExpressionCheck) -> bool {
+    if !c.expressions.has(string(index)) { return false }
     let typeId = c.expressions[string(index)]
-    return typeId >= 0 && c.checked.resolved.types[typeId].kind == "enum"
+    return typeId >= 0 && checked.resolved.types[typeId].kind == "enum"
 }
-fn Enum(c: state.Context, colors: [[int]], index: int, name: string, arguments: [int]) {
-    state.Token(colors, 64, "variant"); state.Token(colors, 80, "(")
-    state.Type(c, colors, state.ExpressionType(c, index), index); state.Token(colors, 80, ",")
-    Literal(colors, literals.Text(name))
-    for argument in arguments { state.Token(colors, 80, ","); Emit(c, colors, argument) }
-    state.Token(colors, 80, ")")
+fn Enum(index: int, name: string, arguments: [int], checked: model.ExpressionCheck, c: inout state.Context, colors: inout [[int]]) {
+    state.Token(64, "variant", index, checked, &c, &colors); state.Token(80, "(", index, checked, &c, &colors)
+    state.Type(state.ExpressionType(index, checked, &c), index, checked, &c, &colors); state.Token(80, ",", index, checked, &c, &colors)
+    state.Text(name, index, checked, &c, &colors)
+    for argument in arguments { state.Token(80, ",", index, checked, &c, &colors); Emit(argument, checked, &c, &colors) }
+    state.Token(80, ")", index, checked, &c, &colors)
 }
-export fn Pattern(c: state.Context, colors: [[int]], armId: int, typeId: int) {
-    let nodes = c.checked.resolved.bound.project.modules[c.module].syntax.nodes
-    let arm = nodes[armId]
-    let pattern = nodes[arm.children[0]]
-    if pattern.kind == "type" && pattern.text == "_" && len(pattern.children) == 0 { state.Token(colors, 64, "otherwise"); return }
-    let parts = split(pattern.text, ".")
-    state.Type(c, colors, typeId, armId); Literal(colors, literals.Text(parts[len(parts) - 1])); state.Token(colors, 80, "(")
-    for position, child in slice(arm.children, 1, len(arm.children) - 1) {
-        if position > 0 { state.Token(colors, 80, ",") }
-        state.Id(c, colors, state.Declare(c, child), child)
+fn Pattern(index: int, checked: model.ExpressionCheck, c: inout state.Context, colors: inout [[int]]) {
+    let nodes = checked.resolved.bound.project.modules[c.module].syntax.nodes
+    let pattern = nodes[index]
+    if pattern.kind == "wildcard_pattern" { state.Token(64, "otherwise", index, checked, &c, &colors); return }
+    if pattern.kind == "binding" { state.Id(state.Declare(index, checked, &c), index, checked, &c, &colors); return }
+    state.Type(state.ExpressionType(index, checked, &c), index, checked, &c, &colors)
+    state.Text(pattern.text, index, checked, &c, &colors); state.Token(80, "(", index, checked, &c, &colors)
+    var first = 0
+    if len(pattern.children) > 0 && nodes[pattern.children[0]].kind == "pattern_qualifier" { first = 1 }
+    for position, child in slice(pattern.children, first, len(pattern.children)) {
+        if position > 0 { state.Token(80, ",", index, checked, &c, &colors) }
+        Pattern(child, checked, &c, &colors)
     }
-    state.Token(colors, 80, ")")
+    state.Token(80, ")", index, checked, &c, &colors)
 }
-export fn Emit(c: state.Context, colors: [[int]], index: int) {
+export fn Subjects(index: int, checked: model.ExpressionCheck, c: inout state.Context, colors: inout [[int]]) {
+    let node = checked.resolved.bound.project.modules[c.module].syntax.nodes[index]
+    state.Token(80, "(", index, checked, &c, &colors)
+    for position, child in node.children {
+        if position > 0 { state.Token(80, ",", index, checked, &c, &colors) }
+        Emit(child, checked, &c, &colors)
+    }
+    state.Token(80, ")", index, checked, &c, &colors)
+}
+export fn Patterns(armId: int, checked: model.ExpressionCheck, c: inout state.Context, colors: inout [[int]]) {
+    let nodes = checked.resolved.bound.project.modules[c.module].syntax.nodes
+    let arm = nodes[armId]
+    state.Token(80, "(", armId, checked, &c, &colors)
+    for position, child in nodes[arm.children[0]].children {
+        if position > 0 { state.Token(80, ",", armId, checked, &c, &colors) }
+        Pattern(child, checked, &c, &colors)
+    }
+    state.Token(80, ")", armId, checked, &c, &colors)
+    if len(arm.children) == 3 {
+        state.Token(64, "if", armId, checked, &c, &colors)
+        Emit(nodes[arm.children[1]].children[0], checked, &c, &colors)
+    }
+}
+export fn Emit(index: int, checked: model.ExpressionCheck, c: inout state.Context, colors: inout [[int]]) {
     if len(c.diagnostics) > 0 { return }
-    let resolved = c.checked.resolved
+    let resolved = checked.resolved
     let nodes = resolved.bound.project.modules[c.module].syntax.nodes
     let node = nodes[index]
     let children = node.children
-    if node.kind == "lambda" {
-        state.Token(colors, 64, "lambda"); state.Token(colors, 80, "(")
-        state.Id(c, colors, index, index); state.Token(colors, 80, ")")
-        append(c.lambdas, index); return
+    if node.kind == "propagate" {
+        state.Token(80, "(", index, checked, &c, &colors); Emit(children[0], checked, &c, &colors)
+        state.Token(80, ")", index, checked, &c, &colors); state.Token(80, "?", index, checked, &c, &colors); return
     }
-    if node.kind == "literal_int" { Literal(colors, literals.Integer(parseInt(node.text))); return }
-    if node.kind == "literal_float64" { Literal(colors, literals.Float(parseFloat64(node.text))); return }
-    if node.kind == "literal_str" { Literal(colors, literals.Text(node.text)); return }
-    if node.kind == "literal_keyword" { Literal(colors, literals.Boolean(node.text == "true")); return }
-    if node.kind == "match" {
-        state.Token(colors, 64, "match"); state.Token(colors, 80, "("); Emit(c, colors, children[0]); state.Token(colors, 80, ")"); state.Token(colors, 80, "{")
-        let typeId = state.ExpressionType(c, children[0])
-        for position, child in slice(children, 1, len(children)) {
-            if position > 0 { state.Token(colors, 80, ",") }
-            state.Token(colors, 64, "case"); Pattern(c, colors, child, typeId); state.Token(colors, 80, "=>")
-            let arm = nodes[child]
-            Emit(c, colors, arm.children[len(arm.children) - 1])
+    if node.kind == "context_variant" { Enum(index, node.text, [], checked, &c, &colors); return }
+    if node.kind == "lambda" || node.kind == "value_block" {
+        var marker = "lambda"
+        if node.kind == "value_block" { marker = "value_block" }
+        state.Token(64, marker, index, checked, &c, &colors); state.Token(80, "(", index, checked, &c, &colors)
+        state.Id(index, index, checked, &c, &colors); state.Token(80, ")", index, checked, &c, &colors)
+        c.bodies.append(index); return
+    }
+    if node.kind == "literal_int" {
+        match parseInt(node.text) {
+            .Ok(value) => { Literal(literals.Integer(value), &colors) },
+            .Err(error) => { state.Report(index, error.message, checked, &c) }
         }
-        state.Token(colors, 80, "}"); return
+        return
     }
-    if node.kind == "annotate" { Emit(c, colors, children[0]); return }
+    if node.kind == "literal_float64" {
+        match parseFloat64(node.text) {
+            .Ok(value) => { Literal(literals.Float(value), &colors) },
+            .Err(error) => { state.Report(index, error.message, checked, &c) }
+        }
+        return
+    }
+    if node.kind == "literal_str" { state.Text(node.text, index, checked, &c, &colors); return }
+    if node.kind == "literal_keyword" { Literal(literals.Boolean(node.text == "true"), &colors); return }
+    if node.kind == "match" {
+        state.Token(64, "match", index, checked, &c, &colors); Subjects(children[0], checked, &c, &colors); state.Token(80, "{", index, checked, &c, &colors)
+        for position, child in slice(children, 1, len(children)) {
+            if position > 0 { state.Token(80, ",", index, checked, &c, &colors) }
+            state.Token(64, "case", index, checked, &c, &colors); Patterns(child, checked, &c, &colors); state.Token(80, "=>", index, checked, &c, &colors)
+            let arm = nodes[child]
+            Emit(arm.children[len(arm.children) - 1], checked, &c, &colors)
+        }
+        state.Token(80, "}", index, checked, &c, &colors); return
+    }
+    if node.kind == "annotate" { Emit(children[0], checked, &c, &colors); return }
     if node.kind == "name" {
-        let symbol = state.Reference(c, index)
+        let symbol = state.Reference(index, checked, &c)
         if symbol < 0 { return }
         let target = resolved.bound.symbols[symbol]
         if target.kind == "builtin" {
-            if target.name == "None" { Enum(c, colors, index, "None", []); return }
-            if target.name == "Some" || target.name == "None" || target.name == "Error" || target.name == "Option" || target.name == "print" { state.Report(c, index, "Special builtin pixel emission is not implemented: " + target.name); return }
-            state.Token(colors, 128, target.name)
-        } else { state.Id(c, colors, symbol, index) }
+            if target.name == "Error" || target.name == "Option" || target.name == "print" { state.Report(index, "Special builtin pixel emission is not implemented: " + target.name, checked, &c); return }
+            state.Token(128, target.name, index, checked, &c, &colors)
+        } else { state.Id(symbol, index, checked, &c, &colors) }
         return
     }
+    if node.kind == "inout_argument" { state.Token(80, "&", index, checked, &c, &colors); Emit(children[0], checked, &c, &colors); return }
     if node.kind == "unary" {
         let operand = nodes[children[0]]
-        if node.text == "-" && operand.kind == "literal_int" { Literal(colors, literals.Integer(parseInt("-" + operand.text))); return }
-        state.Token(colors, 80, "(")
+        if node.text == "-" && operand.kind == "literal_int" {
+            match parseInt("-" + operand.text) {
+                .Ok(value) => { Literal(literals.Integer(value), &colors) },
+                .Err(error) => { state.Report(index, error.message, checked, &c) }
+            }
+            return
+        }
+        state.Token(80, "(", index, checked, &c, &colors)
         var op = "not"
         if node.text == "-" { op = "-" }
-        state.Token(colors, 48, op); Emit(c, colors, children[0]); state.Token(colors, 80, ")"); return
+        state.Token(48, op, index, checked, &c, &colors); Emit(children[0], checked, &c, &colors); state.Token(80, ")", index, checked, &c, &colors); return
     }
     if node.kind == "binary" {
-        state.Token(colors, 80, "("); Emit(c, colors, children[0])
+        state.Token(80, "(", index, checked, &c, &colors); Emit(children[0], checked, &c, &colors)
         var op = node.text
         if op == "&&" { op = "and" }
         if op == "||" { op = "or" }
-        state.Token(colors, 48, op); Emit(c, colors, children[1]); state.Token(colors, 80, ")"); return
+        state.Token(48, op, index, checked, &c, &colors); Emit(children[1], checked, &c, &colors); state.Token(80, ")", index, checked, &c, &colors); return
     }
     if node.kind == "specialize" {
-        Emit(c, colors, children[0]); state.Token(colors, 80, "[")
+        Emit(children[0], checked, &c, &colors); state.Token(80, "::", index, checked, &c, &colors); state.Token(80, "[", index, checked, &c, &colors)
         for position, child in slice(children, 1, len(children)) {
-            if position > 0 { state.Token(colors, 80, ",") }
-            state.Type(c, colors, state.Annotation(c, child), child)
+            if position > 0 { state.Token(80, ",", index, checked, &c, &colors) }
+            state.Type(state.Annotation(child, checked, &c), child, checked, &c, &colors)
         }
-        state.Token(colors, 80, "]"); return
+        state.Token(80, "]", index, checked, &c, &colors); return
     }
-    if node.kind == "field" && EnumBase(c, children[0]) { Enum(c, colors, index, node.text, []); return }
-    if node.kind == "field" && has(c.references, string(index)) {
+    if node.kind == "field" && EnumBase(c, children[0], checked) { Enum(index, node.text, [], checked, &c, &colors); return }
+    if node.kind == "field" && c.references.has(string(index)) {
         let symbol = c.references[string(index)]
         let target = resolved.bound.symbols[symbol]
-        state.Id(c, colors, state.ModuleId(c, target.module), index); state.Token(colors, 80, "."); state.Id(c, colors, symbol, index); return
+        state.Id(state.ModuleId(target.module, checked), index, checked, &c, &colors); state.Token(80, ".", index, checked, &c, &colors); state.Id(symbol, index, checked, &c, &colors); return
     }
-    if node.kind == "field" { Emit(c, colors, children[0]); state.Token(colors, 80, "@"); Literal(colors, literals.Text(node.text)); return }
-    if node.kind == "construct" {
-        state.Type(c, colors, state.ExpressionType(c, index), index); state.Token(colors, 80, "("); state.Token(colors, 80, "{")
+    if node.kind == "field" { Emit(children[0], checked, &c, &colors); state.Token(80, "@", index, checked, &c, &colors); state.Text(node.text, index, checked, &c, &colors); return }
+    if node.kind == "record_update" {
+        state.Token(80, "(", index, checked, &c, &colors); Emit(children[0], checked, &c, &colors); state.Token(80, ")", index, checked, &c, &colors)
+        state.Token(64, "with", index, checked, &c, &colors); state.Token(80, "{", index, checked, &c, &colors)
         for position, child in slice(children, 1, len(children)) {
-            if position > 0 { state.Token(colors, 80, ",") }
+            if position > 0 { state.Token(80, ",", index, checked, &c, &colors) }
             let field = nodes[child]
-            Literal(colors, literals.Text(field.text)); state.Token(colors, 80, ":")
-            if len(field.children) > 0 { Emit(c, colors, field.children[0]) }
-            else { state.Id(c, colors, state.Reference(c, child), child) }
+            state.Text(field.text, index, checked, &c, &colors); state.Token(80, ":", index, checked, &c, &colors)
+            if len(field.children) > 0 { Emit(field.children[0], checked, &c, &colors) }
+            else { state.Id(state.Reference(child, checked, &c), child, checked, &c, &colors) }
         }
-        state.Token(colors, 80, "}"); state.Token(colors, 80, ")"); return
+        state.Token(80, "}", index, checked, &c, &colors); return
+    }
+    if node.kind == "construct" {
+        state.Type(state.ExpressionType(index, checked, &c), index, checked, &c, &colors); state.Token(80, "(", index, checked, &c, &colors); state.Token(80, "{", index, checked, &c, &colors)
+        for position, child in slice(children, 1, len(children)) {
+            if position > 0 { state.Token(80, ",", index, checked, &c, &colors) }
+            let field = nodes[child]
+            state.Text(field.text, index, checked, &c, &colors); state.Token(80, ":", index, checked, &c, &colors)
+            if len(field.children) > 0 { Emit(field.children[0], checked, &c, &colors) }
+            else { state.Id(state.Reference(child, checked, &c), child, checked, &c, &colors) }
+        }
+        state.Token(80, "}", index, checked, &c, &colors); state.Token(80, ")", index, checked, &c, &colors); return
     }
     if node.kind == "call" {
         let callee = nodes[children[0]]
-        if callee.kind == "field" && EnumBase(c, callee.children[0]) { Enum(c, colors, index, callee.text, slice(children, 1, len(children))); return }
-        if callee.kind == "name" && has(c.references, string(children[0])) {
-            let symbol = resolved.bound.symbols[c.references[string(children[0])]]
-            if symbol.kind == "builtin" && (symbol.name == "Some" || symbol.name == "None") { Enum(c, colors, index, symbol.name, slice(children, 1, len(children))); return }
-        }
-        if callee.kind == "specialize" && has(c.references, string(callee.children[0])) {
-            let symbol = resolved.bound.symbols[c.references[string(callee.children[0])]]
-            if symbol.kind == "builtin" && symbol.name == "jsonDecode" {
-                state.Token(colors, 128, "jsonDecode"); state.Token(colors, 80, "["); state.Type(c, colors, state.ExpressionType(c, index), index)
-                state.Token(colors, 80, "]"); state.Token(colors, 80, "("); Emit(c, colors, children[1]); state.Token(colors, 80, ")"); return
+        if callee.kind == "context_variant" || (callee.kind == "field" && EnumBase(c, callee.children[0], checked)) { Enum(index, callee.text, slice(children, 1, len(children)), checked, &c, &colors); return }
+        let imported = callee.kind == "field" && c.references.has(string(children[0]))
+        let grouped = callee.kind != "name" && callee.kind != "specialize" && !imported
+        if grouped { state.Token(80, "(", index, checked, &c, &colors) }
+        Emit(children[0], checked, &c, &colors)
+        if grouped { state.Token(80, ")", index, checked, &c, &colors) }
+        let callKey = state.Key(c.module, index)
+        if (callee.kind == "name" || imported) && c.calls.has(callKey) {
+            let call = checked.calls[c.calls[callKey]]
+            if len(call.arguments) > 0 {
+                state.Token(80, "::", index, checked, &c, &colors)
+                state.Token(80, "[", index, checked, &c, &colors)
+                for position, argument in call.arguments { if position > 0 { state.Token(80, ",", index, checked, &c, &colors) }; state.Type(argument, index, checked, &c, &colors) }
+                state.Token(80, "]", index, checked, &c, &colors)
             }
         }
-        let imported = callee.kind == "field" && has(c.references, string(children[0]))
-        let grouped = callee.kind != "name" && callee.kind != "specialize" && !imported
-        if grouped { state.Token(colors, 80, "(") }
-        Emit(c, colors, children[0])
-        if grouped { state.Token(colors, 80, ")") }
-        let callKey = state.Key(c.module, index)
-        if (callee.kind == "name" || imported) && has(c.calls, callKey) {
-            let call = c.checked.calls[c.calls[callKey]]
-            state.Token(colors, 80, "[")
-            for position, argument in call.arguments { if position > 0 { state.Token(colors, 80, ",") }; state.Type(c, colors, argument, index) }
-            state.Token(colors, 80, "]")
-        }
-        state.Token(colors, 80, "(")
+        state.Token(80, "(", index, checked, &c, &colors)
         for position, argument in slice(children, 1, len(children)) {
-            if position > 0 { state.Token(colors, 80, ",") }
-            Emit(c, colors, argument)
+            if position > 0 { state.Token(80, ",", index, checked, &c, &colors) }
+            Emit(argument, checked, &c, &colors)
         }
-        state.Token(colors, 80, ")"); return
+        state.Token(80, ")", index, checked, &c, &colors); return
     }
     if node.kind == "array" || node.kind == "map" || node.kind == "map_inferred" {
-        state.Type(c, colors, state.ExpressionType(c, index), index)
-        state.Token(colors, 80, "(")
+        state.Type(state.ExpressionType(index, checked, &c), index, checked, &c, &colors)
+        state.Token(80, "(", index, checked, &c, &colors)
         if node.kind == "array" {
-            state.Token(colors, 80, "[")
-            for position, child in children { if position > 0 { state.Token(colors, 80, ",") }; Emit(c, colors, child) }
-            state.Token(colors, 80, "]")
+            state.Token(80, "[", index, checked, &c, &colors)
+            for position, child in children { if position > 0 { state.Token(80, ",", index, checked, &c, &colors) }; Emit(child, checked, &c, &colors) }
+            state.Token(80, "]", index, checked, &c, &colors)
         } else {
-            state.Token(colors, 80, "{")
+            state.Token(80, "{", index, checked, &c, &colors)
             var start = 1
             if node.kind == "map_inferred" { start = 0 }
             for position, child in slice(children, start, len(children)) {
-                if position > 0 { state.Token(colors, 80, ",") }
-                Emit(c, colors, nodes[child].children[0]); state.Token(colors, 80, ":"); Emit(c, colors, nodes[child].children[1])
+                if position > 0 { state.Token(80, ",", index, checked, &c, &colors) }
+                Emit(nodes[child].children[0], checked, &c, &colors); state.Token(80, ":", index, checked, &c, &colors); Emit(nodes[child].children[1], checked, &c, &colors)
             }
-            state.Token(colors, 80, "}")
+            state.Token(80, "}", index, checked, &c, &colors)
         }
-        state.Token(colors, 80, ")"); return
+        state.Token(80, ")", index, checked, &c, &colors); return
     }
-    if node.kind == "index" { Emit(c, colors, children[0]); state.Token(colors, 80, "["); Emit(c, colors, children[1]); state.Token(colors, 80, "]"); return }
-    state.Report(c, index, "Expression pixel emission is not implemented: " + node.kind)
+    if node.kind == "index" { Emit(children[0], checked, &c, &colors); state.Token(80, "[", index, checked, &c, &colors); Emit(children[1], checked, &c, &colors); state.Token(80, "]", index, checked, &c, &colors); return }
+    state.Report(index, "Expression pixel emission is not implemented: " + node.kind, checked, &c)
 }

@@ -1,0 +1,15 @@
+import "model.pxl" as model
+import "types.pxl" as types
+
+// These operations expose expected input and host failures as native values.
+export fn Handles(name: string) -> bool {
+    for operation in ["parseInt", "parseFloat64", "utf8Decode", "float64FromBytes", "zlibCompress", "zlibDecompress", "jsonParse", "jsonGet", "jsonAt", "jsonAsInt", "jsonAsFloat64", "jsonAsString", "jsonAsBool", "jsonKeys", "readText", "writeText", "readBytes", "writeBytes", "readChunk", "listDirectory"] {
+        if name == operation { return true }
+    }
+    return false
+}
+export fn ResultType(value: int, resolved: inout model.ResolvedTypes) -> int {
+    if value < 0 { return -1 }
+    let error = types.ErrorType(&resolved)
+    return types.ResultType(value, error, &resolved)
+}

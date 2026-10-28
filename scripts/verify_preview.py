@@ -4,7 +4,8 @@ related: explicit selected tests only.
 merge: host language/project regression, generated compiler regression, Studio
 bridge checks and the installed-service performance budget.
 release: merge plus three generations, uncached complete PNG bootstrap and
-regressions of the PNG-recovered compiler. Packaging/UI acceptance is separate.
+regressions of the PNG-recovered compiler and complete source recovery/self-compilation.
+Packaging/UI acceptance is separate.
 """
 import argparse
 import hashlib
@@ -126,25 +127,29 @@ def main():
                 raise RuntimeError('Installed compiler must match current frozen source and artifact hashes')
             dest=output/'language-project'
             run('language-project',[py,'-m','pixellang.regression','--scope','host','--workers',str(args.workers),'--timeout','1200','--output',str(dest),*scheduling('language-project')],dest/'summary.json')
-            def generated(name,compiler):
+            def generated(name,compiler,native_compiler):
                 dest=output/name
-                run(name,[py,'scripts/verify_generated_compiler.py','--compiler',str(compiler),'--sources',str(snapshot),
+                run(name,[py,'scripts/verify_generated_compiler.py','--compiler',str(compiler),'--native-compiler',str(native_compiler),'--sources',str(snapshot),
                           '--workers',str(args.workers),'--timeout','1200','--output',str(dest),*scheduling(name)],dest/'summary.json',timeout=2400)
-            generated('generated',artifact)
+            generated('generated',artifact,artifact.with_name('compiler-native'))
             run('bridge',['node','vscode/test/bridge-service.js'],timeout=120)
             run('dap',['node','vscode/test/debug-launch.js'],timeout=30)
             run('onboarding',['node','vscode/test/onboarding.js'],timeout=60)
             perf=output/'performance.json'
             run('performance',[py,'scripts/benchmark_service.py','--output',str(perf),'--limits','config/service-performance-limits.json'],perf,required='gate',timeout=120)
             if args.level=='release':
-                dest=output/'bootstrap'
-                run('bootstrap',[py,'-m','pixellang.bootstrap','--generations','3','--heap-items','64000000','--heap-objects','2000000','--stage-timeout','600','--output',str(dest)],dest/'summary.json',required='fixedPointVerified',timeout=2400)
-                if (dest/'stage3.json').read_bytes()!=artifact.read_bytes():raise RuntimeError('Installed artifact differs from accepted fixed point')
-                image=output/'image'
-                run('image',[py,'-m','pixellang.bootstrap_image','--stage-timeout','1200','--output',str(image)],image/'summary.json',timeout=3600)
-                recovered=output/'image-generated'
-                run('image-generated',[py,'scripts/verify_compiler_image.py','--compiler',str(dest/'stage3.json'),'--sources',str(snapshot),'--image',str(image/'compiler.png'),'--output',str(recovered)],recovered/'summary.json',timeout=1800)
-                generated('recovered-regression',recovered/'compiler.json')
+                dest=output/'native-bootstrap'
+                run('native-bootstrap',[py,'scripts/verify_native_selfhost.py',
+                    '--seed',str(artifact),'--native-compiler',str(artifact.with_name('compiler-native')),
+                    '--output',str(dest)],dest/'status.json',required='status',timeout=6000)
+                if (dest/'compiler-g3.json').read_bytes()!=artifact.read_bytes():raise RuntimeError('Installed artifact differs from accepted fixed point')
+                sources_recovered=output/'source-recovery'
+                run('source-recovery',[py,'scripts/verify_native_source_recovery.py',
+                    '--compiler',str(dest/'compiler-g3.json'),
+                    '--native-compiler',str(dest/'compiler-g3'),'--sources',str(snapshot),
+                    '--image',str(dest/'compiler.png'),
+                    '--output',str(sources_recovered)],sources_recovered/'summary.json',timeout=7500)
+                generated('recovered-regression',dest/'recovered-compiler.json',dest/'recovered-compiler')
             result['verified']=True
     except Exception as error:
         result['error']=str(error)

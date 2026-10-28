@@ -48,16 +48,25 @@ def timing_costs(directory):
 def shards(ids, workers, costs=None):
     if not 1 <= workers <= 16:
         raise ValueError('Workers must be between 1 and 16')
-    count = min(workers, len(ids))
-    if not costs:
-        return [ids[i::workers] for i in range(count)]
+    # unittest runs setUpClass once per contiguous class in each process.
+    # Keep a class together so expensive native driver builds are not repeated
+    # by every worker. The requested worker count is an upper bound.
+    fixtures = {}
+    for name in ids:
+        owner = name.rpartition('.')[0] or name
+        fixtures.setdefault(owner, []).append(name)
+    count = min(workers, len(fixtures))
     groups, loads = [[] for _ in range(count)], [0.0] * count
-    for name in sorted(ids, key=lambda name: -costs.get(name, 1)):
+    costs = costs or {}
+    weight = lambda names: sum(costs.get(name, 1) for name in names)
+    for names in sorted(fixtures.values(), key=lambda names: -weight(names)):
         worker = min(range(count), key=lambda index: loads[index])
-        groups[worker].append(name)
-        loads[worker] += costs.get(name, 1)
+        groups[worker].extend(names)
+        loads[worker] += weight(names)
     order = {name: index for index, name in enumerate(ids)}
-    return [sorted(group, key=order.get) for group in groups]
+    fixture_order = {owner: index for index, owner in enumerate(fixtures)}
+    return [sorted(group, key=lambda name: (
+        fixture_order[name.rpartition('.')[0] or name], order[name])) for group in groups]
 
 
 def run_parallel(groups, output, root, command, *, timeout=300, selection=None):

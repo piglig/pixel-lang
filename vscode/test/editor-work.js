@@ -1,0 +1,26 @@
+const assert = require('node:assert/strict');
+const {EditorWork} = require('../src/editor-work');
+(async () => {
+  const work = new EditorWork(), oldEditor = new AbortController();
+  work.track(oldEditor);
+  const first = work.beginCheck();
+  assert(oldEditor.signal.aborted);
+  let started = false;
+  const outline = work.beforeOutline().then(() => {started = true;});
+  await Promise.resolve(); assert(!started);
+  const second = work.beginCheck();
+  assert(first.controller.signal.aborted);
+  work.finishCheck(first);
+  await Promise.resolve(); assert(!started, 'Stale completion must not release the new check');
+  const cancelled = new AbortController();
+  const waiting = work.beforeOutline(cancelled.signal);
+  cancelled.abort(); await assert.rejects(waiting, {name:'AbortError'});
+  const editor = new AbortController(); work.track(editor);
+  work.cancel(); await outline;
+  assert(started && editor.signal.aborted && second.controller.signal.aborted);
+  assert.equal(work.check, undefined);
+  const third = work.beginCheck(); work.finishCheck(third);
+  assert(!third.controller.signal.aborted, 'Completing diagnostics does not cancel a successful check');
+  await work.beforeOutline();
+  console.log('Editor scheduling: diagnostics precede outlines, stale checks cannot release successors, builds cancel pending work.');
+})().catch(error => {console.error(error);process.exitCode=1;});

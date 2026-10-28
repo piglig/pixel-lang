@@ -1,0 +1,77 @@
+import "model.pxl" as model
+import "parser.pxl" as parser
+
+export record Output { text: string, diagnostics: [model.Diagnostic] }
+record Writer { parts: [string], depth: int, lineStart: bool, previous: string, unary: bool }
+fn Padding(depth: int) -> string {
+    var parts: [string] = []
+    var i = 0
+    while i < depth { parts.append("    "); i += 1 }
+    return join(parts, "")
+}
+fn Put(w: inout Writer, text: string) {
+    if len(text) == 0 { return }
+    if w.lineStart { w.parts.append(Padding(w.depth)); w.lineStart = false }
+    w.parts.append(text)
+}
+fn Comment(w: inout Writer, text: string) {
+    let content = trim(text)
+    if len(content) == 0 { return }
+    if !w.lineStart { w.parts.append(" ") }
+    Put(&w, content)
+    w.previous = "comment"
+    w.unary = false
+}
+fn Space(w: Writer, token: model.Token) -> bool {
+    let current = token.text
+    let prior = w.previous
+    if w.lineStart || prior == "" { return false }
+    if prior == "comment" { return true }
+    if current == "::" || current == ")" || current == "]" || current == "," || current == ";" || current == "." || current == ":" { return false }
+    if prior == "::" || prior == "(" || prior == "[" || prior == "." || w.unary { return false }
+    if current == "(" {
+        return prior == "if" || prior == "while" || prior == "match" || prior == "for" || prior == "in" || prior == "return" || prior == "=" || prior == "=>"
+    }
+    if current == "[" {
+        return prior == "=" || prior == "return" || prior == ":" || prior == "," || prior == "=>" || prior == "in" || prior == "->" || prior == "mut" || prior == "inout"
+    }
+    if current == "}" && prior == "{" { return false }
+    return true
+}
+fn Same(left: model.Parsed, right: model.Parsed) -> bool {
+    if len(right.diagnostics) > 0 || left.roots != right.roots || len(left.nodes) != len(right.nodes) { return false }
+    for index, node in left.nodes {
+        let other = right.nodes[index]
+        if node.kind != other.kind || node.text != other.text || node.children != other.children { return false }
+    }
+    return true
+}
+export fn Format(source: string, text: string) -> Output {
+    let parsed = parser.Parse(source, text)
+    if len(parsed.diagnostics) > 0 { return Output{text, diagnostics: parsed.diagnostics} }
+    var prefixes: map[string, bool] = map[string, bool]{}
+    for node in parsed.nodes { if node.kind == "unary" || node.kind == "inout_argument" { prefixes[string(node.start)] = true } }
+    var w: Writer = Writer{parts: [], depth: 0, lineStart: true, previous: "", unary: false}
+    var cursor = 0
+    for token in parsed.tokens {
+        Comment(&w, slice(text, cursor, token.start))
+        cursor = token.end
+        if token.kind == "eof" { break }
+        if token.kind == "separator" {
+            if token.text != "\n" && token.text != "\r\n" { Comment(&w, token.text) }
+            else { w.parts.append("\n"); w.lineStart = true; w.previous = ""; w.unary = false }
+            continue
+        }
+        if token.text == "}" || token.text == ")" || token.text == "]" { w.depth -= 1 }
+        if Space(w, token) { w.parts.append(" ") }
+        Put(&w, token.text)
+        if token.text == "{" || token.text == "(" || token.text == "[" { w.depth += 1 }
+        w.previous = token.text
+        w.unary = prefixes.has(string(token.start))
+    }
+    var result = join(w.parts, "")
+    if len(result) > 0 && result[len(result) - 1] != "\n" { result += "\n" }
+    let checked = parser.Parse(source, result)
+    if !Same(parsed, checked) { return Output{text, diagnostics: [model.Diagnostic{source, phase: "format", message: "Formatting changed the program syntax", start: 0, end: 0, line: 1, column: 1}]} }
+    return Output{text: result, diagnostics: []}
+}

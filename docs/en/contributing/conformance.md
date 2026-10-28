@@ -1,13 +1,17 @@
 # Conformance coverage
 
-[中文](../../zh-CN/contributing/conformance.md) · [English](conformance.md) · [Documentation](../README.md)
+[简体中文](../../zh-CN/contributing/conformance.md) · [English](conformance.md) · [Documentation](../README.md)
+
+Tests are layered by semantics and delivery boundary. The matrix defines what must be checked; the existence of tests is not evidence that current artifacts pass.
+
+## Contract and interface
 
 Use [layered gates](verification.md) for the change's scope. Ordinary unittest discover
 does not replace bootstrap, generated-compiler, image, installation or real-editor checks.
 
 | Contract | Validation direction |
 | --- | --- |
-| Executable color/spatial semantics | Color edits, operand positions, indentation, next/child, invalid alpha and disconnected regions |
+| Executable color/spatial semantics | Color edits, operand positions, explicit regions, next/child, invalid alpha and disconnected regions |
 | No OCR or hidden executable text | Real text-free PNGs, removed ancillary metadata, independent image execution |
 | AST and canonicalization | Inspectable regions/provenance, meaning preservation and idempotence |
 | IR and VM | Deterministic bytecode, optimizer agreement, random arithmetic, calls/recursion/loops, invalid executables |
@@ -17,6 +21,9 @@ does not replace bootstrap, generated-compiler, image, installation or real-edit
 | Caches and service | Differential modes, invalidation, relocation, no publication on failure, deadlines, restarts, stale results |
 | Distribution and tooling | Isolated wheels, source-free images, Node Bridge, DAP, real VS Code interaction |
 
-Arbitrary-dimensional point structures describe an extension boundary, not 3D source
-support. Test existence does not prove the current artifact passed: run checks and
+Native 3D semantics and two-dimensional PNG encoding are separate verification boundaries. Test existence does not prove the current artifact passed: run checks and
 verify source/artifact identities.
+
+## Further reading
+
+- [Documentation index](../README.md)

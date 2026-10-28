@@ -1,19 +1,34 @@
-// Development encoding tables matching docs/PIXEL_ENCODING.md.
-export fn Identifier(value: int) -> [int] {
-    if value < 0 || value > 65535 { fail("Identifier must be from 0 to 65535") }
-    return [32, value / 256, value % 256, 255]
+// Semantic token encoding; names are shared by the native reader and emitter.
+import "failures.pxl" as failures
+export fn Identifier(value: int) -> Result[[int], Error] {
+    if value < 0 || value > 65535 { return .Err(failures.New("Identifier must be from 0 to 65535")) }
+    return .Ok([32, value / 256, value % 256, 255])
 }
 export fn Names(category: int) -> [string] {
     var names: [string] = []
     if category == 48 { names = ["+", "-", "*", "/", "%", "==", "!=", "<", "<=", ">", ">=", "and", "or", "not"] }
-    if category == 64 { names = ["let", "set", "if", "else", "while", "fn", "return", "print", "import", "export", "do", "try", "catch", "for", "in", "record", "var", "entry", "break", "continue", "enum", "variant", "match", "case", "otherwise", "lambda", "lambda_body"] }
-    if category == 80 { names = ["(", ")", ",", ":", "=", "->", ".", "[", "]", "{", "}", "@", "+=", "-=", "*=", "/=", "%=", "=>"] }
-    if category == 96 { names = ["int", "bool", "str", "unit", "map", "record", "json", "Error", "float64", "parameter", "Option", "function"] }
-    if category == 128 { names = ["len", "append", "pop", "slice", "string", "parseInt", "assert", "split", "join", "input", "trim", "replace", "keys", "has", "delete", "fail", "jsonDecode", "jsonParse", "jsonStringify", "jsonKind", "jsonGet", "jsonAt", "jsonAsInt", "jsonAsString", "jsonAsBool", "jsonFrom", "jsonNull", "jsonKeys", "readText", "writeText", "float64", "int", "parseFloat64", "jsonAsFloat64", "lookup", "unicodeCategory", "utf8Encode", "utf8Decode", "float64Bytes", "float64FromBytes", "crc32", "zlibCompress", "zlibDecompress", "readBytes", "writeBytes", "extend", "arrayRepeat"] }
+    if category == 64 { names = ["let", "set", "if", "else", "while", "fn", "return", "print", "import", "export", "do", "for", "in", "record", "var", "entry", "break", "continue", "enum", "variant", "match", "case", "otherwise", "lambda", "lambda_body", "effect_fn", "frame", "flow", "instance", "state", "next", "output", "effect_body", "with", "step", "value_block", "value_body", "block_result"] }
+    if category == 80 { names = ["(", ")", ",", ":", "=", "->", ".", "[", "]", "{", "}", "@", "+=", "-=", "*=", "/=", "%=", "=>", "&", "?", "::"] }
+    if category == 96 { names = ["int", "bool", "str", "unit", "map", "record", "json", "Error", "float64", "parameter", "Option", "function", "frame", "Point3", "Vec3", "Transform3", "Entity", "Space", "Flow", "Link", "effect_function", "Equatable", "Ordered", "Numeric", "Hashable", "inout", "Result"] }
+    if category == 128 { names = ["len", "slice", "string", "parseInt", "assert", "split", "join", "input", "trim", "replace", "jsonDecode", "jsonParse", "jsonStringify", "jsonKind", "jsonGet", "jsonAt", "jsonAsInt", "jsonAsString", "jsonAsBool", "jsonFrom", "jsonNull", "jsonKeys", "readText", "writeText", "float64", "int", "parseFloat64", "jsonAsFloat64", "unicodeCategory", "utf8Encode", "utf8Decode", "float64Bytes", "float64FromBytes", "crc32", "zlibCompress", "zlibDecompress", "readBytes", "writeBytes", "arrayRepeat", "readChunk", "listDirectory", "programArgs", "Space"] }
     return names
 }
-export fn Symbol(category: int, name: string) -> [int] {
-    for index, value in Names(category) { if value == name { return [category, index / 256, index % 256, 255] } }
-    fail("Unknown semantic token: " + string(category) + ":" + name)
-    return []
+export fn Index() -> map[int, map[string, int]] {
+    var result: map[int, map[string, int]] = map[int, map[string, int]]{}
+    for category in [48, 64, 80, 96, 128] {
+        var names: map[string, int] = map[string, int]{}
+        for index, name in Names(category) { names[name] = index }
+        result[category] = names
+    }
+    return result
+}
+export fn Symbol(category: int, name: string, indices: map[int, map[string, int]]) -> Result[[int], Error] {
+    if indices.has(category) {
+        let names = indices[category]
+        if names.has(name) {
+            let index = names[name]
+            return .Ok([category, index / 256, index % 256, 255])
+        }
+    }
+    return .Err(failures.New("Unknown semantic token: " + string(category) + ":" + name))
 }

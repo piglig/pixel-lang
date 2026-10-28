@@ -154,8 +154,6 @@ def lex(source):
             "*=",
             "/=",
             "%=",
-            "++",
-            "--",
         ):
             tokens.append(Lexeme("symbol", pair, i, i + 2))
             i += 2
@@ -173,10 +171,6 @@ RESERVED = {
     "enum",
     "match",
     "Option",
-    "Some",
-    "None",
-    "try",
-    "catch",
     "json",
     "Error",
     "record",
@@ -472,7 +466,7 @@ class TextParser:
 
     def variant_name(self):
         token = self.pop()
-        if token.kind != "name" or token.value in RESERVED - {"Some", "None"}:
+        if token.kind != "name" or token.value in RESERVED:
             self.error("Expected variant name")
         return token.value, self.source.span(token.start, token.end)
 
@@ -495,8 +489,6 @@ class TextParser:
 
     def enum_reference(self):
         token = self.pop()
-        if token.value in ("Some", "None"):
-            return "Option", token.value, self.source.span(token.start, token.end)
         name = token.value
         name_span = self.source.span(token.start, token.end)
         module_span = None
@@ -544,6 +536,8 @@ class TextParser:
             else:
                 typ, variant, span = self.enum_reference()
                 if self.take("("):
+                    if self.peek(")"):
+                        self.error("Payload-free variants do not take parentheses")
                     if not self.peek(")"):
                         while True:
                             name = self.name()
@@ -636,12 +630,14 @@ class TextParser:
         elif t.value == "match" and t.kind == "name":
             left = self.match_node(False, start)
         elif t.kind == "name" and (
-            t.value in ("Some", "None") or self.enum_ahead(t.value)
+            self.enum_ahead(t.value)
         ):
             self.i -= 1
             typ, variant, span = self.enum_reference()
             args = []
             if self.take("("):
+                if self.peek(")"):
+                    self.error("Payload-free variants do not take parentheses")
                 if not self.peek(")"):
                     while True:
                         args.append(self.expression())
@@ -1116,23 +1112,6 @@ class TextParser:
                 },
                 start,
             )
-        if self.take("try"):
-            body = self.block()
-            self.nl()
-            self.need("catch")
-            name = self.name()
-            name_span = self.last_name_span
-            otherwise = self.block()
-            return self.node(
-                "try",
-                {
-                    "body": body,
-                    "name": name,
-                    "_name_span": name_span,
-                    "otherwise": otherwise,
-                },
-                start,
-            )
         if self.take("if"):
             condition = self.expression(allow_record=False)
             body = self.block()
@@ -1196,15 +1175,11 @@ class TextParser:
         op = self.peek().value
         if op == ":=":
             self.error("Use let or var for declarations")
-        if op in ("=", "+=", "-=", "*=", "/=", "%=", "++", "--"):
+        if op in ("=", "+=", "-=", "*=", "/=", "%="):
             self.pop()
             if left.kind not in ("variable", "index", "field"):
                 self.error("Assignment needs a variable or array index")
-            value = (
-                self.node("literal", {"value": 1, "type": "int"}, start)
-                if op in ("++", "--")
-                else self.expression()
-            )
+            value = self.expression()
             update = {"update": op[0]} if op != "=" else {}
             if left.kind in ("index", "field"):
                 return self.node(

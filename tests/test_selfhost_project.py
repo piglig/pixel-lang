@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from pixellang.project import compile_project
+from tests.native_compiler import compile_native_sources, execute_native_driver
 from pixellang.vm import VM
 from tests.selfhost_runtime import (SELFHOST_HEAP_LIMITS, SELFHOST_MAX_STEPS, SELFHOST_MAX_OUTPUT_CHARS)
 
@@ -14,22 +14,21 @@ class SelfHostedProjectTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.files = {p.name: p.read_text() for p in (ROOT / 'selfhost').glob('*.pxl')}
-        cls.bytecode = compile_project(cls.files)[1].bytecode
+        cls.bytecode = compile_native_sources(cls.files)
 
-    def build(self, files, entry='main.pxl'):
+    def build(self, files, entry='main.pxl', *, native=False):
         request = {'operation': 'project', 'source': entry, 'text': '', 'files': files}
         vm = VM(self.bytecode, **SELFHOST_HEAP_LIMITS, input_text=json.dumps(request), max_steps=SELFHOST_MAX_STEPS, max_depth=1024,
                 max_output_chars=SELFHOST_MAX_OUTPUT_CHARS)
-        with patch('pixellang.project.build_project', side_effect=AssertionError('delegated')), patch(
+        with patch(
             'pixellang.text.parse_text', side_effect=AssertionError('delegated')
         ), patch('pixellang.text.lex', side_effect=AssertionError('delegated')):
-            return vm.run()[0]
+            return execute_native_driver(self.bytecode, request, steps=SELFHOST_MAX_STEPS,
+                output_chars=SELFHOST_MAX_OUTPUT_CHARS)[0] if native else vm.run()[0]
 
     def test_own_project_import_order_and_exports(self):
-        # Audit both compiler and separately executable image-worker entry graphs.
-        files = dict(self.files)
-        files["main.pxl"] += '\nimport "image_worker.pxl" as imageWorker\n'
-        result = self.build(files)
+        # Every shipped compiler module belongs to the compiler entry graph.
+        result = self.build(self.files, native=True)
         self.assertEqual(result['diagnostics'], [])
         modules = result['modules']
         indexes = {module['path']: i for i, module in enumerate(modules)}
@@ -102,3 +101,9 @@ class SelfHostedProjectTests(unittest.TestCase):
                 self.assertEqual(result['diagnostics'], [])
                 self.assertEqual(result['modules'][-1]['path'], 'main.pxl')
                 self.assertTrue(any(m['path'].startswith('std/') for m in result['modules']))
+
+    def test_native_project_matches_reference(self):
+        for files in ({'main.pxl':'import "lib.pxl" as lib\nfn main(){let x=lib.value()}', 'lib.pxl':'export fn value()->int=1'},
+                      {'main.pxl':'import "missing.pxl" as missing\nfn main(){}'}):
+            with self.subTest(files=files):
+                self.assertEqual(self.build(files,native=True),self.build(files,native=False))

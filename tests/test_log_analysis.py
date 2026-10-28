@@ -7,7 +7,7 @@ from pathlib import Path
 
 from pixellang.fileaccess import FileAccess
 from pixellang.model import PixelError
-from pixellang.project import compile_project
+from pixellang.compiler_client import CompilerClient
 from pixellang.temporal import Timeline
 from pixellang.vm import VM
 from pixellang.workspace import Workspace
@@ -16,6 +16,11 @@ ROOT = Path(__file__).resolve().parents[1] / "examples/log-analysis"
 
 
 class LogAnalysisTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.compiler = CompilerClient()
+        cls.addClassCleanup(cls.compiler.close)
+
     def test_project_fixtures(self):
         result = Workspace(ROOT).test()
         self.assertTrue(result["passed"], result)
@@ -73,26 +78,15 @@ class LogAnalysisTests(unittest.TestCase):
                 )
                 self.assertEqual(len(report["problems"]), 2)
         for invalid in ["DEBUG", "warn", "", True, 1]:
-            with self.subTest(invalid=invalid), self.assertRaises(PixelError):
-                Workspace(ROOT).run(
-                    json.dumps(
-                        {
-                            "files": ["missing.jsonl"],
-                            "output": "report.json",
-                            "minimum_level": invalid,
-                        }
-                    )
-                )
-        with self.assertRaisesRegex(PixelError, "level must be INFO"):
-            Workspace(ROOT).run(
-                json.dumps(
-                    {
-                        "files": ["missing.jsonl"],
-                        "output": "report.json",
-                        "minimum_level": "DEBUG",
-                    }
-                )
-            )
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as directory:
+                root=Path(directory)
+                result=Workspace(ROOT).run(json.dumps({
+                    "files":["missing.jsonl"], "output":"report.json", "minimum_level":invalid,
+                }), file_access=FileAccess(root,root))
+                error=result["output"][0]
+                self.assertEqual(error["code"], "log.invalid_level" if isinstance(invalid,str) else "json.type_mismatch")
+                self.assertFalse((root/"report.json").exists())
+                if isinstance(invalid,str):self.assertIn("level must be INFO",error["message"])
 
     def test_generated_multifile_oracle(self):
         origin = datetime(2026, 9, 9, 10, tzinfo=UTC)
@@ -155,11 +149,13 @@ class LogAnalysisTests(unittest.TestCase):
             )
 
     def test_source_free_recording_replays_without_repeated_output(self):
-        source, _ = Workspace(ROOT).compile()
+        workspace = Workspace(ROOT)
+        workspace.verify_lock()
+        compiled = self.compiler.debug_project(workspace.files, workspace.entry)
         fixtures = ROOT / "fixtures"
         with tempfile.TemporaryDirectory() as directory:
             timeline = Timeline(
-                source,
+                compiled.source, compiled=compiled,
                 input_text=(fixtures / "config.json").read_text(),
                 file_access=FileAccess(fixtures, directory),
             )
@@ -177,10 +173,11 @@ class LogAnalysisTests(unittest.TestCase):
 
     def test_calendar_validation_including_century_leaps(self):
         files = {
-            "main.pxl": 'import "time.pxl" as time\nfn main() { try { time.Validate(input()); print(true) } catch error { print(false) } }',
+            "main.pxl": 'import "time.pxl" as time\neffect fn main() { match time.Validate(input()) {.Ok(value)=>{print(true)},.Err(error)=>{print(false)}} }',
             "time.pxl": (ROOT / "time.pxl").read_text(),
+            "std/error.pxl": (ROOT.parents[1] / "pixellang/stdlib/error.pxl").read_text(),
         }
-        _, compiled = compile_project(files)
+        compiled = self.compiler.request('compile', files=files)['result']['bytecode']
         for stamp, valid in [
             ("2000-02-29T23:59:59Z", True),
             ("2024-02-29T00:00:00Z", True),
@@ -191,4 +188,21 @@ class LogAnalysisTests(unittest.TestCase):
             ("2026-09-09T00:00:00+09:00", False),
         ]:
             with self.subTest(stamp=stamp):
-                self.assertEqual(VM(compiled.bytecode, input_text=stamp).run(), [valid])
+                self.assertEqual(VM(compiled, input_text=stamp).run(), [valid])
+
+    def test_directory_arguments_collect_files_without_writable_captures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            inputs=root/'inputs'
+            (inputs/'nested').mkdir(parents=True)
+            event=dict(timestamp='2026-09-09T10:00:00Z',level='INFO',service='api',duration_ms=2,message='ok')
+            (inputs/'a.jsonl').write_text(json.dumps(event))
+            (inputs/'nested/b.jsonl').write_text(json.dumps({**event,'duration_ms':3}))
+            (inputs/'ignored.txt').write_text('not JSON')
+            (inputs/'loop').symlink_to(inputs,target_is_directory=True)
+            result=Workspace(ROOT).run(arguments=['--directory','inputs','--output','report.json'],
+                                       file_access=FileAccess(root,root),max_steps=250_000)
+            report=result['output'][0]
+            self.assertEqual((report['count'],report['duration_total_ms']), (2,5))
+            self.assertEqual(report['problems'],[])
+            self.assertEqual(report,json.loads((root/'report.json').read_text()))

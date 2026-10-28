@@ -3,22 +3,27 @@ import "std/stats.pxl" as stats
 import "std/collections.pxl" as collections
 
 export fn Summarize(sales: [models.Sale], problems: [models.Problem], filtered: int) -> models.Report {
-    let categories = map[[int]]{}
+    var categories: map[string, [int]] = map[string, [int]]{}
     for sale in sales {
-        if !has(categories, sale.category) { categories[sale.category] = []: [int] }
-        append(categories[sale.category], sale.amount)
+        if !categories.has(sale.category) { categories[sale.category] = []: [int] }
+        categories[sale.category].append(sale.amount)
     }
-    let groups: [models.Group] = []
+    var groups: [models.Group] = []
     for category in categories {
-        let summary = stats.Summary(categories[category])
-        append(groups, models.Group{
-            category: category,
-            count: summary["count"], total: summary["total"],
-            min: summary["min"], max: summary["max"], mean: float64(summary["total"]) / float64(summary["count"]),
-        })
+        match stats.Summary(categories[category]) {
+            Option.Some(summary) => {
+                groups.append(models.Group{
+                    category,
+                    count: summary["count"], total: summary["total"],
+                    min: summary["min"], max: summary["max"],
+                    mean: float64(summary["total"]) / float64(summary["count"]),
+                })
+            },
+            Option.None => {}
+        }
     }
     return models.Report{
         accepted: len(sales), rejected: len(problems), filtered: filtered,
-        groups: collections.Sort(groups, fn(a, b) = a.total > b.total || (a.total == b.total && a.category < b.category)), errors: problems,
+        groups: collections.SortedBy(groups, fn(a, b) = a.total > b.total || (a.total == b.total && a.category < b.category)), errors: problems,
     }
 }

@@ -1,12 +1,11 @@
 import unittest
 
-from pixellang.editor import SymbolIndex, complete
+from tests.editor_support import NativeEditorCase
 from pixellang.model import PixelError
-from pixellang.project import build_project, compile_project
 from pixellang.workstation import Workstation
 
 
-class IncompleteEditorTests(unittest.TestCase):
+class IncompleteEditorTests(NativeEditorCase):
     def test_navigation_survives_incomplete_statement_and_block(self):
         for damaged in (
             "let unfinished =",
@@ -16,7 +15,7 @@ class IncompleteEditorTests(unittest.TestCase):
         ):
             source = "fn main() {\n let amount = 42\n " + damaged + "\n print(amount)\n"
             with self.subTest(damaged=damaged):
-                result = Workstation().request(
+                result = self.workstation.request(
                     "definition",
                     {
                         "files": {"main.pxl": source},
@@ -26,10 +25,10 @@ class IncompleteEditorTests(unittest.TestCase):
                 )
                 self.assertEqual(result["start"]["offset"], source.index("amount"))
                 with self.assertRaises(PixelError):
-                    compile_project({"main.pxl": source})
+                    self.compile({"main.pxl": source})
                 with self.assertRaises(PixelError):
-                    SymbolIndex({"main.pxl": source}).rename(
-                        "main.pxl", source.index("amount"), "total"
+                    self.index({"main.pxl": source}).rename(
+                        "main.pxl", source.index("amount"), "total", analyze=self.index
                     )
 
     def test_unrelated_module_error_does_not_disable_navigation(self):
@@ -38,7 +37,7 @@ class IncompleteEditorTests(unittest.TestCase):
             "main.pxl": main,
             "math.pxl": "export fn square(n: int) -> int = n * n\nfn broken() { let value = }",
         }
-        definition = Workstation().request(
+        definition = self.workstation.request(
             "definition",
             {"files": files, "source": "main.pxl", "offset": main.index("square")},
         )
@@ -46,12 +45,13 @@ class IncompleteEditorTests(unittest.TestCase):
 
     def test_recovered_ast_never_becomes_executable(self):
         files = {"main.pxl": "fn main() { let broken =\nprint(42) }"}
-        project = build_project(files, analysis=True, tolerant=True)
-        self.assertTrue(project["errors"])
-        with self.assertRaisesRegex(PixelError, "analysis only"):
-            build_project(files, tolerant=True)
+        index = self.index(files)
+        self.assertTrue(index.diagnostics)
+        response = self.workstation.compiler.worker.request(dict(version=1, operation='compile', files=files))
+        self.assertEqual(response['status'], 'diagnostics')
+        self.assertFalse((response.get('result') or {}).get('bytecode', {}).get('functions'))
 
     def test_completion_after_invalid_statement_uses_valid_scope(self):
         source = "fn main() { let amount = 42\n let broken =\n am"
-        result = complete({"main.pxl": source}, "main.pxl", "main.pxl", len(source))
+        result = self.complete({"main.pxl": source}, "main.pxl", len(source))
         self.assertEqual([item["label"] for item in result], ["amount"])

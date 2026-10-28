@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from typing import Any
 
-VERSIONS = {"language": "0.8", "encoding": "0.8", "format": "0.8"}
+VERSIONS = {"language": "0.9", "encoding": "0.9", "format": "0.9"}
 
 
 @dataclass(frozen=True)
@@ -88,10 +88,8 @@ class Token:
 class Region:
     id: int
     tokens: list[Token]
-    indent: int
     span: Span
     parent: int | None = None
-    explicit_parent: bool = False
 
 
 @dataclass

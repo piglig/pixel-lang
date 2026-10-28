@@ -2,8 +2,8 @@ import json
 import unittest
 from pathlib import Path
 
+from tests.native_compiler import compile_native_sources
 from pixellang.codec import encode_token, new_source
-from pixellang.project import compile_project
 from pixellang.vm import VM
 
 
@@ -11,23 +11,25 @@ class PixelTypeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         root = Path(__file__).resolve().parents[1]
-        files = {p.name: p.read_text() for p in (root / 'selfhost').glob('*.pxl')}
+        files = {name: (root / 'selfhost' / name).read_text() for name in ('failures.pxl', 'model.pxl', 'spatial_layout.pxl', 'pixel_tokens.pxl', 'pixel_decode.pxl', 'pixel_reader.pxl', 'pixel_types.pxl')}
         files['main.pxl'] = '''import "pixel_decode.pxl" as decoder
 import "pixel_reader.pxl" as reader
 import "pixel_types.pxl" as types
 import "spatial_layout.pxl" as layout
 import "model.pxl" as model
 record Output { root: int, nodes: [model.Node], diagnostics: [decoder.Diagnostic] }
-fn main() {
- let source = jsonDecode[layout.Source](input())
+effect fn main() {
+ match jsonDecode::[layout.Source](input()) {.Ok(source)=>{Run(source)},.Err(error)=>{print(error.message)}}
+}
+effect fn Run(source:layout.Source) {
  let decoded = decoder.Decode(source, "fixture.pixel")
- let r = reader.New("fixture.pixel", 0, decoded.tokens)
- let root = types.Parse(r)
- if r.index != len(r.tokens) { reader.Problem(r, "Unexpected trailing token") }
+ var r = reader.New("fixture.pixel", 0, decoded.tokens)
+ let root = types.Parse(&r)
+ if r.index != len(r.tokens) { reader.Problem("Unexpected trailing token", &r) }
  print(jsonFrom(Output{root, nodes: r.nodes, diagnostics: r.diagnostics}))
 }'''
         cls.files = files
-        cls.compiler = compile_project(files)[1].bytecode
+        cls.compiler = compile_native_sources(files)
 
     def source(self, values):
         punctuation = {'(', ')', '[', ']', ',', '.', '->'}
@@ -53,15 +55,15 @@ fn main() {
         self.assertEqual(self.tree(self.parse(['record', '(', 0, '.', 7, ')'])), ('type', '_pixel_7', []))
 
     def test_nested_function_collection_types(self):
-        result = self.parse(['function', '(', 'map', '(', 'int', ')', '[', ']', ',',
+        result = self.parse(['function', '(', 'map', '(', 'str', ',', 'int', ')', '[', ']', ',',
                              'Option', '(', 'str', ')', ')', '->', '(', 'bool', ')', '[', ']'])
         self.assertEqual(result['diagnostics'], [])
         self.assertEqual(self.tree(result), ('type_array', '', [('type_fn', '', [
-            ('type_array', '', [('type', 'map', [('type', 'int', [])])]),
+            ('type_array', '', [('type', 'map', [('type', 'string', []), ('type', 'int', [])])]),
             ('type', 'Option', [('type', 'string', [])]), ('type', 'bool', [])])]))
 
     def test_malformed_and_excessive_depth(self):
-        cases = [[], ['map', '('], ['record', '(', 'int', '.', 1, ')'],
+        cases = [[], ['map', '('], ['map', '(', 'int', ')'], ['record', '(', 'int', '.', 1, ')'],
                  ['parameter', '(', ')'], ['function', '(', ')', '->', 'int'],
                  ['int', '[', 'bool', ']'], ['int', 'bool'],
                  ['int'] + ['[', ']'] * 32]
@@ -75,7 +77,7 @@ fn main() {
     def test_type_reader_compiles_with_pixellang(self):
         from pixellang.bootstrap import compile_with
         root = Path(__file__).resolve().parents[1]
-        seed = compile_project({p.name: p.read_text() for p in (root / 'selfhost').glob('*.pxl')})[1].bytecode
+        seed = compile_native_sources({p.name: p.read_text() for p in (root / 'selfhost').glob('*.pxl')})
         generated, _ = compile_with(seed, self.files)
         values = ['function', '(', 'Option', '(', 'str', ')', ')', '->', '(', 'int', ')']
         actual = json.loads(VM(generated, input_text=json.dumps(self.source(values)), max_steps=1_000_000).run()[0])

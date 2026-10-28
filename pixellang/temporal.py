@@ -1,4 +1,4 @@
-"""Deterministic three-dimensional execution: X/Y source, Z logical time.
+"""Instruction debugging: X/Y source, displayed Z instruction transition.
 
 Events retain only instruction provenance. Exact historical VM state is reconstructed
 on demand, avoiding a heap-sized copy at every instruction.
@@ -8,7 +8,7 @@ from copy import deepcopy
 import hashlib
 from .bootstrap import normalized
 
-from .compiler import compile_source
+from .code_image import CodeImage
 from .fileaccess import FileAccess
 from .model import PixelError
 from .recording import InstructionJournal, footprint
@@ -26,19 +26,32 @@ class Timeline:
         recording_budget=32_000_000,
         file_access=None,
         compiled=None,
+        arguments=None,
+        code_image=None,
     ):
-        self.source_project = None
         if type(max_steps) is not int or not 1 <= max_steps <= 1_000_000:
             raise PixelError("temporal", "Time recording budget must be 1..1000000")
-        if not isinstance(source, dict):
+        if source is not None and not isinstance(source, dict):
             raise PixelError("temporal", "Timeline requires a spatial source document")
         self.source = deepcopy(source)
-        self.compiled = compiled if compiled is not None else compile_source(self.source)
-        if compiled is not None and compiled.source != self.source:
+        if compiled is None or not getattr(compiled, 'debug', None):
+            raise PixelError('temporal', 'Timeline requires a native compiled debug artifact')
+        self.compiled = compiled
+        if compiled.source != self.source:
             raise PixelError("temporal", "Compiled debug source differs from timeline source")
+        self.source_project = deepcopy(getattr(self.compiled, 'source_project', None))
+        self.projection = {}
+        if source is not None:self.set_projection(source)
+        if code_image is not None and (not isinstance(code_image, CodeImage)
+                                       or code_image.data is not self.compiled.bytecode):
+            raise PixelError('temporal', 'Shared execution image must own the compiled bytecode')
+        self.code_image = code_image if code_image is not None else CodeImage(self.compiled.bytecode)
         self.input_text = input_text
+        self.arguments = list(arguments) if isinstance(arguments, list) else arguments
         self.max_steps = max_steps
         self.file_access = file_access if file_access is not None else FileAccess()
+        if not self.file_access.record:
+            raise PixelError("temporal", "Time debugging requires recorded file effects")
         self.vm = self.fresh_vm(live=True)
         if (
             type(checkpoint_interval) is not int
@@ -50,7 +63,7 @@ class Timeline:
             for v in (checkpoint_budget, recording_budget)
         ):
             raise PixelError("temporal", "Invalid recording/checkpoint budget")
-        self.events = InstructionJournal(self.compiled.bytecode, recording_budget)
+        self.events = InstructionJournal(self.code_image.data, recording_budget)
         self.checkpoint_interval = checkpoint_interval
         self.checkpoint_budget = checkpoint_budget
         self.checkpoints = {}
@@ -62,6 +75,18 @@ class Timeline:
         self.replay_vm = None
         self.replay_z = 0
 
+    def set_projection(self, source):
+        from .debug_artifact import projection_points
+        source = deepcopy(source)
+        projection = projection_points(self.compiled, source)
+        self.source = source
+        self.projection = projection
+
+    def projected_event(self, event):
+        event = deepcopy(event)
+        event['points'] = [[*point, event['z']] for point in self.projection.get((event['function'], event['pc']), [])]
+        return event
+
     def volume(self, start=1, end=None):
         """Sparse XYZ geometry; each module retains its own X/Y coordinate plane."""
         end = len(self.events) if end is None else end
@@ -71,6 +96,8 @@ class Timeline:
             or not 1 <= start <= end + 1 <= len(self.events) + 1
         ):
             raise PixelError("temporal", "Invalid volume time range")
+        if self.source is None:
+            return {"axes": ["x", "y", "time"], "range": [start, end], "voxels": []}
         documents = {
             "main": self.source,
             **self.source.get("bundle", {}).get("modules", {}),
@@ -81,9 +108,8 @@ class Timeline:
         }
         voxels = []
         for event in self.events[start - 1 : end]:
-            debug = getattr(self.compiled,"debug",None)
-            module = debug["functions"][event["function"]]["module"] if debug else event["function"].split(":", 1)[0]
-            for x, y, z in event["points"]:
+            module = self.compiled.debug["functions"][event["function"]]["module"]
+            for x, y, z in self.projected_event(event)["points"]:
                 pixel = colors[module].get((x, y))
                 if pixel and pixel[3]:
                     voxels.append(
@@ -93,13 +119,17 @@ class Timeline:
 
     def fresh_vm(self, live=False):
         return VM(
-            self.compiled.bytecode,
+            self.code_image,
             input_text=self.input_text,
+            arguments=self.arguments,
             max_steps=self.max_steps,
             file_access=self.file_access if live else self.file_access.replay(),
         )
 
     def advance(self):
+        if self.vm.event_waiting:
+            raise PixelError('temporal', 'Application is waiting for events; open Native Application to advance logical time',
+                             code='event.runner_required')
         if self.vm.halted:
             return None
         frame = self.vm.call_stack[-1]
@@ -202,17 +232,18 @@ class Timeline:
 
     def document(self):
         return {
-            **({"backend":"selfhost","compiled_sha256":hashlib.sha256(normalized(self.compiled.bytecode).encode()).hexdigest()} if getattr(self.compiled,"debug",None) else {}),
+            "backend": "selfhost",
+            "compiled_sha256": hashlib.sha256(normalized(self.code_image.data).encode()).hexdigest(),
             "format": "pixellang-time",
-            "version": "0.8",
+            "version": "1.0",
             "axes": {
                 "x": "source-column",
                 "y": "source-row",
                 "z": "logical-transition",
             },
-            "source": deepcopy(self.source),
             "source_project": deepcopy(self.source_project),
             "input": self.input_text,
+            "arguments": self.arguments,
             "max_steps": self.max_steps,
             "length": len(self.events),
             "cursor": self.cursor,
@@ -230,7 +261,7 @@ class Timeline:
         if (
             not isinstance(document, dict)
             or document.get("format") != "pixellang-time"
-            or document.get("version") != "0.8"
+            or document.get("version") != "1.0"
         ):
             raise PixelError("temporal", "Unsupported timeline document")
         length, cursor, limit = (
@@ -256,40 +287,34 @@ class Timeline:
             or cancelled_at != length - 1
         ):
             raise PixelError("temporal", "Invalid cancellation position")
-        native=document.get('backend')=='selfhost'
-        if document.get('backend') not in (None,'selfhost'):
-            raise PixelError('temporal','Unsupported recorded compiler backend')
-        if native:
-            if compiled is None:
-                project=document.get('source_project')
-                if not isinstance(project,dict):raise PixelError('temporal','Self-hosted replay requires its source snapshot')
-                from .compiler_client import CompilerClient
-                with CompilerClient() as compiler:
-                    compiled=compiler.debug_project(project['files'],project.get('entry','main.pxl'))
-            if not getattr(compiled,'debug',None) or hashlib.sha256(normalized(compiled.bytecode).encode()).hexdigest()!=document.get('compiled_sha256'):
-                raise PixelError('temporal','Recompiled program differs from recorded bytecode; source snapshot or compiler changed')
-        elif compiled is not None:
-            raise PixelError('temporal','Cannot override compiler for a legacy recording')
+        if document.get('backend') != 'selfhost':
+            raise PixelError('temporal','Native replay requires a native compiler recording')
+        project=document.get('source_project')
+        if (not isinstance(project,dict) or set(project) != {'files', 'entry'}
+                or not isinstance(project['files'],dict) or not project['files']
+                or any(not isinstance(name,str) or not isinstance(text,str)
+                       for name,text in project['files'].items())
+                or not isinstance(project['entry'],str) or project['entry'] not in project['files']):
+            raise PixelError('temporal','Native replay requires a valid source snapshot')
+        if compiled is None:
+            from .compiler_client import CompilerClient
+            with CompilerClient() as compiler:
+                compiled=compiler.debug_project(project['files'],project['entry'])
+        if not getattr(compiled,'debug',None) or hashlib.sha256(normalized(compiled.bytecode).encode()).hexdigest()!=document.get('compiled_sha256'):
+            raise PixelError('temporal','Recompiled program differs from recorded bytecode; source snapshot or compiler changed')
+        if compiled.source_project != project:
+            raise PixelError('temporal','Source snapshot does not match recorded program')
         timeline = cls(
-            document.get("source"),
+            compiled.source,
             document.get("input", ""),
             limit,
             file_access=FileAccess.restore(
                 document.get("files", {"budget": 8_000_000, "effects": []})
             ),
             compiled=compiled,
+            arguments=document.get("arguments"),
             **options,
         )
-        source_project = document.get("source_project")
-        if source_project is not None:
-            if native:
-                matches=isinstance(source_project,dict) and compiled.source_project==source_project
-            else:
-                from .project import build_project
-                matches=isinstance(source_project,dict) and build_project(source_project.get('files'),source_project.get('entry','main.pxl'))==timeline.source
-            if not matches:
-                raise PixelError('temporal','Source snapshot does not match recorded program')
-            timeline.source_project = deepcopy(source_project)
         for z in range(length):
             if z == cancelled_at:
                 if timeline.vm.halted:

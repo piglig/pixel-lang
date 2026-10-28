@@ -1,0 +1,76 @@
+import "model.pxl" as model
+import "types.pxl" as types
+
+fn Key(module: int, node: int) -> string = string(module) + ":" + string(node)
+fn Report(module: int, index: int, message: string, resolved: model.ResolvedTypes, diagnostics: inout [model.Diagnostic]) {
+    let source = resolved.bound.project.modules[module]
+    let node = source.syntax.nodes[index]
+    var line = 1
+    var column = 1
+    for token in source.syntax.tokens { if token.start >= node.start { line = token.line; column = token.column; break } }
+    diagnostics.append(model.Diagnostic{source: source.path, phase: "flow", message, start: node.start, end: node.end, line, column})
+}
+
+// Analyze the declaration dependency DAG once. Repeated instances remain distinct
+// edges; state belongs to runtime instances, never to this declaration metadata.
+export fn Analyze(calls: [model.CallResolution], selected: map[string, bool], all: bool, resolved: model.ResolvedTypes, flows: inout [model.TypedFlow]) -> [model.Diagnostic] {
+    var diagnostics: [model.Diagnostic] = []
+    var indices: map[string, int] = map[string, int]{}
+    var parents: map[string, [int]] = map[string, [int]]{}
+    var pending: [int] = []
+    var ready: [int] = []
+    for index, flow in flows {
+        indices[Key(flow.module, flow.graph.declaration)] = index
+        parents[string(index)] = []
+        pending.append(0)
+        flows[index].stateful = len(flow.graph.states) > 0 || len(flow.graph.instances) > 0 || len(types.InitialInputs(flow.module, flow.graph.declaration, resolved)) > 0
+    }
+    for index, flow in flows {
+        for instance in flow.instances {
+            let target = resolved.bound.symbols[instance.symbol]
+            if target.kind != "flow" { continue }
+            let key = Key(target.module, target.node)
+            if !indices.has(key) { continue }
+            let child = indices[key]
+            parents[string(child)].append(index)
+            pending[index] += 1
+        }
+        if pending[index] == 0 { ready.append(index) }
+    }
+    var cursor = 0
+    while cursor < len(ready) {
+        let child = ready[cursor]
+        for parent in parents[string(child)] {
+            if flows[child].stateful { flows[parent].stateful = true }
+            pending[parent] -= 1
+            if pending[parent] == 0 { ready.append(parent) }
+        }
+        cursor += 1
+    }
+    for index, count in pending {
+        let flow = flows[index]
+        if count > 0 && (all || selected.has(resolved.bound.project.modules[flow.module].path)) {
+            Report(flow.module, flow.graph.declaration, "Flow contains a recursive instance dependency", resolved, &diagnostics)
+        }
+    }
+    // Ordinary source references include function values as well as direct calls.
+    // Graph node targets are resolved separately and are legal stateful instances.
+    var creations: map[string, bool] = map[string, bool]{}
+    for call in calls {
+        if call.kind != "flow-new" && call.kind != "flow-instance-new" { continue }
+        let expression = resolved.bound.project.modules[call.module].syntax.nodes[call.node]
+        var target = expression.children[0]
+        creations[Key(call.module, target)] = true
+    }
+    for reference in resolved.bound.references {
+        if creations.has(Key(reference.module, reference.node)) { continue }
+        if !all && !selected.has(resolved.bound.project.modules[reference.module].path) { continue }
+        let symbol = resolved.bound.symbols[reference.symbol]
+        if symbol.kind != "flow" { continue }
+        let key = Key(symbol.module, symbol.node)
+        if indices.has(key) {
+            Report(reference.module, reference.node, "Flow declarations must be constructed directly; they cannot be used as function values", resolved, &diagnostics)
+        }
+    }
+    return diagnostics
+}

@@ -1,0 +1,16 @@
+fn Add(previous: int, delta: int) -> int = previous + delta
+flow Counter() step(delta: int) -> int {
+ state value: int = 0
+ let updated = Add(value, delta)
+ next value = updated
+ output updated
+}
+effect fn advance(counter: Flow[fn(int) -> int], delta: int) -> int = counter.step(delta)
+effect fn main() {
+ let first = Counter()
+ let second = Counter()
+ print(advance(first, 1))
+ print(advance(first, 2))
+ print(advance(second, 10))
+ print(advance(first, 3))
+}

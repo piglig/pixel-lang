@@ -1,47 +1,69 @@
+import "std/error.pxl" as errors
 import "models.pxl" as models
 import "time.pxl" as time
 import "std/io.pxl" as io
 import "std/collections.pxl" as collections
-import "std/maps.pxl" as maps
-import "std/text.pxl" as text
 import "severity.pxl" as severity
 
-export fn Run(config: models.Config) -> models.Report {
-    let minimum = severity.Minimum(config.minimum_level)
-    let since = match config.since { None => "", Some(value) => value }
-    let until = match config.until { None => "", Some(value) => value }
-    match config.since { Some(value) => { time.Validate(value) } None => {} }
-    match config.until { Some(value) => { time.Validate(value) } None => {} }
-    if len(since) > 0 && len(until) > 0 && since >= until { fail("since must precede until") }
-    let report = models.Report{count: 0, errors: 0, excluded: 0, duration_total_ms: 0, duration_mean_ms: 0.0, duration_max_ms: 0, services: map[int]{}, levels: map[int]{}, minutes: map[int]{}, problems: []}
+export effect fn Run(config: models.Config) -> Result[models.Report, Error] {
+    let minimum = severity.Minimum(config.minimum_level)?
+    let since = match config.since { Option.None => "", Option.Some(value) => time.Validate(value)? }
+    let until = match config.until { Option.None => "", Option.Some(value) => time.Validate(value)? }
+    if len(since) > 0 && len(until) > 0 && since >= until { return .Err(errors.New("log.invalid_range", "since must precede until", "Run", "")) }
+    var problems: [models.Problem] = []
+    var report: models.Report = models.Report{count: 0, errors: 0, excluded: 0, duration_total_ms: 0, duration_mean_ms: 0.0, duration_max_ms: 0, services: map[string, int]{}, levels: map[string, int]{}, minutes: map[string, int]{}, problems: []}
     for source in config.files {
-        try {
-            let lines = text.Lines(io.Read(source))
-            for index, raw in lines {
-                let line = trim(raw)
-                if len(line) == 0 { continue }
-                try {
-                    let event = jsonDecode[models.Event](line)
-                    time.Validate(event.timestamp)
-                    let rank = severity.Rank(event.level)
-                    if event.duration_ms < 0 || len(trim(event.service)) == 0 { fail("duration must be nonnegative and service must be nonempty") }
-                    if rank < minimum || (len(since) > 0 && event.timestamp < since) || (len(until) > 0 && event.timestamp >= until) { report.excluded = report.excluded + 1; continue }
-                    report.count = report.count + 1
-                    if event.level == "ERROR" { report.errors = report.errors + 1 }
-                    report.duration_total_ms = report.duration_total_ms + event.duration_ms
-                    if event.duration_ms > report.duration_max_ms { report.duration_max_ms = event.duration_ms }
-                    maps.Increment(report.services, event.service)
-                    maps.Increment(report.levels, event.level)
-                    maps.Increment(report.minutes, slice(event.timestamp, 0, 16) + ":00Z")
-                } catch error {
-                    append(report.problems, models.Problem{source, line: index + 1, message: error.message, code: error.code, path: error.path})
-                }
-            }
-        } catch error {
-            append(report.problems, models.Problem{source, line: 0, message: error.message, code: error.code, path: error.path})
+        match ReadFile(source, minimum, since, until, &report, &problems) {
+            .Ok(lines) => {},
+            .Err(error) => { problems.append(models.Problem{source, line: 0, message: error.message, code: error.code, path: error.path}) }
         }
     }
     if report.count > 0 { report.duration_mean_ms = float64(report.duration_total_ms) / float64(report.count) }
-    report.problems = collections.Sort(report.problems, fn(a, b) = a.source < b.source || (a.source == b.source && a.line < b.line))
-    return report
+    report.problems = collections.SortedBy(problems, fn(a, b) = a.source < b.source || (a.source == b.source && a.line < b.line))
+    return .Ok(report)
+}
+
+effect fn ReadFile(source: string, minimum: int, since: string, until: string, report: inout models.Report, problems: inout [models.Problem]) -> Result[int, Error] {
+    var reader = io.Lines(source)
+    var count = 0
+    while true {
+        match io.NextLine(&reader)? {
+            Option.Some(line) => {
+                Accumulate(source, line.number, line.text, minimum, since, until, &report, &problems)
+                count += 1
+            },
+            Option.None => { break }
+        }
+    }
+    return .Ok(count)
+}
+
+record CheckedEvent { event: models.Event, rank: int }
+fn Parse(line: string) -> Result[CheckedEvent, Error] {
+    let event = jsonDecode::[models.Event](line)?
+    let timestamp = time.Validate(event.timestamp)?
+    let rank = severity.Rank(event.level)?
+    if event.duration_ms < 0 || len(trim(event.service)) == 0 {
+        return .Err(errors.New("log.invalid_event", "duration must be nonnegative and service must be nonempty", "Parse", ""))
+    }
+    return .Ok(CheckedEvent{event: event with {timestamp}, rank})
+}
+
+fn Accumulate(source: string, index: int, raw: string, minimum: int, since: string, until: string, report: inout models.Report, problems: inout [models.Problem]) {
+    let line = trim(raw)
+    if len(line) == 0 { return }
+    match Parse(line) {
+        .Ok(checked) => {
+            let event = checked.event
+            if checked.rank < minimum || (len(since) > 0 && event.timestamp < since) || (len(until) > 0 && event.timestamp >= until) { report.excluded += 1; return }
+            report.count += 1
+            if event.level == "ERROR" { report.errors += 1 }
+            report.duration_total_ms += event.duration_ms
+            if event.duration_ms > report.duration_max_ms { report.duration_max_ms = event.duration_ms }
+            collections.Increment(&report.services, event.service)
+            collections.Increment(&report.levels, event.level)
+            collections.Increment(&report.minutes, slice(event.timestamp, 0, 16) + ":00Z")
+        },
+        .Err(error) => { problems.append(models.Problem{source, line: index, message: error.message, code: error.code, path: error.path}) }
+    }
 }

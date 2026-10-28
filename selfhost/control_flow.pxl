@@ -1,0 +1,63 @@
+import "model.pxl" as model
+
+// Completion describes possible exits, not the value type. Match coverage must
+// be checked before relying on an all-arms-terminate result. Loops conservatively
+// retain their zero-iteration path; break/continue are consumed by their own loop.
+export record Completion { normal: bool, returns: bool, breaks: bool, continues: bool }
+export fn Normal() -> Completion = Completion{normal: true, returns: false, breaks: false, continues: false}
+export fn Sequence(first: Completion, second: Completion) -> Completion = Completion{
+    normal: first.normal && second.normal,
+    returns: first.returns || (first.normal && second.returns),
+    breaks: first.breaks || (first.normal && second.breaks),
+    continues: first.continues || (first.normal && second.continues)
+}
+export fn Either(first: Completion, second: Completion) -> Completion = Completion{
+    normal: first.normal || second.normal,
+    returns: first.returns || second.returns,
+    breaks: first.breaks || second.breaks,
+    continues: first.continues || second.continues
+}
+fn Children(nodes: [model.Node], children: [int]) -> Completion {
+    var result = Normal()
+    for child in children { result = Sequence(result, Analyze(nodes, child)) }
+    return result
+}
+export fn Analyze(nodes: [model.Node], index: int) -> Completion {
+    let node = nodes[index]
+    let children = node.children
+    if model.NamedCallable(node.kind) || node.kind == "lambda" || node.kind == "flow" {
+        return Normal()
+    }
+    if node.kind == "return" || node.kind == "expression_body" {
+        return Sequence(Children(nodes, children), Completion{normal: false, returns: true, breaks: false, continues: false})
+    }
+    if node.kind == "break" { return Completion{normal: false, returns: false, breaks: true, continues: false} }
+    if node.kind == "continue" { return Completion{normal: false, returns: false, breaks: false, continues: true} }
+    if node.kind == "propagate" {
+        return Sequence(Children(nodes, children), Completion{normal: true, returns: true, breaks: false, continues: false})
+    }
+    if node.kind == "if" {
+        var alternative = Normal()
+        if len(children) == 3 { alternative = Analyze(nodes, children[2]) }
+        return Sequence(Analyze(nodes, children[0]), Either(Analyze(nodes, children[1]), alternative))
+    }
+    if node.kind == "while" || node.kind == "for" {
+        let body = Analyze(nodes, children[len(children) - 1])
+        let loop = Completion{normal: true, returns: body.returns, breaks: false, continues: false}
+        return Sequence(Analyze(nodes, children[len(children) - 2]), loop)
+    }
+    if node.kind == "match" || node.kind == "match_stmt" {
+        var alternatives = Completion{normal: false, returns: false, breaks: false, continues: false}
+        for child in slice(children, 1, len(children)) {
+            let arm = nodes[child]
+            var result = Analyze(nodes, arm.children[len(arm.children) - 1])
+            if len(arm.children) == 3 { result = Sequence(Analyze(nodes, arm.children[1]), result) }
+            alternatives = Either(alternatives, result)
+        }
+        return Sequence(Analyze(nodes, children[0]), alternatives)
+    }
+    if node.kind == "binary" && (node.text == "&&" || node.text == "||" || node.text == "and" || node.text == "or") {
+        return Sequence(Analyze(nodes, children[0]), Either(Normal(), Analyze(nodes, children[1])))
+    }
+    return Children(nodes, children)
+}

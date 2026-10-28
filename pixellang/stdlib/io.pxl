@@ -1,3 +1,78 @@
 // Paths stay inside explicit host-granted roots. Replay never repeats disk writes.
-export fn Read(path: string) -> string = readText(path)
-export fn Write(path: string, text: string) -> bool = writeText(path, text)
+export effect fn Read(path: string) -> Result[string, Error] = readText(path)
+export effect fn Write(path: string, text: string) -> Result[bool, Error] = writeText(path, text)
+
+export record Chunk { text: string, next: int, done: bool }
+export record Entry { name: string, directory: bool }
+export effect fn ReadChunk(path: string, offset: int, size: int) -> Result[Chunk, Error] = jsonDecode::[Chunk](readChunk(path, offset, size)?)
+export effect fn List(path: string) -> Result[[Entry], Error] = jsonDecode::[[Entry]](listDirectory(path)?)
+
+export record Line { number: int, text: string }
+export record LineReader { path: string, offset: int, pending: string, ready: [string], index: int, number: int, done: bool }
+
+// Constructing or copying a reader does not perform I/O or open a handle.
+export fn Lines(path: string) -> LineReader = LineReader{path, offset: 0, pending: "", ready: [], index: 0, number: 1, done: false}
+
+fn LineLimit(reader: LineReader, length: int) -> Error = Error{
+    kind: "io", code: "io.line_too_long", message: "Line exceeds 262144 characters",
+    path: reader.path, operation: "NextLine", expected: "at most 262144 characters", actual: string(length)
+}
+
+// Stream physical lines, including a final empty line. LF, CRLF and CR may
+// cross chunks. Publish reader progress only after a successful line or EOF.
+export effect fn NextLine(reader: inout LineReader) -> Result[Option[Line], Error] {
+    var next = reader
+    while next.index >= len(next.ready) {
+        var pendingLength = len(next.pending)
+        if !next.done && pendingLength > 0 && next.pending[pendingLength - 1] == "\r" { pendingLength -= 1 }
+        if pendingLength > 262144 { return .Err(LineLimit(next, pendingLength)) }
+        if next.done { reader = next; return .Ok(Option.None) }
+        let chunk = ReadChunk(next.path, next.offset, 65536)?
+        var raw = next.pending + chunk.text
+        var suffix = ""
+        if !chunk.done && len(raw) > 0 && raw[len(raw) - 1] == "\r" {
+            raw = slice(raw, 0, len(raw) - 1)
+            suffix = "\r"
+        }
+        let lines = split(replace(replace(raw, "\r\n", "\n"), "\r", "\n"), "\n")
+        next.ready = slice(lines, 0, len(lines) - 1)
+        next.pending = lines[len(lines) - 1] + suffix
+        next.index = 0
+        next.offset = chunk.next
+        next.done = chunk.done
+        if chunk.done {
+            next.ready.append(next.pending)
+            next.pending = ""
+        }
+    }
+    let text = next.ready[next.index]
+    if len(text) > 262144 { return .Err(LineLimit(next, len(text))) }
+    let number = next.number
+    next.index += 1
+    next.number += 1
+    reader = next
+    return .Ok(Option.Some(Line{number, text}))
+}
+
+// Return the number of successfully visited lines/files.
+export effect fn ForEachLine(path: string, visit: effect fn(int, string)) -> Result[int, Error] {
+    var reader = Lines(path)
+    var count = 0
+    while true {
+        match NextLine(&reader)? {
+            Option.Some(line) => { visit(line.number, line.text); count += 1 },
+            Option.None => { break }
+        }
+    }
+    return .Ok(count)
+}
+
+export effect fn Walk(path: string, visit: effect fn(string)) -> Result[int, Error] {
+    var count = 0
+    for entry in List(path)? {
+        var child = entry.name
+        if len(path) > 0 { child = path + "/" + entry.name }
+        if entry.directory { count += Walk(child, visit)? } else { visit(child); count += 1 }
+    }
+    return .Ok(count)
+}

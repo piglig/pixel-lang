@@ -1,0 +1,21 @@
+import "model.pxl" as model
+import "transitions.pxl" as transitions
+import "std/time.pxl" as time
+
+export flow Order(initial: model.Order) step(event: model.Event, clock: time.Step) -> model.Decision {
+    state order = initial
+    let decision = transitions.Transition(order, event, clock)
+    next order = decision.order
+    output decision
+}
+
+effect fn main() {
+    match time.Seconds(3) {
+        .Ok(expiresAt) => {
+            let initial = model.Order{id: "demo-order", status: .AwaitingPayment,
+                                      totalCents: 1299, expiresAt}
+            Order(initial)
+        },
+        .Err(error) => { print(error.message) }
+    }
+}

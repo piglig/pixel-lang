@@ -1,10 +1,29 @@
 import "models.pxl" as models
+import "arguments.pxl" as args
+import "std/cli.pxl" as cli
 import "analyze.pxl" as analyze
 import "std/io.pxl" as io
 
-fn main() {
-    let config = jsonDecode[models.Config](input())
-    let report = analyze.Run(config)
-    io.Write(config.output, jsonStringify(jsonFrom(report)) + "\n")
-    print(report)
+effect fn main() {
+    let values = cli.Args()
+    if len(values) == 1 && values[0] == "--help" {
+        print("PixelLang logs: [--directory DIR] [--level LEVEL] [--since TIME] [--until TIME] [--output FILE] [--] FILE... (paths relative to granted roots)")
+        return
+    }
+    match Run(values) {
+        .Ok(report) => { print(report) },
+        .Err(error) => { print(error) }
+    }
+}
+
+effect fn Run(values: [string]) -> Result[models.Report, Error] {
+    let config = Configuration(values)?
+    let report = analyze.Run(config)?
+    let written = io.Write(config.output, jsonStringify(jsonFrom(report)) + "\n")?
+    return .Ok(report)
+}
+
+effect fn Configuration(values: [string]) -> Result[models.Config, Error] {
+    if len(values) == 0 { return jsonDecode::[models.Config](input()) }
+    return args.Config(values)
 }

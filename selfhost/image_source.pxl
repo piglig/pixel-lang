@@ -1,3 +1,4 @@
+import "pixel_document.pxl" as document
 import "model.pxl" as model
 import "source_writer.pxl" as writer
 import "picture_reader.pxl" as reader
@@ -13,61 +14,94 @@ fn Identifier(text: string) -> bool {
     let lexed = lexer.Scan("", text)
     return len(lexed.diagnostics) == 0 && len(lexed.tokens) == 2 && lexed.tokens[0].kind == "name" && lexed.tokens[0].text == text
 }
-export fn Load(path: string, byteLimit: int, imageLimit: int) -> writer.Output {
-    var phase = "io"
-    try {
-        let bytes = readBytes(path, byteLimit)
-        phase = "image"
-        let pieces = reader.ReadSelected(bytes, imageLimit, map[bool]{}, true)
-        let modules = map[layout.Source]{}
-        for id, source in pieces.sources { if id != "0" { modules[id] = source } }
-        let decoded = pixels.BuildDecoded(pieces.sources["0"], modules, pieces.decoded)
-        let checked = checker.Check(types.Analyze(bindings.Bind(decoded)))
-        if len(checked.diagnostics) > 0 { return writer.Output{entry: "", files: map[string]{}, diagnostics: checked.diagnostics} }
-        phase = "recover"
-        let paths = map[string]{}
-        let usedPaths = map[bool]{}
-        for id in pieces.ids { usedPaths["_module_" + id + ".pxl"] = true }
-        for id, source in pieces.sources {
-            let fallback = "_module_" + id + ".pxl"
-            var name = fallback
-            if has(source.metadata, "filename") && jsonKind(source.metadata["filename"]) == "string" {
-                match project.Normalize(jsonAsString(source.metadata["filename"])) {
-                    Some(candidate) => { if !has(usedPaths, candidate) { name = candidate } }
-                    None => {}
-                }
+fn Invalid(source: string, phase: string, error: Error) -> writer.Output {
+    return writer.Output{entry: "", files: map[string, string]{}, diagnostics: [model.Diagnostic{source, phase, message: error.message, start: 0, end: 0, line: 1, column: 1}]}
+}
+effect fn Restore(path: string, byteLimit: int, imageLimit: int) -> writer.Output {
+    match readBytes(path, byteLimit) {
+        .Ok(bytes) => {
+            match reader.ReadSelected(bytes, imageLimit, map[string, bool]{}, true) {
+                .Ok(pieces) => {
+                    var modules: map[string, layout.Source] = map[string, layout.Source]{}
+                    for id, source in pieces.sources { if id != "0" { modules[id] = source } }
+                    let decoded = pixels.BuildDecoded(pieces.sources["0"], modules, pieces.decoded)
+                    match Recover(decoded, pieces.sources) {
+                        .Ok(result) => { return result },
+                        .Err(error) => { return Invalid(path, "recover", error) }
+                    }
+                },
+                .Err(error) => { return Invalid(path, "image", error) }
             }
-            usedPaths[name] = true
-            paths[fallback] = name
+        },
+        .Err(error) => { return Invalid(path, "io", error) }
+    }
+}
+fn Recover(decoded: model.Project, sources: map[string, layout.Source]) -> Result[writer.Output, Error] {
+    let checked = checker.Check(types.Analyze(bindings.Bind(decoded)))
+    if len(checked.diagnostics) > 0 { return .Ok(writer.Output{entry: "", files: map[string, string]{}, diagnostics: checked.diagnostics}) }
+    var paths: map[string, string] = map[string, string]{}
+    var usedPaths: map[string, bool] = map[string, bool]{}
+    for id, source in sources { usedPaths["_module_" + id + ".pxl"] = true }
+    for id, source in sources {
+        let fallback = "_module_" + id + ".pxl"
+        var name = fallback
+        if source.metadata.has("filename") && jsonKind(source.metadata["filename"]) == "string" {
+            match project.Normalize(jsonAsString(source.metadata["filename"])?) {
+                .Some(candidate) => { if !usedPaths.has(candidate) { name = candidate } }
+                .None => {}
+            }
         }
-        let names = map[string]{}
-        for module in decoded.modules {
-            let moduleName = slice(module.path, 0, len(module.path) - 4)
-            let id = slice(moduleName, 8, len(moduleName))
-            let source = pieces.sources[id]
-            let used = map[bool]{"main": true, "unit": true, "int": true, "float": true, "bool": true, "string": true, "map": true, "Option": true, "Some": true, "None": true, "Error": true, "json": true}
-            for node in module.syntax.nodes { used[node.text] = true }
-            if has(source.metadata, "symbols") && jsonKind(source.metadata["symbols"]) == "object" {
-                let symbols = source.metadata["symbols"]
-                for key in jsonKeys(symbols) {
-                    let value = jsonGet(symbols, key)
-                    if jsonKind(value) == "string" {
-                        let candidate = jsonAsString(value)
-                        if Identifier(candidate) && !has(used, candidate) {
-                            names[moduleName + ":_pixel_" + key] = candidate
-                            used[candidate] = true
-                        }
+        usedPaths[name] = true
+        paths[fallback] = name
+    }
+    var names: map[string, string] = map[string, string]{}
+    for module in decoded.modules {
+        let moduleName = slice(module.path, 0, len(module.path) - 4)
+        let id = slice(moduleName, 8, len(moduleName))
+        let source = sources[id]
+        var used: map[string, bool] = map[string, bool]{"main": true, "unit": true, "int": true, "float": true, "bool": true, "string": true, "map": true, "Option": true, "Error": true, "json": true}
+        for node in module.syntax.nodes { used[node.text] = true }
+        if source.metadata.has("symbols") && jsonKind(source.metadata["symbols"]) == "object" {
+            let symbols = source.metadata["symbols"]
+            for key in jsonKeys(symbols)? {
+                let value = jsonGet(symbols, key)?
+                if jsonKind(value) == "string" {
+                    let candidate = jsonAsString(value)?
+                    if Identifier(candidate) && !used.has(candidate) {
+                        names[moduleName + ":_pixel_" + key] = candidate
+                        used[candidate] = true
                     }
                 }
             }
         }
-        let result = writer.Build(decoded, names, paths)
-        // Metadata is only a readability hint. Verify its chosen names and paths
-        // still form a complete, valid source project before returning it.
-        let recovered = checker.Check(types.Analyze(bindings.Bind(project.Build(result.files, result.entry))))
-        if len(recovered.diagnostics) > 0 { return writer.Output{entry: result.entry, files: map[string]{}, diagnostics: recovered.diagnostics} }
-        return result
-    } catch error {
-        return writer.Output{entry: "", files: map[string]{}, diagnostics: [model.Diagnostic{source: path, phase, message: error.message, start: 0, end: 0, line: 1, column: 1}]}
     }
+    return .Ok(writer.Build(decoded, names, paths))
+}
+export effect fn Load(path: string, byteLimit: int, imageLimit: int) -> writer.Output {
+    // Drop the pixel document and its checked syntax graph before constructing
+    // another project for validation of the restored text.
+    let result = Restore(path, byteLimit, imageLimit)
+    return Validate(result)
+}
+export fn LoadDocument(value: json, source: string) -> writer.Output {
+    match document.Read(value) {
+        .Ok(loaded) => {
+            var sources: map[string, layout.Source] = map[string, layout.Source]{"0": loaded.root}
+            for id, item in loaded.modules { sources[id] = item }
+            let decoded = pixels.Build(loaded.root, loaded.modules)
+            match Recover(decoded, sources) {
+                .Ok(result) => { return Validate(result) },
+                .Err(error) => { return Invalid(source, "recover", error) }
+            }
+        },
+        .Err(error) => { return Invalid(source, "recover", error) }
+    }
+}
+fn Validate(result: writer.Output) -> writer.Output {
+    if len(result.diagnostics) > 0 { return result }
+    // Metadata is only a readability hint. Verify its chosen names and paths
+    // still form a complete, valid source project before returning it.
+    let recovered = checker.Check(types.Analyze(bindings.Bind(project.Build(result.files, result.entry))))
+    if len(recovered.diagnostics) > 0 { return writer.Output{entry: result.entry, files: map[string, string]{}, diagnostics: recovered.diagnostics} }
+    return result
 }

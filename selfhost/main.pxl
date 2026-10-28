@@ -1,6 +1,12 @@
+import "compiler_session.pxl" as compilerSession
+import "service_errors.pxl" as errors
+import "failures.pxl" as failures
+import "source_format.pxl" as sourceFormat
+import "editor_index.pxl" as editorIndex
 import "ir_cache.pxl" as irCache
 import "ir_state.pxl" as irState
 import "debug_info.pxl" as debugInfo
+import "flow_projection.pxl" as flowProjection
 import "image_source.pxl" as imageSource
 import "source_info.pxl" as sourceInfo
 import "image_transport.pxl" as transport
@@ -28,6 +34,7 @@ import "pixel_document.pxl" as pixelDocument
 import "picture_reader.pxl" as pictureReader
 import "picture.pxl" as picture
 import "spatial_layout.pxl" as spatialLayout
+record NativeGraphsOutput { projection: flowProjection.Projection, diagnostics: [model.Diagnostic] }
 record PictureOutput { file: string, bytes: int, diagnostics: [model.Diagnostic] }
 record IRSummary { functions: int, instructions: int, unresolved: int, diagnostics: [model.Diagnostic] }
 record FrameOutput { functions: [model.FunctionFrame], symbols: [model.Symbol], types: [model.TypeInfo], entry: int, diagnostics: [model.Diagnostic] }
@@ -45,155 +52,239 @@ record BindOutput { modules: [string], scopes: [model.Scope], symbols: [model.Sy
 record ModuleOutput { path: string, imports: [model.Import], declarations: [model.Declaration] }
 record ProjectOutput { modules: [ModuleOutput], diagnostics: [model.Diagnostic] }
 record ParseOutput { nodes: [model.Node], roots: [int], diagnostics: [model.Diagnostic] }
-record CacheRequest { priorPath: Option[string], outputPath: string, environment: string, stamps: map[string], byteLimit: int }
-record Request { source: string, text: string, operation: Option[string], files: Option[map[string]], document: Option[spatialLayout.Source], modules: Option[map[spatialLayout.Source]], native: Option[json], file: Option[string], byteLimit: Option[int], imageLimit: Option[int], scale: Option[int], parsedFiles: Option[map[string]], checkModules: Option[[string]], includeIR: Option[bool], irCache: Option[CacheRequest] }
-fn BuildProject(request: Request) -> model.Project {
-    let files = match request.files { Some(value) => value, None => map[string]{} }
-    let parsed = map[model.Parsed]{}
-    match request.parsedFiles {
-        Some(paths) => { for path, file in paths { parsed[path] = transport.LoadParsed(file).syntax } }
-        None => {}
+record Request { source: string, text: string, entryFunction: Option[string], operation: Option[string], files: Option[map[string, string]], document: Option[spatialLayout.Source], modules: Option[map[string, spatialLayout.Source]], native: Option[json], file: Option[string], byteLimit: Option[int], imageLimit: Option[int], scale: Option[int], parsedFiles: Option[map[string, string]], checkModules: Option[[string]], editorRoots: Option[[string]], includeIR: Option[bool], resident: Option[bool], incremental: Option[bool] }
+record SessionStatistics { typeHits: int, typedDeclarations: int, bindingHits: int, boundDeclarations: int, kind: string, parsed: int, parseHits: int, checkedFunctions: int, semanticHits: int, revision: int, retainedNodes: int, irHits: int, irRelocated: int, irNodes: int }
+fn Resident(request: Request) -> bool = match request.resident { .Some(value) => value, .None => false }
+effect fn CheckRequest(request: Request, session: inout compilerSession.Session) -> Result[model.ExpressionCheck, Error] {
+    let incremental = match request.incremental { .Some(value) => value, .None => true }
+    if Resident(request) && incremental {
+        let files = match request.files { .Some(value) => value, .None => map[string, string]{} }
+        return .Ok(compilerSession.Check(files, request.source, 2000000, &session).checked)
     }
-    return project.BuildParsed(files, request.source, parsed)
+    return .Ok(checker.Check(types.Analyze(bindings.Bind(BuildProject(request)?))))
 }
-fn PicturePixels(checked: model.ExpressionCheck, named: bool) -> pixelAst.Output {
+effect fn BuildProject(request: Request) -> Result[model.Project, Error] {
+    let files = match request.files { .Some(value) => value, .None => map[string, string]{} }
+    var parsed: map[string, model.Parsed] = map[string, model.Parsed]{}
+    match request.parsedFiles {
+        .Some(paths) => { for path, file in paths { parsed[path] = (transport.LoadParsed(file)?).syntax } }
+        .None => {}
+    }
+    return .Ok(project.BuildParsed(files, request.source, parsed))
+}
+effect fn BuildEditorProject(request: Request) -> Result[model.Project, Error] {
+    let files = match request.files { .Some(value) => value, .None => map[string, string]{} }
+    var parsed: map[string, model.Parsed] = map[string, model.Parsed]{}
+    match request.parsedFiles {
+        .Some(paths) => { for path, file in paths { parsed[path] = (transport.LoadParsed(file)?).syntax } }
+        .None => {}
+    }
+    let roots = match request.editorRoots { .Some(value) => value, .None => [request.source] }
+    return .Ok(project.BuildEditorParsed(files, request.source, parsed, roots))
+}
+fn PicturePixels(named: bool, checked: model.ExpressionCheck) -> pixelAst.Output {
     if named { return pixelAst.BuildNamed(checked) }
     return pixelAst.Build(checked)
 }
-fn LowerRequest(request: Request, planned: model.ClosurePlan) -> irState.Output {
-    match request.irCache {
-        Some(options) => {
-            var previous = irCache.Empty("", map[string]{})
-            match options.priorPath {
-                Some(path) => { try { previous = irCache.Read(path) } catch error {} }
-                None => {}
+effect fn LowerRequest(request: Request, planned: inout model.ClosurePlan, session: inout compilerSession.Session) -> irState.Output {
+    if !Resident(request) || !(match request.incremental { .Some(value) => value, .None => true }) {
+        return ir.Build(&planned)
+    }
+    let project = planned.named.checked.resolved.bound.project
+    var reuse = irCache.Begin(session.ir, project.entryName, irCache.Stamps(project))
+    reuse.semantic = session.semantic
+    let built = ir.BuildCached(&reuse, &planned)
+    session.statistics.irHits = reuse.hits
+    session.statistics.irRelocated = reuse.relocated
+    if len(built.diagnostics) == 0 {
+        if session.retainedNodes + irCache.Size(reuse.current) <= 2000000 { session.ir = reuse.current }
+        else { session.ir = irCache.Empty("", map[string, irCache.Stamp]{}) }
+    }
+    return built
+}
+fn WithoutSourceMap(source: spatialLayout.Source) -> spatialLayout.Source {
+    var document = source
+    document.metadata.remove("source_map")
+    return document
+}
+fn InitializeSession() -> compilerSession.Session = compilerSession.Empty()
+effect fn AdvanceSession(previous: compilerSession.Session) -> compilerSession.Session {
+    var session = previous
+    session.statistics = compilerSession.NoStatistics()
+    match jsonDecode::[Request](input()) {
+        .Ok(request) => {
+            match RunRequest(request, &session) { .Ok(operation) => {}, .Err(error) => { session = previous; errors.Report(request.source, error) } }
+            if Resident(request) {
+                let stats = session.statistics
+                print(SessionStatistics{typeHits: stats.typeHits, typedDeclarations: stats.typedDeclarations, bindingHits: stats.bindingHits, boundDeclarations: stats.boundDeclarations, kind: "compiler-session", parsed: stats.parsed, parseHits: stats.parseHits,
+                    checkedFunctions: stats.checkedFunctions, semanticHits: stats.semanticHits,
+                    revision: session.revision, retainedNodes: session.retainedNodes, irHits: session.statistics.irHits,
+                    irRelocated: session.statistics.irRelocated, irNodes: irCache.Size(session.ir)})
             }
-            let reuse = irCache.Begin(previous, options.environment, options.stamps)
-            let built = ir.BuildCached(planned, reuse)
-            if len(built.diagnostics) == 0 {
-                try { irCache.Write(reuse, options.outputPath, options.byteLimit) } catch error {}
+        },
+        .Err(error) => { errors.Report("<request>", error) }
+    }
+    return session
+}
+effect fn main() {
+    let initial = InitializeSession()
+    let completed = AdvanceSession(initial)
+}
+fn PictureError(path: string, phase: string, error: Error) -> PictureOutput {
+    return PictureOutput{file: path, bytes: 0, diagnostics: [model.Diagnostic{source: path, phase, message: error.message, start: 0, end: 0, line: 1, column: 1}]}
+}
+effect fn SavePicture(root: spatialLayout.Source, modules: map[string, spatialLayout.Source], entry: string, scale: int, path: string) -> PictureOutput {
+    match picture.Encode(root, modules, entry, scale) {
+        .Ok(bytes) => {
+            match writeBytes(path, bytes) {
+                .Ok(written) => { return PictureOutput{file: path, bytes: len(bytes), diagnostics: []} },
+                .Err(error) => { return PictureError(path, "io", error) }
             }
-            return built
-        }
-        None => { return ir.Build(planned) }
+        },
+        .Err(error) => { return PictureError(path, "image", error) }
     }
 }
-fn main() {
-    let request = jsonDecode[Request](input())
-    let operation = match request.operation { Some(value) => value, None => "lex" }
-    if operation == "png-file-source" {
-        let path = match request.file { Some(value) => value, None => "input.png" }
-        let bytes = match request.byteLimit { Some(value) => value, None => 1000000 }
-        let image = match request.imageLimit { Some(value) => value, None => 1000000 }
+effect fn RunRequest(request: Request, session: inout compilerSession.Session) -> Result[string, Error] {
+    let operation = match request.operation { .Some(value) => value, .None => "lex" }
+    if operation == "format" {
+        print(jsonFrom(sourceFormat.Format(request.source, request.text)))
+    } else if operation == "pixel-document-source" {
+        match request.native {
+            .Some(document) => { print(jsonFrom(imageSource.LoadDocument(document, request.source))) }
+            .None => { return .Err(failures.New("Pixel recovery requires native JSON")) }
+        }
+    } else if operation == "pixel-document-png-file" || operation == "pixel-document-normalize" {
+        match request.native {
+            .Some(document) => {
+                let checked = checker.Check(types.Analyze(bindings.Bind(pixelDocument.Load(document, request.source))))
+                if operation == "pixel-document-normalize" { print(pixelAst.Build(checked)) }
+                else {
+                    let path = match request.file { .Some(value) => value, .None => "program.png" }
+                    let scale = match request.scale { .Some(value) => value, .None => 8 }
+                    if len(checked.diagnostics) > 0 { print(PictureOutput{file: path, bytes: 0, diagnostics: checked.diagnostics}) }
+                    else {
+                        match pixelDocument.Read(document) {
+                            .Ok(loaded) => { print(SavePicture(loaded.root, loaded.modules, loaded.entry, scale, path)) },
+                            .Err(error) => { print(PictureError(path, "image", error)) }
+                        }
+                    }
+                }
+            }
+            .None => { return .Err(failures.New("Pixel operation requires native JSON")) }
+        }
+    } else if operation == "png-file-source" {
+        let path = match request.file { .Some(value) => value, .None => "input.png" }
+        let bytes = match request.byteLimit { .Some(value) => value, .None => 1000000 }
+        let image = match request.imageLimit { .Some(value) => value, .None => 1000000 }
         print(jsonFrom(imageSource.Load(path, bytes, image)))
     } else if operation == "parse-stream" {
         let parsed = parser.Parse(request.source, request.text)
         transport.EmitParsed(pixelStatements.Output{syntax: parsed, entries: [], diagnostics: []})
         print(sourceInfo.Describe(parsed, request.source))
     } else if operation == "png-file-bytecode" || operation == "png-file-bytecode-stream" || operation == "pixel-document-bytecode" || operation == "pixel-document-bytecode-stream" || operation == "pixel-file-bytecode" || operation == "pixel-file-bytecode-stream" {
-        var project = model.Project{modules: [], diagnostics: []}
+        var project = model.Project{entryName: "main", modules: [], diagnostics: []}
         if operation == "png-file-bytecode" || operation == "png-file-bytecode-stream" {
             match request.file {
-                Some(path) => {
-                    let bytes = match request.byteLimit { Some(value) => value, None => 1000000 }
-                    let image = match request.imageLimit { Some(value) => value, None => 1000000 }
+                .Some(path) => {
+                    let bytes = match request.byteLimit { .Some(value) => value, .None => 1000000 }
+                    let image = match request.imageLimit { .Some(value) => value, .None => 1000000 }
                     project = pictureReader.LoadFile(path, bytes, image)
                 }
-                None => { fail("PNG compilation requires a file path") }
+                .None => { return .Err(failures.New("PNG compilation requires a file path")) }
             }
         } else if operation == "pixel-file-bytecode" || operation == "pixel-file-bytecode-stream" {
             match request.file {
-                Some(path) => { project = pixelDocument.LoadFile(path) }
-                None => { fail("Pixel file compilation requires a file path") }
+                .Some(path) => { project = pixelDocument.LoadFile(path) }
+                .None => { return .Err(failures.New("Pixel file compilation requires a file path")) }
             }
         } else {
             match request.native {
-                Some(document) => { project = pixelDocument.Load(document, request.source) }
-                None => { fail("Pixel document compilation requires native JSON") }
+                .Some(document) => { project = pixelDocument.Load(document, request.source) }
+                .None => { return .Err(failures.New("Pixel document compilation requires native JSON")) }
             }
         }
         let checked = checker.Check(types.Analyze(bindings.Bind(project)))
-        let built = assembler.Assemble(ir.Build(closures.Build(instances.Build(checked))))
+        var planned = closures.Build(instances.Build(checked))
+        let built = assembler.Assemble(ir.Build(&planned))
         if operation == "png-file-bytecode-stream" || operation == "pixel-document-bytecode-stream" || operation == "pixel-file-bytecode-stream" { bytecodeStream.Emit(built) }
         else { print(jsonFrom(built)) }
     } else if operation == "pixel-bytecode" || operation == "pixel-bytecode-stream" {
         match request.document {
-            Some(document) => {
-                let modules = match request.modules { Some(value) => value, None => map[spatialLayout.Source]{} }
+            .Some(document) => {
+                let modules = match request.modules { .Some(value) => value, .None => map[string, spatialLayout.Source]{} }
                 let project = pixelProject.Build(document, modules)
                 let checked = checker.Check(types.Analyze(bindings.Bind(project)))
-                let built = assembler.Assemble(ir.Build(closures.Build(instances.Build(checked))))
+                var planned = closures.Build(instances.Build(checked))
+                let built = assembler.Assemble(ir.Build(&planned))
                 if operation == "pixel-bytecode-stream" { bytecodeStream.Emit(built) }
                 else { print(jsonFrom(built)) }
             }
-            None => { fail("Pixel compilation requires a document") }
+            .None => { return .Err(failures.New("Pixel compilation requires a document")) }
         }
     } else if operation == "pixel-tokens" || operation == "pixel-regions" || operation == "pixel-ast" {
         match request.document {
-            Some(document) => {
+            .Some(document) => {
                 let decoded = pixelDecode.Decode(document, request.source)
                 if operation == "pixel-ast" { print(jsonFrom(pixelStatements.Parse(pixelRegions.Analyze(decoded, document.spatial.links, request.source), request.source, 0))) }
                 else if operation == "pixel-regions" { print(jsonFrom(pixelRegions.Analyze(decoded, document.spatial.links, request.source))) }
                 else { print(jsonFrom(decoded)) }
             }
-            None => { fail("Pixel decoding requires a document") }
+            .None => { return .Err(failures.New("Pixel decoding requires a document")) }
         }
+    } else if operation == "native-graphs" {
+        let checked = CheckRequest(request, &session)?
+        print(NativeGraphsOutput{projection: flowProjection.Build(checked), diagnostics: []})
     } else if operation == "studio-bundle" {
-        let checked = checker.Check(types.Analyze(bindings.Bind(BuildProject(request))))
-        let planned = closures.Build(instances.Build(checked))
-        let built = LowerRequest(request, planned)
+        let checked = CheckRequest(request, &session)?
+        var planned = closures.Build(instances.Build(checked))
+        let built = LowerRequest(request, &planned, &session)
         bytecodeStream.Emit(assembler.Assemble(built))
         if len(built.diagnostics) == 0 {
-            print(debugInfo.Build(planned))
+            print(debugInfo.Build(&planned))
             let mapped = pixelAst.BuildMapped(checked)
-            print(jsonFrom(mapped))
-            let includeIR = match request.includeIR { Some(value) => value, None => false }
+            // Transport the document as a typed value. Each metadata JSON value
+            // stays independently bounded; the full canvas uses the output budget.
+            print(mapped)
+            let includeIR = match request.includeIR { .Some(value) => value, .None => false }
             if includeIR { print(jsonFrom(built)) }
             if len(mapped.diagnostics) == 0 {
                 match request.file {
-                    Some(path) => {
+                    .Some(path) => {
                         let source = mapped.source
                         // Debug maps have already been emitted; PNG names remain, maps do not.
-                        delete(source.metadata, "source_map")
-                        for name, module in source.bundle.modules { delete(module.metadata, "source_map") }
-                        let root = spatialLayout.Source{magic: source.magic, versions: source.versions, encoding: source.encoding, dimensions: source.dimensions, pixels: source.pixels, spatial: source.spatial, metadata: source.metadata}
-                        let scale = match request.scale { Some(value) => value, None => 8 }
-                        writeBytes(path, picture.Encode(root, source.bundle.modules, source.bundle.entry, scale))
+                        var modules: map[string, spatialLayout.Source] = map[string, spatialLayout.Source]{}
+                        for name, module in source.bundle.modules { modules[name] = WithoutSourceMap(module) }
+                        let root = WithoutSourceMap(spatialLayout.Source{magic: source.magic, versions: source.versions, encoding: source.encoding, dimensions: source.dimensions, pixels: source.pixels, spatial: source.spatial, metadata: source.metadata})
+                        let scale = match request.scale { .Some(value) => value, .None => 8 }
+                        let written = writeBytes(path, picture.Encode(root, modules, source.bundle.entry, scale)?)?
                     }
-                    None => {}
+                    .None => {}
                 }
             }
         }
     } else if operation == "png-file" || operation == "studio-png-file" {
-        let path = match request.file { Some(value) => value, None => "program.png" }
-        let scale = match request.scale { Some(value) => value, None => 8 }
-        let files = match request.files { Some(value) => value, None => map[string]{} }
-        let checked = checker.Check(types.Analyze(bindings.Bind(BuildProject(request))))
-        let emitted = PicturePixels(checked, operation == "studio-png-file")
+        let path = match request.file { .Some(value) => value, .None => "program.png" }
+        let scale = match request.scale { .Some(value) => value, .None => 8 }
+        let files = match request.files { .Some(value) => value, .None => map[string, string]{} }
+        // The checked project is needed only while emitting semantic pixels.
+        let emitted = PicturePixels(operation == "studio-png-file", CheckRequest(request, &session)?)
         if len(emitted.diagnostics) > 0 { print(PictureOutput{file: path, bytes: 0, diagnostics: emitted.diagnostics}) }
         else {
-            var phase = "image"
-            try {
-                let source = emitted.source
-                let root = spatialLayout.Source{magic: source.magic, versions: source.versions, encoding: source.encoding, dimensions: source.dimensions, pixels: source.pixels, spatial: source.spatial, metadata: source.metadata}
-                let bytes = picture.Encode(root, source.bundle.modules, source.bundle.entry, scale)
-                phase = "io"
-                writeBytes(path, bytes)
-                print(PictureOutput{file: path, bytes: len(bytes), diagnostics: []})
-            } catch error {
-                print(PictureOutput{file: path, bytes: 0, diagnostics: [model.Diagnostic{source: path, phase, message: error.message, start: 0, end: 0, line: 1, column: 1}]})
-            }
+            let source = emitted.source
+            let root = spatialLayout.Source{magic: source.magic, versions: source.versions, encoding: source.encoding, dimensions: source.dimensions, pixels: source.pixels, spatial: source.spatial, metadata: source.metadata}
+            print(SavePicture(root, source.bundle.modules, source.bundle.entry, scale, path))
         }
     } else if operation == "pixels" || operation == "studio-pixels" {
-        let files = match request.files { Some(value) => value, None => map[string]{} }
-        let checked = checker.Check(types.Analyze(bindings.Bind(BuildProject(request))))
-        if operation == "studio-pixels" { print(jsonFrom(pixelAst.BuildMapped(checked))) }
+        let files = match request.files { .Some(value) => value, .None => map[string, string]{} }
+        let checked = CheckRequest(request, &session)?
+        if operation == "studio-pixels" { print(pixelAst.BuildMapped(checked)) }
         else { print(pixelAst.Build(checked)) }
     } else if operation == "ir" || operation == "ir-summary" || operation == "bytecode" || operation == "bytecode-stream" || operation == "studio-bytecode-stream" {
-        let files = match request.files { Some(value) => value, None => map[string]{} }
-        let planned = closures.Build(instances.Build(checker.Check(types.Analyze(bindings.Bind(BuildProject(request))))))
-        let built = LowerRequest(request, planned)
-        if operation == "studio-bytecode-stream" { bytecodeStream.Emit(assembler.Assemble(built)); print(debugInfo.Build(planned)) }
+        let files = match request.files { .Some(value) => value, .None => map[string, string]{} }
+        let entryName = match request.entryFunction { .Some(value) => value, .None => "main" }
+        var planned = closures.Build(instances.BuildEntry(entryName, CheckRequest(request, &session)?))
+        let built = LowerRequest(request, &planned, &session)
+        if operation == "studio-bytecode-stream" { bytecodeStream.Emit(assembler.Assemble(built)); print(debugInfo.Build(&planned)) }
         else if operation == "bytecode-stream" { bytecodeStream.Emit(assembler.Assemble(built)) }
         else if operation == "bytecode" { print(jsonFrom(assembler.Assemble(built))) }
         else if operation == "ir-summary" {
@@ -204,63 +295,68 @@ fn main() {
             print(IRSummary{functions: len(built.ir.functions), instructions, unresolved, diagnostics: built.diagnostics})
         } else { print(jsonFrom(built)) }
     } else if operation == "frames" || operation == "frames-summary" {
-        let files = match request.files { Some(value) => value, None => map[string]{} }
-        let planned = closures.Build(instances.Build(checker.Check(types.Analyze(bindings.Bind(BuildProject(request))))))
-        let built = frames.Build(planned)
+        let files = match request.files { .Some(value) => value, .None => map[string, string]{} }
+        var planned = closures.Build(instances.Build(CheckRequest(request, &session)?))
+        let built = frames.Build(&planned)
         if operation == "frames-summary" {
             var slots = 0
             for function in built.functions { slots += len(function.slots) }
             print(FrameSummary{functions: len(built.functions), slots, diagnostics: built.diagnostics})
         } else { print(FrameOutput{functions: built.functions, symbols: planned.named.checked.resolved.bound.symbols, types: planned.named.checked.resolved.types, entry: built.entry, diagnostics: built.diagnostics}) }
     } else if operation == "schemas" || operation == "schemas-summary" {
-        let files = match request.files { Some(value) => value, None => map[string]{} }
-        let planned = closures.Build(instances.Build(checker.Check(types.Analyze(bindings.Bind(BuildProject(request))))))
-        let built = schemas.Build(planned)
+        let files = match request.files { .Some(value) => value, .None => map[string, string]{} }
+        var planned = closures.Build(instances.Build(CheckRequest(request, &session)?))
+        let built = schemas.Build(&planned)
         if operation == "schemas-summary" { print(SchemaSummary{schemas: len(built.schemas), diagnostics: built.diagnostics}) }
         else { print(SchemaOutput{schemas: built.schemas, types: planned.named.checked.resolved.types, diagnostics: built.diagnostics}) }
     } else if operation == "closures" || operation == "closures-summary" {
-        let files = match request.files { Some(value) => value, None => map[string]{} }
-        let planned = closures.Build(instances.Build(checker.Check(types.Analyze(bindings.Bind(BuildProject(request))))))
+        let files = match request.files { .Some(value) => value, .None => map[string, string]{} }
+        var planned = closures.Build(instances.Build(CheckRequest(request, &session)?))
         if operation == "closures-summary" { print(ClosureSummary{instances: len(planned.named.instances), closures: len(planned.closures), diagnostics: planned.diagnostics}) }
         else { print(ClosureOutput{closures: planned.closures, instances: planned.named.instances, symbols: planned.named.checked.resolved.bound.symbols, types: planned.named.checked.resolved.types, diagnostics: planned.diagnostics}) }
     } else if operation == "instances" || operation == "instances-summary" {
-        let files = match request.files { Some(value) => value, None => map[string]{} }
-        let planned = instances.Build(checker.Check(types.Analyze(bindings.Bind(BuildProject(request)))))
+        let files = match request.files { .Some(value) => value, .None => map[string, string]{} }
+        var planned = instances.Build(CheckRequest(request, &session)?)
         if operation == "instances-summary" { print(InstanceSummary{instances: len(planned.instances), edges: len(planned.edges), entry: planned.entry, diagnostics: planned.diagnostics}) }
         else { print(InstanceOutput{instances: planned.instances, edges: planned.edges, types: planned.checked.resolved.types, symbols: planned.checked.resolved.bound.symbols, entry: planned.entry, diagnostics: planned.diagnostics}) }
     } else if operation == "check" || operation == "check-summary" {
-        let files = match request.files { Some(value) => value, None => map[string]{} }
-        let resolved = types.Analyze(bindings.Bind(BuildProject(request)))
-        let selected = map[bool]{}
+        var selected: map[string, bool] = map[string, bool]{}
         var all = true
-        match request.checkModules { Some(paths) => { all = false; for path in paths { selected[path] = true } }, None => {} }
-        let checked = checker.CheckModules(resolved, selected, all)
-        let checkedModules: [string] = []
-        for item in resolved.bound.project.modules { if all || has(selected, item.path) { append(checkedModules, item.path) } }
+        match request.checkModules { .Some(paths) => { all = false; for path in paths { selected[path] = true } }, .None => {} }
+        let checked = match request.checkModules {
+            .Some(paths) => checker.CheckModules(selected, false, types.Analyze(bindings.Bind(BuildProject(request)?))),
+            .None => CheckRequest(request, &session)?
+        }
+        let resolved = checked.resolved
+        var checkedModules: [string] = []
+        for item in resolved.bound.project.modules { if all || selected.has(item.path) { checkedModules.append(item.path) } }
         if operation == "check-summary" {
             var unresolved = 0
             for expression in checked.expressions { if expression.typeId < 0 { unresolved += 1 } }
-            print(CheckSummary{checkedModules, globalFailure: len(resolved.diagnostics) > 0, expressions: len(checked.expressions), calls: len(checked.calls), unresolved, diagnostics: checked.diagnostics})
+            print(CheckSummary{checkedModules: checkedModules, globalFailure: len(resolved.diagnostics) > 0, expressions: len(checked.expressions), calls: len(checked.calls), unresolved, diagnostics: checked.diagnostics})
         } else { print(CheckOutput{calls: checked.calls, types: checked.resolved.types, expressions: checked.expressions, diagnostics: checked.diagnostics}) }
+    } else if operation == "editor-index" {
+        print(jsonFrom(editorIndex.Analyze(BuildEditorProject(request)?)))
     } else if operation == "types" {
-        let files = match request.files { Some(value) => value, None => map[string]{} }
-        let resolved = types.Analyze(bindings.Bind(BuildProject(request)))
+        let files = match request.files { .Some(value) => value, .None => map[string, string]{} }
+        let resolved = types.Analyze(bindings.Bind(BuildProject(request)?))
         print(TypesOutput{signatures: resolved.signatures, symbols: resolved.bound.symbols, types: resolved.types, annotations: resolved.annotations, definitions: resolved.definitions, diagnostics: resolved.diagnostics})
     } else if operation == "bind" {
-        let files = match request.files { Some(value) => value, None => map[string]{} }
-        let bound = bindings.Bind(BuildProject(request))
-        let modules: [string] = []
-        for item in bound.project.modules { append(modules, item.path) }
-        print(BindOutput{modules, scopes: bound.scopes, symbols: bound.symbols, references: bound.references, captures: bound.captures, diagnostics: bound.diagnostics})
+        let files = match request.files { .Some(value) => value, .None => map[string, string]{} }
+        let bound = bindings.Bind(BuildProject(request)?)
+        var modules: [string] = []
+        for item in bound.project.modules { modules.append(item.path) }
+        print(BindOutput{modules: modules, scopes: bound.scopes, symbols: bound.symbols, references: bound.references, captures: bound.captures, diagnostics: bound.diagnostics})
     } else if operation == "project" {
-        let files = match request.files { Some(value) => value, None => map[string]{} }
-        let built = BuildProject(request)
-        let modules: [ModuleOutput] = []
-        for item in built.modules { append(modules, ModuleOutput{path: item.path, imports: item.imports, declarations: item.declarations}) }
-        print(ProjectOutput{modules, diagnostics: built.diagnostics})
+        let files = match request.files { .Some(value) => value, .None => map[string, string]{} }
+        let built = BuildProject(request)?
+        var modules: [ModuleOutput] = []
+        for item in built.modules { modules.append(ModuleOutput{path: item.path, imports: item.imports, declarations: item.declarations}) }
+        print(ProjectOutput{modules: modules, diagnostics: built.diagnostics})
     } else if operation == "parse" {
         let parsed = parser.Parse(request.source, request.text)
         print(ParseOutput{nodes: parsed.nodes, roots: parsed.roots, diagnostics: parsed.diagnostics})
     }
     else { print(lexer.Scan(request.source, request.text)) }
+    return .Ok(operation)
 }

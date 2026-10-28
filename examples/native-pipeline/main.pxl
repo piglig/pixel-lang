@@ -1,0 +1,15 @@
+import "lib.pxl" as lib
+fn Add(a: int, b: int) -> int = a + b
+flow Combined() step(values: [int]) -> int {
+ instance left = lib.Pipeline()
+ instance right = lib.Pipeline()
+ let first = left.step(values)
+ let second = right.step(values)
+ output Add(first, second)
+}
+effect fn main() {
+ let combined = Combined()
+ print(combined.step([1, 2, 3]))
+ let run = Combined()
+ print(run.step([4]))
+}

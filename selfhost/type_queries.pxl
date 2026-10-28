@@ -1,0 +1,206 @@
+import "model.pxl" as model
+import "types.pxl" as types
+import "source_identity.pxl" as identity
+import "type_cache_model.pxl" as cacheModel
+
+// Entries own declaration-local results. Type references use stable syntax
+// origins and a private type table, never indices from a previous request.
+record Signature { node: string, parameters: [int], typeId: int }
+record Definition { node: string, typeId: int, fields: [model.TypeField], variants: [model.TypeVariant] }
+export record Entry { shape: [model.Node], names: map[string, string], types: [cacheModel.CachedType], annotations: [cacheModel.CachedValue], symbols: [cacheModel.CachedValue], signatures: [Signature], definitions: [Definition] }
+export record Snapshot { entries: map[string, Entry] }
+export record Output { resolved: model.ResolvedTypes, snapshot: Snapshot, hits: int, checked: int }
+record Encoding { ids: map[string, int], values: [cacheModel.CachedType] }
+export fn Empty() -> Snapshot = Snapshot{entries: map[string, Entry]{}}
+fn Key(module: int, node: int) -> string = identity.Key(module, node)
+fn Syntax(node: int, nodes: [model.Node], parts: inout [model.Node], owned: inout [int]) {
+    let item = nodes[node]
+    owned.append(node)
+    parts.append(item)
+    for child in item.children { Syntax(child, nodes, &parts, &owned) }
+}
+fn SameShape(left: [model.Node], right: [model.Node]) -> bool {
+    if len(left) != len(right) { return false }
+    for index, node in left {
+        let other = right[index]
+        if node.kind != other.kind || node.text != other.text || len(node.children) != len(other.children) { return false }
+    }
+    return true
+}
+fn NameContract(module: int, name: string, resolved: model.ResolvedTypes) -> string {
+    let parts = split(name, ".")
+    var target = module
+    var local = name
+    if len(parts) == 2 {
+        let key = string(module) + ":" + parts[0]
+        if !resolved.importModules.has(key) { return "missing-module" }
+        target = resolved.importModules[key]
+        if target < 0 { return "missing-module" }
+        local = parts[1]
+    }
+    let key = string(target) + ":" + local
+    if !resolved.declarationIds.has(key) { return "builtin-or-parameter" }
+    let source = resolved.bound.project.modules[target]
+    let declaration = source.declarations[resolved.declarationIds[key]]
+    var count = 0
+    for child in source.syntax.nodes[declaration.node].children {
+        if source.syntax.nodes[child].kind == "type_parameter" { count += 1 }
+    }
+    return jsonStringify(jsonFrom([source.path, declaration.name, declaration.kind, string(declaration.exported), string(count)]))
+}
+fn Encode(id: int, resolved: model.ResolvedTypes, addresses: identity.Index, encoding: inout Encoding) -> int {
+    if id < 0 { return -1 }
+    if encoding.ids.has(string(id)) { return encoding.ids[string(id)] }
+    let typ = resolved.types[id]
+    var arguments: [int] = []
+    for argument in typ.arguments { arguments.append(Encode(argument, resolved, addresses, &encoding)) }
+    var origin = ""
+    if typ.module >= 0 { origin = addresses.nodes[Key(typ.module, typ.declaration)] }
+    let result = len(encoding.values)
+    encoding.values.append(cacheModel.CachedType{kind: typ.kind, name: typ.name, origin, arguments})
+    encoding.ids[string(id)] = result
+    return result
+}
+fn Fields(fields: [model.TypeField], resolved: model.ResolvedTypes, addresses: identity.Index, encoding: inout Encoding) -> [model.TypeField] {
+    var result: [model.TypeField] = []
+    for field in fields { result.append(model.TypeField{name: field.name, typeId: Encode(field.typeId, resolved, addresses, &encoding)}) }
+    return result
+}
+fn Save(module: int, owned: [int], shape: [model.Node], firstType: int, firstAnnotation: int, firstSignature: int, firstDefinition: int, analysis: types.DeclarationAnalysis, addresses: identity.Index) -> Entry {
+    let r = analysis.resolved
+    var encoding = Encoding{ids: map[string, int]{}, values: []}
+    var entry = Entry{shape, names: map[string, string]{}, types: [], annotations: [], symbols: [], signatures: [], definitions: []}
+    // Replay original interning order, including types not retained by a final signature.
+    var cursor = firstType
+    while cursor < len(r.types) { Encode(cursor, r, addresses, &encoding); cursor += 1 }
+    for value in slice(r.annotations, firstAnnotation, len(r.annotations)) {
+        entry.annotations.append(cacheModel.CachedValue{key: addresses.nodes[Key(value.module, value.node)], typeId: Encode(value.typeId, r, addresses, &encoding)})
+    }
+    for value in slice(r.signatures, firstSignature, len(r.signatures)) {
+        var parameters: [int] = []
+        for parameter in value.parameters { parameters.append(Encode(parameter, r, addresses, &encoding)) }
+        entry.signatures.append(Signature{node: addresses.nodes[Key(value.module, value.node)], parameters, typeId: Encode(value.typeId, r, addresses, &encoding)})
+    }
+    for value in slice(r.definitions, firstDefinition, len(r.definitions)) {
+        let typ = r.types[value.typeId]
+        var variants: [model.TypeVariant] = []
+        for variant in typ.variants { variants.append(model.TypeVariant{name: variant.name, fields: Fields(variant.fields, r, addresses, &encoding)}) }
+        entry.definitions.append(Definition{node: addresses.nodes[Key(value.module, value.node)], typeId: Encode(value.typeId, r, addresses, &encoding), fields: Fields(typ.fields, r, addresses, &encoding), variants})
+    }
+    for node in owned {
+        let key = Key(module, node)
+        if analysis.lookup.symbolIds.has(key) {
+            let symbol = r.bound.symbols[analysis.lookup.symbolIds[key]]
+            if symbol.typeId >= 0 { entry.symbols.append(cacheModel.CachedValue{key: addresses.nodes[key], typeId: Encode(symbol.typeId, r, addresses, &encoding)}) }
+        }
+        let item = r.bound.project.modules[module].syntax.nodes[node]
+        if item.kind == "type" { entry.names[item.text] = NameContract(module, item.text, r) }
+    }
+    entry.types = encoding.values
+    return entry
+}
+fn Relocate(id: int, ids: [int]) -> int { if id < 0 { return -1 }; return ids[id] }
+fn RestoreFields(fields: [model.TypeField], ids: [int]) -> [model.TypeField] {
+    var result: [model.TypeField] = []
+    for field in fields { result.append(model.TypeField{name: field.name, typeId: Relocate(field.typeId, ids)}) }
+    return result
+}
+fn Take(module: int, entry: Entry, shape: [model.Node], sameSource: bool, addresses: identity.Index, analysis: inout types.DeclarationAnalysis) -> bool {
+    if !sameSource && !SameShape(entry.shape, shape) { return false }
+    for name, contract in entry.names { if NameContract(module, name, analysis.resolved) != contract { return false } }
+    for typ in entry.types { if typ.origin != "" && !addresses.locations.has(typ.origin) { return false } }
+    var ids: [int] = []
+    for typ in entry.types {
+        var arguments: [int] = []
+        for argument in typ.arguments { arguments.append(Relocate(argument, ids)) }
+        var owner = -1
+        var node = -1
+        if typ.origin != "" { let location = addresses.locations[typ.origin]; owner = location.module; node = location.node }
+        ids.append(types.Reintern(typ.kind, typ.name, owner, node, arguments, &analysis.resolved))
+    }
+    for value in entry.annotations {
+        let location = addresses.locations[value.key]
+        let typeId = Relocate(value.typeId, ids)
+        analysis.resolved.annotations.append(model.NodeType{module: location.module, node: location.node, typeId})
+        analysis.resolved.annotationTypes[Key(location.module, location.node)] = typeId
+    }
+    for value in entry.definitions {
+        let location = addresses.locations[value.node]
+        let typeId = Relocate(value.typeId, ids)
+        analysis.resolved.definitions.append(model.NodeType{module: location.module, node: location.node, typeId})
+        analysis.resolved.definitionTypes[Key(location.module, location.node)] = typeId
+        var variants: [model.TypeVariant] = []
+        for variant in value.variants { variants.append(model.TypeVariant{name: variant.name, fields: RestoreFields(variant.fields, ids)}) }
+        analysis.resolved.types[typeId] = analysis.resolved.types[typeId] with {fields: RestoreFields(value.fields, ids), variants}
+    }
+    for value in entry.signatures {
+        let location = addresses.locations[value.node]
+        var parameters: [int] = []
+        for parameter in value.parameters { parameters.append(Relocate(parameter, ids)) }
+        analysis.resolved.signatures.append(model.FunctionSignature{module: location.module, node: location.node, parameters, typeId: Relocate(value.typeId, ids)})
+    }
+    for value in entry.symbols {
+        let location = addresses.locations[value.key]
+        let symbol = analysis.lookup.symbolIds[Key(location.module, location.node)]
+        analysis.resolved.bound.symbols[symbol] = analysis.resolved.bound.symbols[symbol] with {typeId: Relocate(value.typeId, ids)}
+    }
+    return true
+}
+export fn WantLocations(previous: Snapshot, wanted: inout map[string, bool]) {
+    for key, entry in previous.entries {
+        for typ in entry.types { if typ.origin != "" { wanted[typ.origin] = true } }
+        for value in entry.annotations { wanted[value.key] = true }
+        for value in entry.symbols { wanted[value.key] = true }
+        for signature in entry.signatures { wanted[signature.node] = true }
+        for definition in entry.definitions { wanted[definition.node] = true }
+    }
+}
+export fn Analyze(bound: model.BoundProject, previous: Snapshot, addresses: identity.Index, unchanged: map[string, bool]) -> Output {
+    var analysis = types.Prepare(bound)
+    var snapshot = Empty()
+    var hits = 0
+    var checked = 0
+    if len(bound.diagnostics) > 0 { return Output{resolved: analysis.resolved, snapshot, hits, checked} }
+    for module, source in bound.project.modules {
+        for declaration in source.declarations {
+            let key = addresses.nodes[Key(module, declaration.node)]
+            var parts: [model.Node] = []
+            var owned: [int] = []
+            let sameSource = unchanged.has(source.path) && previous.entries.has(key)
+            if !sameSource { Syntax(declaration.node, source.syntax.nodes, &parts, &owned) }
+            var shape = parts
+            if sameSource { shape = previous.entries[key].shape }
+            if previous.entries.has(key) && Take(module, previous.entries[key], shape, sameSource, addresses, &analysis) {
+                snapshot.entries[key] = previous.entries[key]
+                hits += 1
+            } else {
+                if sameSource { Syntax(declaration.node, source.syntax.nodes, &parts, &owned); shape = parts }
+                let firstType = len(analysis.resolved.types)
+                let firstAnnotation = len(analysis.resolved.annotations)
+                let firstSignature = len(analysis.resolved.signatures)
+                let firstDefinition = len(analysis.resolved.definitions)
+                let diagnostics = len(analysis.resolved.diagnostics)
+                types.ResolveDeclaration(module, declaration.node, &analysis)
+                checked += 1
+                if len(analysis.resolved.diagnostics) == diagnostics {
+                    snapshot.entries[key] = Save(module, owned, shape, firstType, firstAnnotation, firstSignature, firstDefinition, analysis, addresses)
+                }
+            }
+        }
+    }
+    return Output{resolved: types.Finish(analysis), snapshot, hits, checked}
+}
+export fn Size(snapshot: Snapshot) -> int {
+    var size = 0
+    for key, entry in snapshot.entries {
+        size += len(entry.shape) + len(entry.names) + len(entry.types) + len(entry.annotations) + len(entry.symbols) + len(entry.signatures) + len(entry.definitions)
+        for node in entry.shape { size += len(node.children) }
+        for typ in entry.types { size += len(typ.arguments) }
+        for value in entry.definitions {
+            size += len(value.fields) + len(value.variants)
+            for variant in value.variants { size += len(variant.fields) }
+        }
+        for signature in entry.signatures { size += len(signature.parameters) }
+    }
+    return size
+}

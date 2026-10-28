@@ -1,241 +1,185 @@
-"""Checked spatial editing proposals over an exact, immutable source snapshot."""
+"""Source edits projected from the native compiler's AST and pixel source maps.
 
+The host chooses text ranges; it never parses, binds or type-checks PixelLang.
+"""
 import hashlib
 import json
-
-from .compiler import frontend
-from .model import Node, PixelError
-from .project import compile_project
-from .text import Source, lex, parse_text
+from .compiler_client import CompilerClient
+from .model import PixelError
 
 
 def revision(files, entry):
-    return hashlib.sha256(
-        json.dumps([entry, files], sort_keys=True).encode()
-    ).hexdigest()
+    return hashlib.sha256(json.dumps([entry, files], sort_keys=True).encode()).hexdigest()
 
 
 class SpatialProject:
-    @staticmethod
-    def explain(node):
-        if node.kind == "literal":
-            typ = "string" if node.data["type"] == "str" else node.data["type"]
-            return f"Produces a constant {typ} value."
-        if node.kind == "binary":
-            if node.data["op"] in ("and", "or"):
-                return "Combines boolean values; the right operand runs only when needed to determine the result."
-            return f"Evaluates the left operand, then the right, and applies {node.data['op']}."
-        if node.kind == "let":
-            return (
-                "Initializes a mutable binding that can be reassigned."
-                if node.data.get("mutable")
-                else "Initializes a binding that cannot be reassigned; referenced objects can still be mutated."
-            )
-        return {
-            "fn": "Declares a function with parameters, a result type and a body.",
-            "lambda": "Creates a function value sharing its captured lexical bindings.",
-            "return": "Returns a value and ends the current function call.",
-            "print": "Evaluates a value and appends it to program output.",
-            "if": "Chooses a branch using a boolean condition.",
-            "while": "Repeats the body while its condition is true.",
-            "for": "Visits a shallow snapshot of the collection in its iteration order.",
-            "call": "Evaluates arguments in order and calls the resolved function.",
-            "invoke": "Evaluates a function value, then its arguments, and calls it.",
-            "variable": "Reads the value of the resolved lexical binding.",
-            "field": "Reads a named field from the receiver.",
-            "set": "Evaluates and assigns a new value to a mutable binding.",
-            "match": "Selects an exhaustive variant arm and binds its payload values.",
-            "record": "Declares a nominal record type and its named fields.",
-            "enum": "Declares a tagged type with a fixed set of variants.",
-        }.get(
-            node.kind,
-            f"{node.kind.replace('_', ' ').capitalize()} in the selected program structure.",
-        )
-
-    def __init__(self, files, entry="main.pxl"):
+    def __init__(self, files, entry='main.pxl', *, compiler=None, cancelled=lambda: False, submitted_at=None):
         self.files, self.entry = dict(files), entry
-        self.revision = revision(files, entry)
-        self.source, self.compiled = compile_project(files, entry)
-        self.nodes, self.siblings = {}, {}
-        self.documents = {}
-        for document in [
-            self.source,
-            *self.source.get("bundle", {}).get("modules", {}).values(),
-        ]:
-            name = document.get("metadata", {}).get("filename")
-            if name in files:
-                self.documents[name] = document
-                self.visit(parse_text(files[name], name), name)
+        self.revision = revision(self.files, entry)
+        self.compiler = compiler
+        self.cancelled, self.submitted_at = cancelled, submitted_at
+        self.nodes, self.siblings, self.syntax = {}, {}, {}
+        if compiler is None:
+            with CompilerClient() as client:
+                self._load(client)
+        else:
+            self._load(compiler)
 
-    def visit(self, node, source, siblings=None):
-        key = f"{source}:{node.span.start}:{node.span.end}:{node.kind}"
-        self.nodes[key] = node
-        if siblings is not None:
-            self.siblings[key] = siblings
-        for field, value in node.data.items():
-            if field.startswith("_"):
+    def _check_cancelled(self):
+        if self.cancelled():
+            raise PixelError('service', 'Editor request cancelled', code='service.cancelled')
+
+    def _request(self, compiler, operation, files):
+        self._check_cancelled()
+        result = compiler.request(operation, files=files, entry=self.entry,
+                                  cancelled=self.cancelled, submitted_at=self.submitted_at)
+        self._check_cancelled()
+        return result
+
+    def _load(self, compiler):
+        self._request(compiler, 'check', self.files)
+        analysis = self._request(compiler, 'editor-index', self.files)['result']['index']
+        source = self._request(compiler, 'debug-pixels', self.files)['result']['document']
+        self.documents = {doc['metadata']['filename']: doc for doc in
+                          [source, *source.get('bundle', {}).get('modules', {}).values()]
+                          if doc['metadata']['filename'] in self.files}
+        for module in analysis['resolved']['bound']['project']['modules']:
+            path = module['path']
+            if path not in self.documents:
                 continue
-            if isinstance(value, Node):
-                self.visit(value, source)
-            elif isinstance(value, list):
-                for child in value:
-                    if isinstance(child, Node):
-                        self.visit(
-                            child,
-                            source,
-                            value if field in ("body", "then", "else") else None,
-                        )
+            syntax = module['syntax']
+            self.syntax[path] = syntax
+            for index, node in enumerate(syntax['nodes']):
+                key = self.key(path, index)
+                self.nodes[key] = (path, index, node)
+                if node['kind'] == 'block':
+                    for child in node['children']:
+                        self.siblings[self.key(path, child)] = node['children']
+
+    @staticmethod
+    def key(source, index):
+        return f'{source}:{index}'
+
+    def kind(self, source, node):
+        if node['kind'].startswith('literal_'):
+            return 'literal'
+        nodes = self.syntax[source]['nodes']
+        if node['kind'] == 'expression_stmt' and node['children']:
+            call = nodes[node['children'][0]]
+            if call['kind'] == 'call' and call['children']:
+                target = nodes[call['children'][0]]
+                if target['kind'] == 'name' and target['text'] == 'print':
+                    return 'print'
+        return node['kind']
+
+    def span(self, source, start, end):
+        text = self.files[source]
+        def point(offset):
+            prefix = text[:offset]
+            return dict(offset=offset, line=prefix.count('\n') + 1,
+                        column=len(prefix.rsplit('\n', 1)[-1]) + 1)
+        return dict(source=source, kind='text', start=point(start), end=point(end))
 
     def describe(self, source):
+        self._check_cancelled()
         if source not in self.documents:
-            raise PixelError(
-                "studio", "Source module is not part of this executable project"
-            )
-        document = self.documents[source]
-        _, space = frontend(document, source)
-        mapping = document["metadata"].get("source_map", {})
-        colors = {tuple(p["position"]): p["rgba"] for p in document["pixels"]}
-        by_span, targets = {}, {}
-        for key, node in self.nodes.items():
-            if node.span.source != source or node.kind == "program":
+            raise PixelError('studio', 'Source module is not part of this executable project')
+        targets = {}
+        for key, (path, index, node) in self.nodes.items():
+            self._check_cancelled()
+            if path != source or node['kind'] == 'block':
                 continue
-            span = node.span
-            by_span.setdefault((span.start, span.end), []).append(key)
-            actions = []
-            if node.kind == "literal":
-                actions.append("literal")
-            if node.kind == "binary":
-                actions.append("operator")
+            kind = self.kind(path, node)
+            actions = ['literal'] if kind == 'literal' else ['operator'] if kind == 'binary' else []
             siblings = self.siblings.get(key)
-            if siblings and node.kind not in ("fn", "record", "enum", "import", "case"):
-                index = next(i for i, sibling in enumerate(siblings) if sibling is node)
-                if index:
-                    actions.append("up")
-                if index + 1 < len(siblings):
-                    actions.append("down")
-            targets[key] = {
-                "id": key,
-                "kind": node.kind,
-                "explanation": self.explain(node),
-                "span": span.to_dict(),
-                "text": self.files[source][span.start : span.end],
-                "actions": actions,
-            }
-        for region in space["regions"]:
-            keys = []
-            for token in region["tokens"]:
-                token["color"] = "#" + "".join(
-                    f"{c:02x}" for c in colors[tuple(token["position"])][:3]
-                )
-                token["label"] = str(token["value"])
-                span = mapping.get(",".join(map(str, token["position"])))
-                token["targets"] = (
-                    by_span.get((span["start"]["offset"], span["end"]["offset"]), [])
-                    if span
-                    else []
-                )
-                keys.extend(token["targets"])
-            region["targets"] = list(dict.fromkeys(keys))
-        return {
-            "revision": self.revision,
-            "source": source,
-            "sources": sorted(self.documents),
-            "regions": space["regions"],
-            "targets": targets,
-        }
+            if siblings:
+                position = siblings.index(index)
+                if position: actions.append('up')
+                if position + 1 < len(siblings): actions.append('down')
+            explanation = (f"Produces a constant {dict(str='string', keyword='bool').get(node['kind'][8:], node['kind'][8:])} value."
+                           if kind == 'literal' else f"{kind.replace('_', ' ').capitalize()} in the selected program structure.")
+            targets[key] = dict(id=key, kind=kind, explanation=explanation,
+                                span=self.span(path, node['start'], node['end']),
+                                text=self.files[path][node['start']:node['end']], actions=actions)
+        # Rows are a view of compiler-emitted pixels, not a second pixel decoder.
+        document = self.documents[source]
+        mapping = document['metadata']['source_map']
+        rows, mapped_targets = {}, {}
+        for pixel in document['pixels']:
+            self._check_cancelled()
+            position = pixel['position']
+            origin = mapping.get(','.join(map(str, position)))
+            bounds = (origin['start']['offset'], origin['end']['offset']) if origin else None
+            if bounds is not None and bounds not in mapped_targets:
+                mapped_targets[bounds] = sorted((key for key, target in targets.items()
+                    if bounds[0] <= target['span']['start']['offset']
+                    and target['span']['end']['offset'] <= bounds[1]),
+                    key=lambda key: targets[key]['span']['end']['offset'] - targets[key]['span']['start']['offset'])
+            keys = mapped_targets.get(bounds, [])
+            token = dict(position=position, color='#' + ''.join(f'{c:02x}' for c in pixel['rgba'][:3]),
+                         kind='source region' if origin else 'pixel',
+                         label=self.files[source][bounds[0]:bounds[1]] if origin else '', targets=keys)
+            rows.setdefault(position[1], []).append(token)
+        regions = [dict(tokens=sorted(tokens, key=lambda token: token['position'][0]))
+                   for _, tokens in sorted(rows.items())]
+        return dict(revision=self.revision, source=source, sources=sorted(self.documents),
+                    regions=regions, targets=targets)
 
     def edit(self, args):
-        if args.get("revision") != self.revision:
-            raise PixelError(
-                "studio", "Source changed; refresh the spatial view before editing"
-            )
-        key, action = args.get("target"), args.get("action")
-        node = self.nodes.get(key)
-        if node is None:
-            raise PixelError("studio", "Unknown spatial target")
-        source, start, end = node.span.source, node.span.start, node.span.end
-        target = self.describe(source)["targets"].get(key)
-        if not target or action not in target["actions"]:
-            raise PixelError(
-                "studio", "This operation is not available for the selected region"
-            )
+        self._check_cancelled()
+        if args.get('revision') != self.revision:
+            raise PixelError('studio', 'Source changed; refresh the spatial view before editing')
+        key, action = args.get('target'), args.get('action')
+        if key not in self.nodes:
+            raise PixelError('studio', 'Unknown spatial target')
+        source, index, node = self.nodes[key]
+        if action not in self.describe(source)['targets'].get(key, {}).get('actions', []):
+            raise PixelError('studio', 'This operation is not available for the selected region')
         text = self.files[source]
-        if action == "literal":
-            replacement = args.get("value")
+        start, end = node['start'], node['end']
+        if action == 'literal':
+            replacement = args.get('value')
             if not isinstance(replacement, str) or len(replacement) > 100_000:
-                raise PixelError("studio", "Enter a PixelLang literal")
-            tree = parse_text("fn main() { print(" + replacement + ") }")
-            if len(tree.data["body"]) != 1:
-                raise PixelError("studio", "Replacement must be a single literal")
-            body = tree.data["body"][0].data["body"]
-            value = (
-                body[0].data.get("value")
-                if len(body) == 1 and body[0].kind == "print"
-                else None
-            )
-            if value is None or not (
-                value.kind == "literal"
-                or value.kind == "unary"
-                and value.data["op"] == "-"
-                and value.data["operand"].kind == "literal"
-            ):
-                raise PixelError("studio", "Replacement must be a single literal")
-        elif action == "operator":
-            operator = args.get("value")
-            if operator not in (
-                "+",
-                "-",
-                "*",
-                "/",
-                "%",
-                "==",
-                "!=",
-                "<",
-                "<=",
-                ">",
-                ">=",
-                "&&",
-                "||",
-            ):
-                raise PixelError("studio", "Choose a supported binary operator")
-            left, right = node.data["left"].span, node.data["right"].span
-            gap = text[left.end : right.start]
-            original = {"and": "&&", "or": "||"}.get(node.data["op"], node.data["op"])
-            token = next(t for t in lex(Source(gap, source)) if t.value == original)
-            gap = gap[: token.start] + operator + gap[token.end :]
-            replacement = (
-                "("
-                + text[start : left.start]
-                + "("
-                + text[left.start : left.end]
-                + ")"
-                + gap
-                + "("
-                + text[right.start : right.end]
-                + ")"
-                + text[right.end : end]
-                + ")"
-            )
+                raise PixelError('studio', 'Enter a PixelLang literal')
+            replacement = replacement.strip()
+        elif action == 'operator':
+            operator = args.get('value')
+            if operator not in ('+', '-', '*', '/', '%', '==', '!=', '<', '<=', '>', '>=', '&&', '||'):
+                raise PixelError('studio', 'Choose a supported binary operator')
+            nodes = self.syntax[source]['nodes']
+            left, right = [nodes[child] for child in node['children']]
+            token = next(t for t in self.syntax[source]['tokens']
+                         if left['end'] <= t['start'] < right['start'] and t['value'] == node['text'])
+            gap = text[left['end']:token['start']] + operator + text[token['end']:right['start']]
+            replacement = ('(' + text[start:left['start']] + '(' + text[left['start']:left['end']]
+                           + ')' + gap + '(' + text[right['start']:right['end']] + ')'
+                           + text[right['end']:end] + ')')
         else:
             siblings = self.siblings[key]
-            index = next(i for i, sibling in enumerate(siblings) if sibling is node)
-            other = siblings[index + (-1 if action == "up" else 1)]
-            first, second = sorted((node, other), key=lambda n: n.span.start)
-            start, end = first.span.start, second.span.end
-            replacement = (
-                text[second.span.start : second.span.end]
-                + text[first.span.end : second.span.start]
-                + text[first.span.start : first.span.end]
-            )
+            other = self.syntax[source]['nodes'][siblings[siblings.index(index) + (-1 if action == 'up' else 1)]]
+            first, second = sorted((node, other), key=lambda n: n['start'])
+            start, end = first['start'], second['end']
+            replacement = text[second['start']:second['end']] + text[first['end']:second['start']] + text[first['start']:first['end']]
         proposed = {**self.files, source: text[:start] + replacement + text[end:]}
-        # Proposals never mutate buffers or execute a program. The entire project
-        # must survive pixel encoding and checking before the host applies an edit.
-        compile_project(proposed, self.entry)
-        return {
-            "revision": self.revision,
-            "source": source,
-            "start": start,
-            "end": end,
-            "text": replacement,
-            "files": proposed,
-        }
+        if self.compiler is None:
+            with CompilerClient() as compiler:
+                self._validate(compiler, proposed, source, start, replacement, action)
+        else:
+            self._validate(self.compiler, proposed, source, start, replacement, action)
+        self._check_cancelled()
+        return dict(revision=self.revision, source=source, start=start, end=end, text=replacement, files=proposed)
+
+    def _validate(self, compiler, proposed, source, start, replacement, action):
+        self._request(compiler, 'check', proposed)
+        if action != 'literal':
+            return
+        analysis = self._request(compiler, 'editor-index', proposed)['result']['index']
+        module = next(m for m in analysis['resolved']['bound']['project']['modules'] if m['path'] == source)
+        nodes = module['syntax']['nodes']
+        for node in nodes:
+            if node['start'] != start or node['end'] != start + len(replacement):
+                continue
+            if node['kind'].startswith('literal_') or (node['kind'] == 'unary' and node['text'] == '-'
+                    and len(node['children']) == 1 and nodes[node['children'][0]]['kind'] in ('literal_int', 'literal_float64')):
+                return
+        raise PixelError('studio', 'Replacement must be a single literal')

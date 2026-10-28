@@ -1,0 +1,9 @@
+export frame Building = meters
+export enum Command { Request(floor: int), Tick, Open, Close }
+export enum Rejection { InvalidFloor(floor: int), DoorsOpen, InTransit }
+export record Status { floor: int, target: int, doorsOpen: bool }
+export record View {
+    status: Status,
+    scene: Space[Building, string, bool],
+    nearbyFloors: [int]
+}

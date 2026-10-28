@@ -1,74 +1,85 @@
-# VS Code Studio workstation
+# Use VS Code Studio
 
-[中文](../../zh-CN/guides/studio.md) · [English](studio.md) · [Documentation](../README.md)
+[简体中文](../../zh-CN/guides/studio.md) · [English](studio.md) · [Documentation](../README.md)
 
-Studio is a VS Code extension without an HTTP server or external browser. It bundles
-the compiler; a Python stdio service owns compilation, execution, images and recordings.
+Studio connects source, spatial views and execution history inside VS Code. It is a local extension and does not require a separate browser service.
 
-## Installation and authoring
+## Install and configure
 
-Run uv sync --locked at the repository root, then install a local VSIX through
-Extensions → Install from VSIX. Python 3.11+ and Pillow are required. The extension
-prefers the workspace .venv, then python3 (python on Windows); configure pixellang.pythonPath
-if needed. Open .pxl files for live diagnostics, completion, definitions/references,
-rename and comment-preserving indentation formatting. Projects use pixel.toml;
-standalone workflows can set pixellang.entry to a fixed entry.
+1. Complete [toolchain installation](installation.md) and check `pixel doctor`.
+2. Run **Extensions: Install from VSIX** and choose a platform-matched package.
+3. Open your project and run **PixelLang: Select Python Interpreter**.
+4. Run **PixelLang: Check Environment** and inspect the PixelLang output channel.
 
-## Build and run
+The extension bundles its compiler and host code; the interpreter still needs Python 3.11+ and Pillow 10–12. Set `pixellang.pythonPath` if needed. Projects select an entry through `pixel.toml`; standalone files can use `pixellang.entry`.
 
-Run **PixelLang: Open Studio**. Build compiles the current buffer snapshot into a PNG
-containing reachable modules; Run executes with supplied input and Step advances one
-transition. Source/input changes invalidate the old run. Program image displays the
-executable PNG, Export PNG saves it, and **PixelLang: Recover Project from PNG** restores
-source into an empty directory without comments or original formatting. Compiler · IR
-requests IR on first opening; ordinary stepping/replay does not regenerate it.
-See [projects](projects.md) for save/test/build and lock commands.
-
-## Spatial editing
-
-In 2D · Edit, select a module, pixel or Selected semantics item to inspect meaning and
-reveal source. Text selection highlights the smallest matching target. Set literal and
-Set operator change literals/binary operators; Move ↑/↓ moves adjacent statements in
-the same list. The service checks the exact snapshot through full multifile pixel
-compilation; the extension rechecks buffers and applies one WorkspaceEdit, reversible
-with ordinary Undo. Invalid/stale proposals never write source or execute file effects.
-Refresh after other edits; recording snapshots stay bound to their original execution.
-Arbitrary painting and full 3D source editing are unavailable. Canonical paths identify
-files while edits reuse open document URIs, preventing duplicate symlink buffers.
-
-## Time and debugging
-
-In 3D · Time, X/Y are module-local source positions and Z is logical transition number.
-Drag to orbit, scroll to zoom, select a voxel or use the time slider. A bounded window
-surrounds the selected time and keeps modules separate. State comes from checkpoints
-and deterministic replay, never interpolation. Save timeline writes .pixeltime;
-**PixelLang: Open Time Recording** reopens it without the original project. Format 0.8
-stores source, input, budgets, checkpoint interval and cancellation position.
-
-Press F5 and choose PixelLang for breakpoints, step in/over/out, pause, backward
-instruction stepping, call stacks, named locals, heap and operand stack. Termination
-retains a stopped state for reverse inspection; Stop closes the session. Values page
-lazily and references expire when time changes. Missing/changed source opens as readonly
-snapshots matching the artifact, including standard libraries. Launch supports program,
-input and stopOnEntry; input is the string consumed by input(). File access requires
-pixellang.readRoot/writeRoot grants; network access is unavailable. Pause stops automatic
-advancement and can resume. Cancel ends execution but retains history, taking effect
-after the current batch of at most 2,000 instructions, without interrupting a host call.
-
-## Build the extension
-
-From the repository root:
+To build the extension from source, prepare the local compiler first, then run from the repository root:
 
 ```sh
 npm --prefix vscode ci
 npm --prefix vscode run package
-npm --prefix vscode test
 ```
 
-The output is pixellang-studio-0.9.0.vsix; packaging does not publish. Tests use pinned
-VS Code 1.137.0, or PIXELLANG_VSCODE for an explicit local executable. Real interaction
-tests require an unlocked desktop; see [contributing](../contributing/README.md).
+Packaging does not publish the extension. See [verification](../contributing/verification.md) for platform bundles and installed checks.
 
-## New projects and environment checks
+## Write programs
 
-The command palette provides `PixelLang: Create Project`, `PixelLang: Check Environment` and `PixelLang: Select Python Interpreter`. Creation adds a project under the selected parent and opens a new window. Environment checks write details and fixes to the PixelLang output panel. Select Python 3.11+ with Pillow 10–12 installed.
+Open `.pxl` files for diagnostics, completion, hover types, signature help, outlines, definitions, references, rename and formatting. These features use native compiler syntax, types and bindings. Formatting operates on unsaved text without requiring imports to exist. Rename checks project references and rejects diagnostics or binding changes caused by shadowing.
+
+See [projects](projects.md) for save-and-test, PNG builds, dependency locks and individual tests.
+
+## Build, run and export
+
+Run **PixelLang: Open Studio**:
+
+| Action | Result |
+| --- | --- |
+| Build | Compile the current buffer snapshot into debugging artifacts |
+| Run / Step | Execute with runtime input or advance incrementally |
+| Program image | Generate an executable image on demand |
+| Export PNG | Choose a destination, then generate and save PNG |
+| Compiler · IR | Request intermediate representation on first open |
+| Recover Project from PNG | Restore source into an empty directory |
+
+Ordinary builds, stepping and recording recovery do not automatically generate PNG. Source or input changes invalidate the old run. Build notifications show collection and waiting time rather than a completion percentage; both phases support cancellation. The output channel records collection, queueing, compilation and debug initialization costs.
+
+## Debug source and history
+
+Press F5 for PixelLang debugging: breakpoints, step in/over/out, pause, reverse instruction, call stacks and paginated variables. Time changes invalidate old variable references. Missing or changed files display readonly source matching the executed artifact.
+
+In launch configuration, `program` selects the entry, `input` is the text read by `input()`, and `args` is the program-argument array. File access requires `pixellang.readRoot` / `pixellang.writeRoot`. Pause can resume; Cancel ends the run while retaining history. Cancellation takes effect between execution batches and cannot forcibly interrupt an active host call.
+
+**Save timeline** writes `.pixeltime`; **PixelLang: Open Time Recording** opens it again. Recovery recompiles the recorded source snapshot and checks the bytecode digest. It does not depend on current project files or repeat file writes. See [file types](../reference/formats/files.md).
+
+## Space and dependency graphs
+
+Run **PixelLang: Open Native Graph** to view named computations, state, child instances, `next` and outputs. Expression edits update the same unsaved source and support editor Undo. Add state accepts a name, type and initializer. Fix incomplete syntax in the text editor first.
+
+While paused, **Paused execution** shows flow inputs, computed results, old state and staged values. The **Space** entry on Space/Entity values paginates entities, frames, snapshots and neighborhoods; complex payloads expand on demand. Resuming, editing source or switching sessions clears stale values.
+
+- **Orbit**, zoom and graph layout change the view only.
+- **Source coordinates** edits coordinates with direct literal provenance.
+- **Move X/Y/Z** drags along one axis; release commits one undoable source edit and Escape cancels.
+- **Reveal expression** navigates to computed positions without replacing expressions with constants.
+
+A coordinate edit affects every execution of that source expression; restart debugging to observe its result. Spatial Z is a coordinate. Display Z in **3D · Time** is a logical transition index; these are different views.
+
+## Two-dimensional semantic editing
+
+**2D · Edit** connects semantic pixels to source. Change literals or operators, or move adjacent statements within one statement list. The compiler validates the multi-file snapshot before the extension applies one WorkspaceEdit. Stale or invalid proposals do not write source. Arbitrary painting and full 3D source sculpting are not provided.
+
+## Event applications
+
+Use **PixelLang: Open Native Application** with source or PNG to enter typed events, advance steps, inspect history and save application journals. **Debug event** enters source debugging for the selected event. See [state machines](state-machines.md) for scheduling and recording contracts.
+
+## Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| Missing Python or Pillow | Select Python Interpreter → Check Environment |
+| Slow build | Output channel: separate collection, queueing, compilation and image generation |
+| Coordinate cannot be dragged | Direct literal provenance and the viewing angle relative to the selected axis |
+| Old state after an edit | Restart debugging; old snapshots do not turn into new runs |
+| File access rejected | Read/write roots and relative paths |
+
+Build and background analysis use separate processes. See the [compiler service](../reference/compiler-service.md) for incrementality and budgets.

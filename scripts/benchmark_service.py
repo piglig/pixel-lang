@@ -42,7 +42,7 @@ def main():
     args=parser.parse_args()
     if args.output.exists():parser.error('Use a new output file to preserve prior measurements')
     limits=load_limits(args.limits) if args.limits else None
-    files={'main.pxl':'import "lib.pxl" as lib\nfn main(){print(lib.total([3,1,2]))}',
+    files={'main.pxl':'import "lib.pxl" as lib\neffect fn main(){print(lib.total([3,1,2]))}',
            'lib.pxl':'export fn total(values:[int])->int {var sum=0;for value in values {sum+=value};return sum}'}
     report={'scope':'installed service, fixed two-file workload; not full bootstrap or release acceptance',
             'powerCondition':args.power_condition,'platform':platform.platform(),

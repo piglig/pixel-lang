@@ -1,0 +1,18 @@
+import "model.pxl" as model
+import "types.pxl" as types
+
+export fn Signatures(receiver: int, resolved: inout model.ResolvedTypes) -> [model.MethodSignature] {
+    var result: [model.MethodSignature] = []
+    if receiver < 0 || receiver >= len(resolved.types) || resolved.types[receiver].kind != "flow_handle" { return result }
+    let handle = resolved.types[receiver]
+    if len(handle.arguments) != 1 || handle.arguments[0] < 0 || handle.arguments[0] >= len(resolved.types) { return result }
+    let signature = resolved.types[handle.arguments[0]]
+    if signature.kind != "function" || len(signature.arguments) == 0 { return result }
+    var parameters: [model.TypeField] = []
+    let last = len(signature.arguments) - 1
+    for index, argument in signature.arguments {
+        if index < last { parameters.append(model.TypeField{name: "input" + string(index + 1), typeId: argument}) }
+    }
+    result.append(model.MethodSignature{name: "step", generics: [], parameters, result: signature.arguments[last], effect: true})
+    return result
+}

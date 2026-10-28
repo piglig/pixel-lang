@@ -2,7 +2,7 @@
 
 import re
 
-from .typeexpr import is_value_type, parse_type
+from .typeexpr import is_assignable, is_value_type, parse_type, map_parts, array_item
 
 ERROR_FIELDS = {
     name: "str"
@@ -18,7 +18,7 @@ def is_record(name):
     except ValueError:
         return False
     return value.kind == "nominal" and (
-        value.name in ("Error", "Option")
+        value.name in ("Error", "Option", "Result")
         or re.fullmatch(r"@[0-9]{1,5}:[0-9]{1,5}", value.name) is not None
     )
 
@@ -32,8 +32,6 @@ def base_type(name):
 SCALARS = ("int", "float64", "bool", "str")
 BUILTINS = [
     "len",
-    "append",
-    "pop",
     "slice",
     "string",
     "parseInt",
@@ -43,10 +41,6 @@ BUILTINS = [
     "input",
     "trim",
     "replace",
-    "keys",
-    "has",
-    "delete",
-    "fail",
     "jsonDecode",
     "jsonParse",
     "jsonStringify",
@@ -65,7 +59,6 @@ BUILTINS = [
     "int",
     "parseFloat64",
     "jsonAsFloat64",
-    "lookup",
     "unicodeCategory",
     "utf8Encode",
     "utf8Decode",
@@ -76,8 +69,10 @@ BUILTINS = [
     "zlibDecompress",
     "readBytes",
     "writeBytes",
-    "extend",
     "arrayRepeat",
+    "readChunk",
+    "listDirectory",
+    "programArgs",
 ]
 
 
@@ -91,7 +86,7 @@ def valid_type(name, parameters=frozenset()):
     # Only executable type forms are admitted at the VM boundary. New structures
     # are enabled here together with their checker, pixel and runtime support.
     return is_value_type(value, parameters) and all(
-        item.kind in ("scalar", "array", "map", "function")
+        item.kind in ("scalar", "array", "map", "function", "spatial", "flow_handle", "inout")
         or item.kind == "parameter"
         and item.name in parameters
         or item.kind == "nominal"
@@ -101,6 +96,9 @@ def valid_type(name, parameters=frozenset()):
 
 
 # Shared by signature checking and the VM instruction dispatcher.
+# Bytecode operations also include implementation primitives with no source spelling.
+RUNTIME_BUILTINS = frozenset(BUILTINS) | {"lookup", "has", "keys"}
+
 BUILTIN_ARITIES = {
     "unicodeCategory": 1,
     "utf8Encode": 1,
@@ -116,10 +114,7 @@ BUILTIN_ARITIES = {
     "parseFloat64": 1,
     "jsonAsFloat64": 1,
     "len": 1,
-    "append": 2,
-    "extend": 2,
     "arrayRepeat": 2,
-    "pop": 1,
     "slice": 3,
     "string": 1,
     "parseInt": 1,
@@ -131,8 +126,6 @@ BUILTIN_ARITIES = {
     "replace": 3,
     "keys": 1,
     "has": 2,
-    "delete": 2,
-    "fail": 1,
     "jsonParse": 1,
     "jsonStringify": 1,
     "jsonKind": 1,
@@ -147,7 +140,10 @@ BUILTIN_ARITIES = {
     "readBytes": 2,
     "writeBytes": 2,
     "readText": 1,
-    "writeText": 2
+    "writeText": 2,
+    "readChunk": 3,
+    "listDirectory": 1,
+    "programArgs": 0,
 }
 
 
@@ -164,7 +160,8 @@ def builtin_type(name, args):
     }
     if name in binary_signatures:
         source, result = binary_signatures[name]
-        require(args == [source], f"{name} expects {source}")
+        require(args == [source],
+                f"{name} expects {source}")
         return result
     if name == "zlibDecompress":
         require(args == ["int[]", "int"], "zlibDecompress expects bytes and an output limit")
@@ -173,17 +170,27 @@ def builtin_type(name, args):
         require(args == (["str", "int"] if name == "readBytes" else ["str", "int[]"]), f"Invalid {name} arguments")
         return "int[]" if name == "readBytes" else "bool"
     if name == "lookup":
+        parts = map_parts(args[0])
         require(
-            args[0].endswith("{}") and args[1] == "str",
-            "lookup expects a map and string key",
+            parts is not None and args[1] == parts[0],
+            "lookup expects a map and matching key type",
         )
-        return "Option<" + args[0][:-2] + ">"
+        result = "Option<" + parts[1] + ">"
+        return result
     if name in ("float64", "int"):
         require(args[0] in ("int", "float64"), f"{name} expects a numeric value")
         return name
     if name == "parseFloat64":
         require(args == ["str"], "parseFloat64 expects a string")
         return "float64"
+    if name == "readChunk":
+        require(args == ["str", "int", "int"], "readChunk expects a path, byte offset and chunk size")
+        return "json"
+    if name == "listDirectory":
+        require(args == ["str"], "listDirectory expects a path")
+        return "json"
+    if name == "programArgs":
+        return "str[]"
     if name == "input":
         return "str"
     if name in ("readText", "writeText"):
@@ -214,35 +221,26 @@ def builtin_type(name, args):
         require(args == expected, f"{name} expects {expected}")
         return result
     first = args[0]
-    if name == "fail":
-        require(first == "str", "fail expects a message string")
-        return "unit"
-    if name in ("keys", "has", "delete"):
-        require(first.endswith("{}"), f"{name} expects a map")
+    if name in ("keys", "has"):
+        parts = map_parts(first)
+        require(parts is not None, f"{name} expects a map")
         if name != "keys":
-            require(args[1] == "str", "Map key must be a string")
-        return "str[]" if name == "keys" else "bool"
-    if name == "len" and (first.endswith("{}") or first == "json"):
+            require(args[1] == parts[0], "Map key must match its declared type")
+        return parts[0] + "[]" if name == "keys" else "bool"
+    if name == "len" and (map_parts(first) is not None or first == "json"):
         return "int"
     if name in ("len", "slice"):
         require(
-            first == "str" or first.endswith("[]"), f"{name} expects a string or array"
+            first == "str" or array_item(first) is not None, f"{name} expects a string or array"
         )
         if name == "slice":
             require(args[1:] == ["int", "int"], "slice bounds must be integers")
         return "int" if name == "len" else first
-    if name in ("extend", "arrayRepeat"):
-        require(first.endswith("[]"), f"{name} expects an array")
-        require(args[1] == (first if name == "extend" else "int"),
+    if name == "arrayRepeat":
+        require(array_item(first) is not None, f"{name} expects an array")
+        require(args[1] == 'int',
                 f"Invalid {name} argument type")
         return first
-    if name in ("append", "pop"):
-        require(first.endswith("[]"), f"{name} expects an array")
-        if name == "append":
-            require(
-                args[1] == first[:-2], "append value must match the array element type"
-            )
-        return first if name == "append" else first[:-2]
     if name == "string":
         require(first in SCALARS, "string conversion expects a scalar")
         return "str"

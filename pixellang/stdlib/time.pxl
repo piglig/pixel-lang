@@ -1,0 +1,24 @@
+import "error.pxl" as errors
+// Logical time uses checked integer nanoseconds, independent of playback speed.
+export record Duration { nanoseconds: int }
+export record Step { index: int, elapsed: Duration, delta: Duration }
+
+export fn Nanoseconds(value: int) -> Duration = Duration{nanoseconds: value}
+fn Scaled(value: int, scale: int) -> Result[Duration, Error] {
+    if value > 9223372036854775807 / scale || value < -9223372036854775808 / scale {
+        return .Err(errors.New("time.duration_range", "Duration exceeds signed 64-bit nanoseconds", "Scaled", ""))
+    }
+    return .Ok(Duration{nanoseconds: value * scale})
+}
+export fn Milliseconds(value: int) -> Result[Duration, Error] = Scaled(value, 1000000)
+export fn Seconds(value: int) -> Result[Duration, Error] = Scaled(value, 1000000000)
+export fn InSeconds(value: Duration) -> float64 = float64(value.nanoseconds) / 1000000000.0
+
+export fn At(index: int, interval: Duration) -> Result[Step, Error] {
+    if index < 0 { return .Err(errors.New("time.invalid_index", "Logical step index must be nonnegative", "At", "")) }
+    if interval.nanoseconds <= 0 { return .Err(errors.New("time.invalid_interval", "Logical step interval must be positive", "At", "")) }
+    if index > 9223372036854775807 / interval.nanoseconds { return .Err(errors.New("time.elapsed_range", "Logical time overflow", "At", "")) }
+    var delta = interval
+    if index == 0 { delta = Nanoseconds(0) }
+    return .Ok(Step{index, elapsed: Nanoseconds(index * interval.nanoseconds), delta})
+}

@@ -1,0 +1,35 @@
+const assert=require('node:assert/strict');
+const {Playback,spacesIn,sceneView}=require('../media/application');
+const sent=[],timers=new Map();let counter=0;
+const player=new Playback(message=>sent.push(message),(fn,delay)=>{timers.set(++counter,{fn,delay});return counter;},id=>timers.delete(id));
+player.receive({cursor:0,length:0,interval_ns:'20000000'});
+player.play();assert.deepEqual(sent,[{type:'step'}]);assert.equal(player.step(),false);
+player.pause();player.receive({cursor:1,length:1,interval_ns:'20000000'});assert.equal(timers.size,0);
+player.receive({cursor:1,length:3,interval_ns:'20000000'});player.play();assert.deepEqual(sent.at(-1),{type:'seek',index:2});
+player.speed=2;player.receive({cursor:2,length:3,interval_ns:'100000000'});assert.equal([...timers.values()][0].delay,50);
+player.pause();assert.equal(timers.size,0);player.play();player.fail();assert.equal(player.running,false);assert.equal(player.busy,false);
+const space={identity:'world',version:1,entities:[{identity:0,position:{x:1,y:2,z:3},payload:'item'}],links:[]};
+assert.deepEqual(spacesIn({nested:{scene:space}}).map(s=>s.path),['output.nested.scene']);
+assert.deepEqual(sceneView(space,'2').entities[0].position,[1,2,3]);
+console.log('Native application playback, backpressure, pause, replay and scene tests passed.');
+
+player.receive({cursor:4,length:4,interval_ns:'20000000'});
+player.play();player.receive({cursor:5,length:5,interval_ns:'20000000'});
+assert(player.command({type:'input',valueText:'{"variant":"Pause","fields":{}}'}));
+assert.equal(timers.size,0);assert.equal(player.running,true);
+player.receive({cursor:5,length:5,interval_ns:'20000000'});assert.equal(timers.size,1);
+player.pause();
+console.log('Typed input can be queued between playback steps without changing the clock or stopping playback.');
+
+player.receive({cursor:0,length:0,timed:false,interval_ns:'0',pending:[]});
+const before=sent.length;
+player.play();assert.equal(player.running,false);assert.equal(player.step(),false);
+assert.equal(sent.length,before);
+player.receive({cursor:0,length:0,timed:false,interval_ns:'0',pending:[{sequence:0}]});
+player.play();assert.deepEqual(sent.at(-1),{type:'step'});
+player.receive({cursor:1,length:1,timed:false,interval_ns:'0',pending:[]});
+assert.equal(player.running,false);assert.equal(timers.size,0);
+player.receive({cursor:0,length:1,timed:false,interval_ns:'0',pending:[]});
+player.play();assert.deepEqual(sent.at(-1),{type:'seek',index:1});
+player.pause();
+console.log('Event-only playback drains pending inputs and stops without synthesizing ticks.');

@@ -1,17 +1,18 @@
 # Ledger — PixelLang 数据处理项目
 
-[中文](README.md) · [English](README.en.md)
+[简体中文](README.md) · [English](README.en.md) · [文档](../../docs/zh-CN/README.md)
+
+本示例在当前工具链中运行。先完成[安装](../../docs/zh-CN/guides/installation.md)；以下命令从仓库根执行。
 
 Ledger 的配置解析、CSV 解析、逐行校验、筛选、分组、统计、排序和报告生成均由 PixelLang 编写。宿主仅提供通用 JSON 值操作、受控文件读写和语言运行时。
 
 在仓库根目录执行：
 
 ```sh
-uv sync --locked
-.venv/bin/pixel test examples/ledger
-.venv/bin/pixel build examples/ledger
+pixel test examples/ledger
+pixel build examples/ledger
 mkdir -p /tmp/ledger-output
-.venv/bin/pixel run examples/ledger/dist/program.png \
+pixel run examples/ledger/dist/program.png \
   --input examples/ledger/fixtures/config.json \
   --read-root examples/ledger/fixtures \
   --write-root /tmp/ledger-output
@@ -47,4 +48,4 @@ CSV 表头为 `category,amount_minor`。金额使用整数最小货币单位，�
 
 VS Code 中打开本目录，设置 `pixellang.readRoot` 为 `fixtures`，将 `pixellang.writeRoot` 设为一个已存在的报告目录。Studio 的 Runtime input 填入上面的 JSON 配置即可运行。也可在 F5 的 launch 配置中用 `input` 提供配置文本。Python 解释器需安装 PixelLang 的运行依赖。
 
-项目使用 `Option[T]` 解码可选配置，并以 `collections.Sort` 和匿名比较函数排序，由参数推导 Group 类型。平均值用于统计展示，不作为整数货币结算结果。
+项目使用 `Option[T]` 解码可选配置，并以 `collections.SortedBy` 和匿名比较函数排序，由参数推导 Group 类型。平均值用于统计展示，不作为整数货币结算结果。

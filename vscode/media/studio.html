@@ -28,7 +28,8 @@
     </section>
     <nav>
       <div>
-        <button id="time-view" aria-pressed="true">3D · Time</button
+        <button id="debug-view" aria-pressed="true">Debug</button>
+        <button id="time-view" aria-pressed="false">3D · Time</button
         ><button id="image-view" aria-pressed="false">Program image</button>
         <button id="spatial-view" aria-pressed="false">2D · Edit</button>
       </div>
@@ -36,13 +37,13 @@
     </nav>
     <main>
       <canvas
-        id="space"
+        id="space" hidden
         aria-label="Three-dimensional program execution. Drag to orbit; scroll to zoom. Click a voxel to select its time."
         tabindex="0"
       ></canvas
       ><img id="image" alt="Executable PixelLang program pixels" hidden />
       <div id="empty">Build a program to explore its space and time.</div>
-      <div id="axes">X · source column　Y · source row　Z · logical time</div>
+      <div id="axes" hidden>X · source column　Y · source row　Z · instruction step</div>
     </main>
     <section id="spatial-editor" hidden>
       <div class="tools"><label for="spatial-module">Module</label><select id="spatial-module"></select><button id="spatial-refresh">Refresh</button></div>

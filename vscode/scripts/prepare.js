@@ -7,7 +7,7 @@ fs.copyFileSync(path.join(root, "assets/branding/icon.png"), path.join(root, "vs
 fs.rmSync(dest, { recursive: true, force: true });
 fs.mkdirSync(dest, { recursive: true });
 for (const name of fs.readdirSync(path.join(root, "pixellang")))
-  if (name.endsWith(".py"))
+  if (name.endsWith(".py") || name.endsWith(".h"))
     fs.copyFileSync(path.join(root, "pixellang", name), path.join(dest, name));
 
 fs.cpSync(path.join(root, "pixellang/stdlib"), path.join(dest, "stdlib"), { recursive: true });

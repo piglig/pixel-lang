@@ -1,0 +1,25 @@
+import "model.pxl" as model
+import "types.pxl" as types
+import "checker_state.pxl" as state
+
+export fn Writes(kind: string, name: string) -> bool {
+    return (kind == "array" && (name == "append" || name == "extend" || name == "pop")) || (kind == "map" && name == "remove")
+}
+export fn Signatures(receiver: int, resolved: inout model.ResolvedTypes) -> [model.MethodSignature] {
+    let typ = resolved.types[receiver]
+    var result: [model.MethodSignature] = []
+    if typ.kind == "array" {
+        let unit = state.Scalar("unit", &resolved)
+        result.append(model.MethodSignature{name: "append", generics: [], parameters: [model.TypeField{name: "value", typeId: typ.arguments[0]}], result: unit, effect: false})
+        result.append(model.MethodSignature{name: "extend", generics: [], parameters: [model.TypeField{name: "source", typeId: receiver}], result: unit, effect: false})
+        result.append(model.MethodSignature{name: "pop", generics: [], parameters: [], result: types.OptionType(typ.arguments[0], &resolved), effect: false})
+    } else if typ.kind == "map" {
+        let key = [model.TypeField{name: "key", typeId: typ.arguments[0]}]
+        let optional = types.OptionType(typ.arguments[1], &resolved)
+        result.append(model.MethodSignature{name: "get", generics: [], parameters: key, result: optional, effect: false})
+        result.append(model.MethodSignature{name: "has", generics: [], parameters: key, result: state.Scalar("bool", &resolved), effect: false})
+        result.append(model.MethodSignature{name: "keys", generics: [], parameters: [], result: types.Structural("array", [typ.arguments[0]], &resolved), effect: false})
+        result.append(model.MethodSignature{name: "remove", generics: [], parameters: key, result: optional, effect: false})
+    }
+    return result
+}

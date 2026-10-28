@@ -10,11 +10,23 @@ async function undoDocument(document, expected) {
   assert(vscode.window.state.focused, "Undo acceptance requires the test window to have focus");
   await vscode.window.showTextDocument(document, { preview: false, preserveFocus: false });
   await vscode.commands.executeCommand("workbench.action.focusActiveEditorGroup");
-  await vscode.commands.executeCommand("undo");
-  const deadline = Date.now() + 5000;
-  while (document.getText() !== expected && Date.now() < deadline)
-    await new Promise(resolve => setTimeout(resolve, 25));
-  assert.equal(document.getText(), expected);
+  const started = Date.now(), changes = [];
+  const listener = vscode.workspace.onDidChangeTextDocument(event => {
+    if (event.document.uri.toString() === document.uri.toString())
+      changes.push({ elapsed: Date.now() - started, version: event.document.version,
+        reason: event.reason, edits: event.contentChanges.length });
+  });
+  try {
+    await vscode.commands.executeCommand("undo");
+    const deadline = Date.now() + 5000;
+    while (document.getText() !== expected && Date.now() < deadline)
+      await new Promise(resolve => setTimeout(resolve, 25));
+    console.log("Studio undo:", JSON.stringify({ document: document.uri.toString(),
+      activeDocument: vscode.window.activeTextEditor?.document.uri.toString(),
+      focused: vscode.window.state.focused, elapsed: Date.now() - started,
+      restored: document.getText() === expected, changes }));
+    assert.equal(document.getText(), expected);
+  } finally { listener.dispose(); }
 }
 
 async function run() {
@@ -37,12 +49,30 @@ async function run() {
       process.env.PIXELLANG_TEST_PYTHON,
       vscode.ConfigurationTarget.Workspace,
     );
+  const service = api.service();
+  const call = service.call.bind(service);
+  service.call = async (method, args, options) => {
+    try { return await call(method, args, options); }
+    catch (error) { console.error(`Studio service ${method}: ${error.message}`); throw error; }
+  };
   const definitions = await vscode.commands.executeCommand(
     "vscode.executeDefinitionProvider", uri, new vscode.Position(3, 12),
   );
   assert.equal(definitions.length, 1);
   assert.equal(definitions[0].range.start.line, 0);
   assert.equal(definitions[0].range.start.character, 3);
+  const hovers = await vscode.commands.executeCommand(
+    "vscode.executeHoverProvider", uri, new vscode.Position(3, 12),
+  );
+  assert(hovers.some(hover => hover.contents.some(content =>
+    content.value.includes("fn answer(n: int) -> int"))));
+  const outline = await vscode.commands.executeCommand("vscode.executeDocumentSymbolProvider", uri);
+  assert(outline.some(symbol => symbol.name === "Box" && symbol.kind === vscode.SymbolKind.Struct));
+  const signatures = await vscode.commands.executeCommand(
+    "vscode.executeSignatureHelpProvider", uri, new vscode.Position(3, 17), "(",
+  );
+  assert.equal(signatures.signatures[0].label, "fn answer(n: int) -> int");
+  assert.equal(signatures.activeParameter, 0);
   const references = await vscode.commands.executeCommand(
     "vscode.executeReferenceProvider", uri, new vscode.Position(2, 8),
   );
@@ -53,7 +83,7 @@ async function run() {
   assert.equal(renamed.get(uri).length, 2);
   assert(renamed.get(uri).every(edit => edit.newText === "amount"));
   const originalText = doc.getText();
-  const partialText = 'record Row { value: int }\nfn main() {\n let row = Row{value: 1}\n print(row.value)\n let unfinished =\n row.';
+  const partialText = 'record Row { value: int }\neffect fn main() {\n let row = Row{value: 1}\n print(row.value)\n let unfinished =\n row.';
   const partialEdit = new vscode.WorkspaceEdit();
   partialEdit.replace(uri, new vscode.Range(doc.positionAt(0), doc.positionAt(originalText.length)), partialText);
   assert(await vscode.workspace.applyEdit(partialEdit));
@@ -70,7 +100,7 @@ async function run() {
   assert.equal(partialDefinitions.length, 1);
   assert.equal(partialDefinitions[0].range.start.line, 2);
 
-  const genericText = 'record Box[T] { value: T }\nfn identity[T](value: T) -> T = value\nfn main() { let box = identity(Box[int]{value: 1}); print(box.) }';
+  const genericText = 'record Box[T] { value: T }\nfn identity[T](value: T) -> T = value\neffect fn main() { let box = identity(Box::[int]{value: 1}); print(box.) }';
   const genericEdit = new vscode.WorkspaceEdit();
   genericEdit.replace(uri, new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length)), genericText);
   assert(await vscode.workspace.applyEdit(genericEdit));
@@ -79,7 +109,7 @@ async function run() {
   );
   assert(genericCompletion.items.some(item => item.label === "value" && item.detail === "int"));
 
-  const enumText = 'enum Event[T] { Stop, Data(value: T) }\nfn main() { let event = Event[int].Data(42); print(match event { Event.Stop => 0, Event.Data(value) => value }) }';
+  const enumText = 'enum Event[T] { Stop, Data(value: T) }\neffect fn main() { let event = Event::[int].Data(42); print(match event { Event.Stop => 0, Event.Data(value) => value }) }';
   const enumEdit = new vscode.WorkspaceEdit();
   enumEdit.replace(uri, new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length)), enumText);
   assert(await vscode.workspace.applyEdit(enumEdit));
@@ -97,17 +127,18 @@ async function run() {
   );
   assert(enumCompletion.items.some(item => item.label === "Data" && item.detail === "Data(value: int)"));
 
-  const closureText = 'fn main() {\n var count = 0\n let next = fn() -> int { count += 1; return count }\n print(next()); print(next())\n}';
+  console.log("Studio core: navigation, generics and enum rename passed.");
+  const closureText = 'effect fn main() {\n var count = 0\n let next = fn() -> int = count + 1\n count = 7\n print(next()); print(next())\n}';
   const closureEdit = new vscode.WorkspaceEdit();
   closureEdit.replace(uri, new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length)), closureText);
   assert(await vscode.workspace.applyEdit(closureEdit));
   const captureDefinitions = await vscode.commands.executeCommand(
-    "vscode.executeDefinitionProvider", uri, doc.positionAt(closureText.indexOf("count +=")),
+    "vscode.executeDefinitionProvider", uri, doc.positionAt(closureText.indexOf("count +")),
   );
   assert.equal(captureDefinitions.length, 1);
   assert.equal(captureDefinitions[0].range.start.line, 1);
   const captureRename = await vscode.commands.executeCommand(
-    "vscode.executeDocumentRenameProvider", uri, doc.positionAt(closureText.indexOf("count +=")), "total",
+    "vscode.executeDocumentRenameProvider", uri, doc.positionAt(closureText.indexOf("count +")), "total",
   );
   assert.equal(captureRename.get(uri).length, 3);
   const closureBuilt = await api.service().call("build", { files: { "main.pxl": closureText } });
@@ -115,9 +146,9 @@ async function run() {
   for (let i = 0; i < 1000 && !closureState.state.halted; i++)
     closureState = await api.service().call("step", { session: closureBuilt.session });
   assert(closureState.state.halted);
-  assert.deepEqual(closureState.state.output, [1, 2]);
+  assert.deepEqual(closureState.state.output, [1, 1]);
 
-  const errorText = 'fn main() { try { fail("bad") } catch error { print(error.) } }';
+  const errorText = 'effect fn main() { match parseInt("bad") { .Ok(value) => { print(value) }, .Err(error) => { print(error.message) } } }';
   const errorEdit = new vscode.WorkspaceEdit();
   errorEdit.replace(uri, new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length)), errorText);
   assert(await vscode.workspace.applyEdit(errorEdit));
@@ -127,7 +158,7 @@ async function run() {
   for (const field of ["kind", "code", "message", "path", "operation", "expected", "actual"])
     assert(errorCompletion.items.some(item => item.label === field && item.detail === "string"));
 
-  const libraryText = 'import "std/stats.pxl" as stats\nfn main() { print(stats.Summary([1, 2])) }';
+  const libraryText = 'import "std/stats.pxl" as stats\neffect fn main() { print(stats.Summary([1, 2])) }';
   const libraryEdit = new vscode.WorkspaceEdit();
   libraryEdit.replace(uri, new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length)), libraryText);
   assert(await vscode.workspace.applyEdit(libraryEdit));
@@ -142,6 +173,7 @@ async function run() {
     "vscode.executeReferenceProvider", libraryDoc.uri, libraryDefinitions[0].range.start,
   );
   assert.equal(libraryRefs.length, 2);
+  console.log("Studio core: value captures, Result completion and library navigation passed.");
   const restoreEdit = new vscode.WorkspaceEdit();
   restoreEdit.replace(uri, new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length)), originalText);
   assert(await vscode.workspace.applyEdit(restoreEdit));
@@ -149,7 +181,7 @@ async function run() {
   await vscode.workspace.fs.createDirectory(manifestDir);
   await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(manifestDir, "pixel.toml"),
     Buffer.from('format = 1\n[project]\nname = "Studio test"\nentry = "entry.pxl"\n'));
-  await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(manifestDir, "entry.pxl"), Buffer.from('fn main() { print(42) }'));
+  await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(manifestDir, "entry.pxl"), Buffer.from('effect fn main() { print(42) }'));
   const moduleUri = vscode.Uri.joinPath(manifestDir, "helper.pxl");
   await vscode.workspace.fs.writeFile(moduleUri, Buffer.from('fn Helper() -> int = 1'));
   const manifestProject = await api.collect(moduleUri);
@@ -158,7 +190,7 @@ async function run() {
   assert(manifestProject.paths["helper.pxl"].endsWith("helper.pxl"));
   const testsDir = vscode.Uri.joinPath(manifestDir, "tests");
   await vscode.workspace.fs.createDirectory(testsDir);
-  await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(testsDir, "basic_test.pxl"), Buffer.from('fn main() { assert(2 + 2 == 4) }'));
+  await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(testsDir, "basic_test.pxl"), Buffer.from('effect fn main() { assert(2 + 2 == 4) }'));
   const testResult = await vscode.commands.executeCommand("pixellang.testProject", moduleUri);
   assert(testResult.passed);
   assert.equal(testResult.tests.length, 1);
@@ -172,23 +204,32 @@ async function run() {
   assert.equal(built.inspection.ir, null);
   assert((await api.inspectIR()).functions);
   assert.strictEqual(await api.inspectIR(), api.getCurrent().inspection.ir);
-  assert(built.image);
+  assert.equal(built.image, undefined);
   assert.equal(built.cursor, 0);
   await api.run(uri);
   assert.deepEqual(api.getCurrent().output, ["42"]);
+  assert.equal(api.getCurrent().projection_ready, false);
+  await api.inspectProjection();
   assert(api.getCurrent().volume.voxels.length > 0);
   const restored = await api
     .service()
-    .call("recover", { image: api.getCurrent().image });
+    .call("recover", { image: await api.inspectImage() });
   assert.match(restored.files["main.pxl"], /fn answer/);
   const formatted = await vscode.commands.executeCommand(
     "vscode.executeFormatDocumentProvider",
     uri,
     {},
   );
-  assert.equal(formatted.length, 0, "Already formatted source needs no edits");
+  assert(formatted.length > 0, "Compact fixture should need formatting");
+  const formattingEdit = new vscode.WorkspaceEdit();
+  formattingEdit.set(uri, formatted);
+  assert(await vscode.workspace.applyEdit(formattingEdit));
+  const formattedAgain = await vscode.commands.executeCommand(
+    "vscode.executeFormatDocumentProvider", uri, {},
+  );
+  assert.equal(formattedAgain?.length ?? 0, 0, "Formatting must be idempotent");
   const cancellable = await api.service().call("build", {
-    files: { "main.pxl": "fn main() { while true { let i = 1 } }" },
+    files: { "main.pxl": "effect fn main() { while true { let i = 1 } }" },
     checkpoint_interval: 64,
   });
   await api.service().call("run", { session: cancellable.session });
@@ -204,8 +245,9 @@ async function run() {
   assert(replayed.state.halted);
   const past = await api.service().call("seek", { session: replayed.session, z: 10 });
   assert(!past.state.halted);
+  console.log("Studio core: project test/build, PNG recovery, formatting and cancellation replay passed.");
   const dataBuild = await api.service().call("build", {
-    files: { "main.pxl": 'import "std/csv.pxl" as csv\nimport "std/stats.pxl" as stats\nfn main() { print(csv.Parse(input()))\nprint(stats.Summary([2, 4])) }' },
+    files: { "main.pxl": 'import "std/csv.pxl" as csv\nimport "std/stats.pxl" as stats\neffect fn main() { match csv.Parse(input()) { .Ok(rows) => { print(rows) }, .Err(error) => { print(error.message) } }\nmatch stats.Summary([2, 4]) { .Some(summary) => { print(summary) }, .None => { print("empty") } } }' },
     input: 'a,"b,c"',
   });
   let dataState = dataBuild;
@@ -215,14 +257,15 @@ async function run() {
   assert.deepEqual(dataState.state.output, [[["a", "b,c"]], { count: 2, total: 6, min: 2, max: 4, mean: 3 }]);
   const recordBuild = await api.service().call("build", {
     input: '{"amount":42,"name":"cat"}',
-    files: { "main.pxl": 'record Row { amount: int, name: string }\nfn main() { let value = jsonDecode[Row](input())\nprint(jsonStringify(jsonFrom(value))) }' },
+    files: { "main.pxl": 'record Row { amount: int, name: string }\neffect fn main() { match jsonDecode::[Row](input()) { .Ok(value) => { print(jsonStringify(jsonFrom(value))) }, .Err(error) => { print(error.message) } } }' },
   });
   let recordState = recordBuild;
   while (!recordState.state.halted)
     recordState = await api.service().call("run", { session: recordBuild.session });
   assert.deepEqual(recordState.state.output.map(JSON.parse), [{ amount: 42, name: "cat" }]);
+  console.log("Studio core: CSV/Option and typed JSON Result execution passed.");
   const numericBuild = await api.service().call("build", {
-    files: { "main.pxl": 'record Row { amount: float64 }\nfn main() { let row = Row{amount: 1.25}; row.amount += 0.5; print(row.amount); try { print(jsonDecode[Row]("{}")) } catch error { print(error.code); print(error.path) } }' },
+    files: { "main.pxl": 'record Row { amount: float64 }\neffect fn main() { var row = Row{amount: 1.25}; row.amount += 0.5; print(row.amount); match jsonDecode::[Row]("{}") { .Ok(value) => { print(value) }, .Err(error) => { print(error.code); print(error.path) } } }' },
   });
   let numericState = numericBuild;
   while (!numericState.state.halted)
@@ -235,17 +278,16 @@ async function run() {
     "fn main() { let bad: int = true }",
   );
   await vscode.workspace.applyEdit(edit);
-  const until = Date.now() + 10000;
-  while (Date.now() < until && !vscode.languages.getDiagnostics(uri).length)
-    await new Promise((r) => setTimeout(r, 100));
-  assert(
-    vscode.languages
+  const hasExpectedTypeError = () => vscode.languages
       .getDiagnostics(uri)
-      .some((d) => d.message === "Type mismatch"
+      .some((d) => d.message === "Type mismatch: Expected int, got bool"
         && d.severity === vscode.DiagnosticSeverity.Error
         && d.range.start.line === 0 && d.range.start.character === 12
-        && d.range.end.character === 31),
-  );
+        && d.range.end.character === 31);
+  const until = Date.now() + 30000;
+  while (Date.now() < until && !hasExpectedTypeError())
+    await new Promise((r) => setTimeout(r, 100));
+  assert(hasExpectedTypeError(), JSON.stringify(vscode.languages.getDiagnostics(uri)));
   await vscode.window.showTextDocument(doc);
   await vscode.commands.executeCommand("workbench.action.files.revert");
   const stops = [];
@@ -259,7 +301,9 @@ async function run() {
     },
   });
   async function waitStop(previous) {
-    const deadline = Date.now() + 10000;
+    // Real file-input programs can take over 10 seconds to reach a breakpoint.
+    // This is a functional deadline; latency is measured separately.
+    const deadline = Date.now() + 30000;
     while (stops.length <= previous && Date.now() < deadline)
       await new Promise((r) => setTimeout(r, 30));
     assert(stops.length > previous, "Debugger reached stopped event");
@@ -336,6 +380,7 @@ async function run() {
   await session.customRequest("stepBack", { threadId: 1 });
   await waitStop(previous);
   assert(!api.getCurrent().state.halted);
+  console.log("Studio core: debugger variables, breakpoints and stepBack passed.");
   const fs = require("node:fs"), path = require("node:path");
   const ledgerRoot = path.join(root.fsPath, "ledger-acceptance");
   fs.cpSync(process.env.PIXELLANG_TEST_LEDGER, ledgerRoot, { recursive: true });
@@ -351,10 +396,12 @@ async function run() {
   const modelChange = new vscode.WorkspaceEdit();
   modelChange.replace(modelsUri, new vscode.Range(modelsDoc.positionAt(0), modelsDoc.positionAt(originalModels.length)), brokenModels);
   assert(await vscode.workspace.applyEdit(modelChange));
-  const modelDeadline = Date.now() + 10000;
-  while (Date.now() < modelDeadline && !vscode.languages.getDiagnostics(configUri).some(d => d.message === "Type shapes do not match at field.maximum.0" && d.severity === vscode.DiagnosticSeverity.Error && configDoc.getText(d.range).includes("maximum: requested.maximum_minor")))
+  // Cold project discovery and checking share this functional deadline.
+  // Service latency is measured separately by the performance gate.
+  const modelDeadline = Date.now() + 30000;
+  while (Date.now() < modelDeadline && !vscode.languages.getDiagnostics(configUri).some(d => d.message === "Type shapes do not match at field.maximum.0: Expected string, got int" && d.severity === vscode.DiagnosticSeverity.Error && configDoc.getText(d.range).includes("maximum: requested.maximum_minor")))
     await new Promise(resolve => setTimeout(resolve, 100));
-  assert(vscode.languages.getDiagnostics(configUri).some(d => d.message === "Type shapes do not match at field.maximum.0" && d.severity === vscode.DiagnosticSeverity.Error && configDoc.getText(d.range).includes("maximum: requested.maximum_minor")));
+  assert(vscode.languages.getDiagnostics(configUri).some(d => d.message === "Type shapes do not match at field.maximum.0: Expected string, got int" && d.severity === vscode.DiagnosticSeverity.Error && configDoc.getText(d.range).includes("maximum: requested.maximum_minor")));
   await undoDocument(modelsDoc, originalModels);
   const beforeRenameConfig = configDoc.getText();
   const fieldRename = await vscode.commands.executeCommand("vscode.executeDocumentRenameProvider", modelsUri,
@@ -398,6 +445,7 @@ async function run() {
   const spatialPanelBuild = await api.build();
   assert(spatialPanelBuild.source_project.files["config.pxl"].includes("maximum_minor"));
   await vscode.window.showTextDocument(configDoc);
+  console.log("Studio application: ledger source edits and undo passed.");
   const ledgerTests = await vscode.commands.executeCommand("pixellang.testProject", ledgerUri);
   assert(ledgerTests.passed);
   assert.equal(ledgerTests.tests.length, 4);
@@ -429,6 +477,10 @@ async function run() {
   fs.cpSync(process.env.PIXELLANG_TEST_LOGS, logsRoot, { recursive: true });
   const logsUri = vscode.Uri.file(path.join(logsRoot, "main.pxl"));
   const logsTests = await vscode.commands.executeCommand("pixellang.testProject", logsUri);
+  const singleLogTest = await vscode.commands.executeCommand("pixellang.runTest", logsUri, "empty sources");
+  assert.equal(singleLogTest.passed, true);
+  assert.equal(singleLogTest.tests.length, 1);
+  assert.equal(singleLogTest.tests[0].name, "empty sources");
   assert(logsTests.passed);
   assert.equal(logsTests.tests.length, 3);
   const logsPackage = await vscode.commands.executeCommand("pixellang.buildProject", logsUri);
@@ -479,14 +531,18 @@ async function run() {
   const analyzeDoc = await vscode.workspace.openTextDocument(analyzeUri);
   await vscode.window.showTextDocument(logsModelsDoc);
   const logsOriginal = logsModelsDoc.getText();
+  const brokenLogsModels = logsOriginal.replace("minimum_level: Option[string]", "minimum_level: Option[int]");
+  assert.notEqual(brokenLogsModels, logsOriginal);
   const wrongSeverity = new vscode.WorkspaceEdit();
   wrongSeverity.replace(logsModelsUri, new vscode.Range(logsModelsDoc.positionAt(0), logsModelsDoc.positionAt(logsOriginal.length)),
-    logsOriginal.replace("minimum_level: Option[string]", "minimum_level: Option[int]"));
+    brokenLogsModels);
   assert(await vscode.workspace.applyEdit(wrongSeverity));
-  const logsDiagnosticDeadline = Date.now() + 10000;
-  while (Date.now() < logsDiagnosticDeadline && !vscode.languages.getDiagnostics(analyzeUri).some(d => d.message === "Type shapes do not match at argument.0.0" && d.severity === vscode.DiagnosticSeverity.Error && analyzeDoc.getText(d.range) === "severity.Minimum(config.minimum_level)"))
+  const logsDiagnosticDeadline = Date.now() + 30000;
+  while (Date.now() < logsDiagnosticDeadline && !vscode.languages.getDiagnostics(analyzeUri).some(d => d.message === "Type shapes do not match at argument.0.0: Expected string, got int" && d.severity === vscode.DiagnosticSeverity.Error && analyzeDoc.getText(d.range) === "severity.Minimum(config.minimum_level)"))
     await new Promise(resolve => setTimeout(resolve, 100));
-  assert(vscode.languages.getDiagnostics(analyzeUri).some(d => d.message === "Type shapes do not match at argument.0.0" && d.severity === vscode.DiagnosticSeverity.Error && analyzeDoc.getText(d.range) === "severity.Minimum(config.minimum_level)"));
+  const actualLogsDiagnostics = vscode.languages.getDiagnostics(analyzeUri);
+  assert(actualLogsDiagnostics.some(d => d.message === "Type shapes do not match at argument.0.0: Expected string, got int" && d.severity === vscode.DiagnosticSeverity.Error && analyzeDoc.getText(d.range) === "severity.Minimum(config.minimum_level)"),
+    JSON.stringify(actualLogsDiagnostics.map(d => ({message:d.message,severity:d.severity,range:d.range,text:analyzeDoc.getText(d.range)}))));
   await undoDocument(logsModelsDoc, logsOriginal);
   const logsRename = await vscode.commands.executeCommand("vscode.executeDocumentRenameProvider", logsModelsUri,
     logsModelsDoc.positionAt(logsOriginal.indexOf("minimum_level:")), "threshold");
@@ -498,14 +554,14 @@ async function run() {
   assert(analyzeDoc.getText().includes("config.minimum_level"));
   const analyzeEditor = await vscode.window.showTextDocument(analyzeDoc);
   const analyzeOriginal = analyzeDoc.getText();
-  const predicateOffset = analyzeOriginal.indexOf("rank < minimum");
-  analyzeEditor.selection = new vscode.Selection(analyzeDoc.positionAt(predicateOffset), analyzeDoc.positionAt(predicateOffset + "rank < minimum".length));
+  const predicateOffset = analyzeOriginal.indexOf("checked.rank < minimum");
+  analyzeEditor.selection = new vscode.Selection(analyzeDoc.positionAt(predicateOffset), analyzeDoc.positionAt(predicateOffset + "checked.rank < minimum".length));
   const logsSpatial = await api.refreshSpatial("analyze.pxl", analyzeUri);
-  assert.deepEqual(logsSpatial.selection, { offset: predicateOffset, end: predicateOffset + "rank < minimum".length });
-  const severityTarget = Object.values(logsSpatial.targets).find(t => t.kind === "binary" && t.text === "rank < minimum");
+  assert.deepEqual(logsSpatial.selection, { offset: predicateOffset, end: predicateOffset + "checked.rank < minimum".length });
+  const severityTarget = Object.values(logsSpatial.targets).find(t => t.kind === "binary" && t.text === "checked.rank < minimum");
   assert(severityTarget);
   await api.applySpatial({ revision: logsSpatial.revision, target: severityTarget.id, action: "operator", value: "<=" });
-  assert(analyzeDoc.getText().includes("(rank) <= (minimum)"));
+  assert(analyzeDoc.getText().includes("(checked.rank) <= (minimum)"));
   await vscode.window.showTextDocument(analyzeDoc);
   await undoDocument(analyzeDoc, analyzeOriginal);
   const logsFixtureDir = path.join(logsRoot, "fixtures"), logsOutputDir = path.join(logsRoot, "output");
@@ -519,7 +575,7 @@ async function run() {
   }));
   await waitStop(previous);
   const logsDebug = vscode.debug.activeDebugSession;
-  const severityLine = analyzeDoc.positionAt(analyzeOriginal.indexOf("if rank < minimum")).line + 1;
+  const severityLine = analyzeDoc.positionAt(analyzeOriginal.indexOf("if checked.rank < minimum")).line + 1;
   assert((await logsDebug.customRequest("setBreakpoints", { source: { path: analyzeUri.fsPath },
     breakpoints: [{ line: severityLine }] })).breakpoints[0].verified);
   previous = stops.length;

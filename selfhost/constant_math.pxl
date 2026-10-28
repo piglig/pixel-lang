@@ -1,0 +1,107 @@
+import "failures.pxl" as failures
+// Checked arithmetic for compile-time evaluation. Report data errors before the
+// VM's execution-budget/range failures could abort the compiler itself.
+export fn Integer(op: string, a: int, b: int) -> Result[int, Error] {
+    let minimum = -9223372036854775808
+    let maximum = 9223372036854775807
+    if op == "+" {
+        if (b > 0 && a > maximum - b) || (b < 0 && a < minimum - b) { return .Err(failures.New("Integer overflow in state initializer")) }
+        return .Ok(a + b)
+    }
+    if op == "-" {
+        if (b > 0 && a < minimum + b) || (b < 0 && a > maximum + b) { return .Err(failures.New("Integer overflow in state initializer")) }
+        return .Ok(a - b)
+    }
+    if op == "*" {
+        var overflow = false
+        if a > 0 && b > 0 { overflow = a > maximum / b }
+        if a > 0 && b < 0 { overflow = b < minimum / a }
+        if a < 0 && b > 0 { overflow = a < minimum / b }
+        if a < 0 && b < 0 { overflow = a < maximum / b }
+        if overflow { return .Err(failures.New("Integer overflow in state initializer")) }
+        return .Ok(a * b)
+    }
+    if b == 0 { return .Err(failures.New("Division by zero in state initializer")) }
+    if op == "/" {
+        if a == minimum && b == -1 { return .Err(failures.New("Integer overflow in state initializer")) }
+        return .Ok(a / b)
+    }
+    return .Ok(a % b)
+}
+fn Abs(value: float64) -> float64 { if value < 0.0 { return -value }; return value }
+export fn Float(op: string, a: float64, b: float64) -> Result[float64, Error] {
+    let maximum = 1.7976931348623157e308
+    if op == "-" { return Float("+", a, -b) }
+    if op == "+" {
+        if (a > 0.0 && b > 0.0 || a < 0.0 && b < 0.0) && (Abs(a) > maximum * 0.5 || Abs(b) > maximum * 0.5) {
+            let half = a * 0.5 + b * 0.5
+            if Abs(half) > maximum * 0.5 { return .Err(failures.New("Float64 overflow in state initializer")) }
+            return .Ok(half * 2.0)
+        }
+        return .Ok(a + b)
+    }
+    if (op == "/" || op == "%") && b == 0.0 { return .Err(failures.New("Division by zero in state initializer")) }
+    if op == "*" && Abs(a) > 1.0 && Abs(b) > 1.0 {
+        let threshold = maximum / Abs(b)
+        if Abs(a) >= threshold {
+            if Abs(a) * 0.5 >= threshold { return .Err(failures.New("Float64 overflow in state initializer")) }
+            let half = (a * 0.5) * b
+            if Abs(half) > maximum * 0.5 { return .Err(failures.New("Float64 overflow in state initializer")) }
+            return .Ok(half * 2.0)
+        }
+    }
+    if op == "/" && Abs(b) < 1.0 {
+        let threshold = maximum * Abs(b)
+        if Abs(a) >= threshold {
+            if Abs(a) * 0.5 >= threshold { return .Err(failures.New("Float64 overflow in state initializer")) }
+            let half = (a * 0.5) / b
+            if Abs(half) > maximum * 0.5 { return .Err(failures.New("Float64 overflow in state initializer")) }
+            return .Ok(half * 2.0)
+        }
+    }
+    if op == "*" { return .Ok(a * b) }
+    if op == "/" { return .Ok(a / b) }
+    return .Ok(a % b)
+}
+export fn Binary(op: string, kind: string, left: json, right: json) -> Result[json, Error] {
+    if kind == "int" {
+        let a = jsonAsInt(left)?
+        let b = jsonAsInt(right)?
+        if op == "==" { return .Ok(jsonFrom(a == b)) }
+        if op == "!=" { return .Ok(jsonFrom(a != b)) }
+        if op == "<" { return .Ok(jsonFrom(a < b)) }
+        if op == "<=" { return .Ok(jsonFrom(a <= b)) }
+        if op == ">" { return .Ok(jsonFrom(a > b)) }
+        if op == ">=" { return .Ok(jsonFrom(a >= b)) }
+        return .Ok(jsonFrom(Integer(op, a, b)?))
+    }
+    if kind == "float64" {
+        let a = jsonAsFloat64(left)?
+        let b = jsonAsFloat64(right)?
+        if op == "==" { return .Ok(jsonFrom(a == b)) }
+        if op == "!=" { return .Ok(jsonFrom(a != b)) }
+        if op == "<" { return .Ok(jsonFrom(a < b)) }
+        if op == "<=" { return .Ok(jsonFrom(a <= b)) }
+        if op == ">" { return .Ok(jsonFrom(a > b)) }
+        if op == ">=" { return .Ok(jsonFrom(a >= b)) }
+        return .Ok(jsonFrom(Float(op, a, b)?))
+    }
+    if kind == "string" {
+        let a = jsonAsString(left)?
+        let b = jsonAsString(right)?
+        if op == "==" { return .Ok(jsonFrom(a == b)) }
+        if op == "!=" { return .Ok(jsonFrom(a != b)) }
+        if op == "<" { return .Ok(jsonFrom(a < b)) }
+        if op == "<=" { return .Ok(jsonFrom(a <= b)) }
+        if op == ">" { return .Ok(jsonFrom(a > b)) }
+        if op == ">=" { return .Ok(jsonFrom(a >= b)) }
+        if len(a) + len(b) > 1000000 { return .Err(failures.New("String size budget exceeded in state initializer")) }
+        return .Ok(jsonFrom(a + b))
+    }
+    let a = jsonAsBool(left)?
+    let b = jsonAsBool(right)?
+    if op == "==" { return .Ok(jsonFrom(a == b)) }
+    if op == "!=" { return .Ok(jsonFrom(a != b)) }
+    if op == "&&" { return .Ok(jsonFrom(a && b)) }
+    return .Ok(jsonFrom(a || b))
+}

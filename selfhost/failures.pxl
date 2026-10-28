@@ -1,0 +1,6 @@
+// Expected compiler-input failures travel as values until a public phase turns
+// them into source diagnostics. They never use language exception handlers.
+export fn New(message: string) -> Error = Error{
+    kind: "compiler", code: "compiler.invalid_data", message,
+    path: "", operation: "compile", expected: "", actual: ""
+}

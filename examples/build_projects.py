@@ -2,16 +2,16 @@
 
 from pathlib import Path
 
-from pixellang.picture import save_picture
-from pixellang.project import compile_project, read_project
+from pixellang.compiler_client import CompilerClient
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def main():
-    files, entry = read_project(ROOT / "examples/data-report/main.pxl")
-    source, _ = compile_project(files, entry)
-    save_picture(source, ROOT / "examples/data-report/program.png", scale=8)
+    with CompilerClient() as compiler:
+        files, entry = compiler.read_project(ROOT / "examples/data-report/main.pxl")
+        image = compiler.request('export-png', files=files, entry=entry, scale=8)['result']['image']
+        (ROOT / "examples/data-report/program.png").write_bytes(image)
 
 
 if __name__ == "__main__":

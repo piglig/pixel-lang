@@ -17,3 +17,7 @@ vscode/.vscode-test/
 *.vsix
 
 assets/branding/concepts/
+
+# Platform-native build outputs; rebuild from the tracked bytecode seed.
+pixellang/artifacts/compiler-native
+pixellang/artifacts/compiler-native.map.json

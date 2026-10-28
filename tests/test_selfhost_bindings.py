@@ -3,9 +3,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from pixellang.project import compile_project
+from tests.native_compiler import compile_native_sources, execute_native_driver
 from pixellang.vm import VM
-from tests.selfhost_runtime import SELFHOST_HEAP_LIMITS
+from tests.selfhost_runtime import SELFHOST_HEAP_LIMITS, SELFHOST_MAX_STEPS
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -14,21 +14,22 @@ class SelfHostedBindingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.files = {p.name: p.read_text() for p in (ROOT / 'selfhost').glob('*.pxl')}
-        cls.bytecode = compile_project(cls.files)[1].bytecode
+        cls.bytecode = compile_native_sources(cls.files)
 
-    def bind(self, files):
+    def bind(self, files, *, max_steps=120_000_000):
         if isinstance(files, str):
             files = {'main.pxl': files}
         vm = VM(self.bytecode, **SELFHOST_HEAP_LIMITS, input_text=json.dumps({
             'source': 'main.pxl', 'text': '', 'operation': 'bind', 'files': files,
-        }), max_steps=120_000_000, max_depth=1024, max_output_chars=64_000_000)
-        with patch('pixellang.project.build_project', side_effect=AssertionError('delegated')), patch(
+        }), max_steps=max_steps, max_depth=1024, max_output_chars=64_000_000)
+        with patch(
             'pixellang.text.parse_text', side_effect=AssertionError('delegated')
-        ), patch('pixellang.semantics.Checker.check', side_effect=AssertionError('delegated')):
+        ):
             return vm.run()[0]
 
     def test_binds_own_compiler(self):
-        result = self.bind(self.files)
+        result = execute_native_driver(self.bytecode, dict(source='main.pxl', text='',
+            operation='bind', files=self.files), steps=SELFHOST_MAX_STEPS)[0]
         self.assertEqual(result['diagnostics'], [])
         self.assertGreater(len(result['references']), 1000)
         for ref in result['references']:
@@ -73,8 +74,8 @@ class SelfHostedBindingTests(unittest.TestCase):
             ('fn main() { let value = 1; let value = 2 }', 'Duplicate local name: value'),
             ('fn main() { let value = 1; value = 2 }', 'Cannot rebind immutable name: value'),
             ('fn main() { for item in [1] { print(item) }; print(item) }', 'Unknown name: item'),
-            ('fn main() { try { print(1) } catch error { print(error) }; print(error) }', 'Unknown name: error'),
-            ('fn main() { let value = match Some(1) { Some(item) => item, None => 0 }; print(item) }', 'Unknown name: item'),
+            ('fn main() { match Result::[int,string].Err("bad") { .Ok(value) => { print(value) }, .Err(error) => { print(error) } }; print(error) }', 'Unknown name: error'),
+            ('fn main() { let value = match Option.Some(1) { Option.Some(item) => item, Option.None => 0 }; print(item) }', 'Unknown name: item'),
         ]:
             with self.subTest(source=source):
                 errors = self.bind(source)['diagnostics']
@@ -121,3 +122,10 @@ class SelfHostedBindingTests(unittest.TestCase):
     def test_loop_source_cannot_see_its_binding(self):
         result = self.bind('fn main() { for item in item { print(item) } }')
         self.assertEqual(result['diagnostics'][0]['message'], 'Unknown name: item')
+
+    def test_native_binding_matches_reference(self):
+        for source in ('fn main(){let x=1;let f=fn()=x}', 'fn main(){missing()}'):
+            expected = self.bind(source)
+            actual = execute_native_driver(self.bytecode, dict(source='main.pxl', text='',
+                operation='bind', files={'main.pxl': source}), steps=120_000_000)[0]
+            self.assertEqual(actual, expected)

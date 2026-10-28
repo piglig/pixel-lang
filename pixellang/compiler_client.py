@@ -22,8 +22,10 @@ class CompiledArtifact:
 
 
 class CompilerClient:
-    def __init__(self, worker=None):
-        self.worker=worker or CompilerWorker()
+    def __init__(self, worker=None, *, compiler_artifact=None, native_executable=None, limits=None):
+        if worker is not None and (compiler_artifact is not None or native_executable is not None or limits is not None):
+            raise ValueError('Provide either a worker or compiler artifact options')
+        self.worker=worker or CompilerWorker(compiler_artifact,native_executable=native_executable,limits=limits)
         self.owned=worker is None
         self.next_id=0
 
@@ -33,7 +35,9 @@ class CompilerClient:
 
     def request(self, operation, *, files=None, entry='main.pxl', cancelled=lambda:False, revision=None, submitted_at=None, **args):
         self.next_id+=1
-        sources=(files if operation=="module-info" else self.sources(files)) if files is not None else None
+        if operation=='editor-index' and files is not None:
+            args.setdefault('editorRoots', sorted(files))
+        sources=(files if operation in ("module-info", "format") else self.sources(files)) if files is not None else None
         request=dict(version=1,id=self.next_id,revision=revision,operation=operation,entry=entry,**args)
         if sources is not None:request['files']=sources
         response=self.worker.request(request,cancelled=cancelled,submitted_at=submitted_at)
@@ -53,20 +57,21 @@ class CompilerClient:
         exception.status=response['status']
         raise exception
 
-    def debug_project(self, files, entry='main.pxl', *, cancelled=lambda:False, submitted_at=None, include_ir=False, include_png=False, scale=8):
+    def debug_project(self, files, entry='main.pxl', *, cancelled=lambda:False, submitted_at=None, include_ir=False):
         from .debug_artifact import prepare_debug
         submitted_at=time.monotonic() if submitted_at is None else submitted_at
         snapshot=self.sources(files)
-        compiled=self.request('debug-bundle',files=snapshot,entry=entry,cancelled=cancelled,
-                              submitted_at=submitted_at,includeIR=include_ir,includePNG=include_png,scale=scale)['result']
-        artifact=prepare_debug(compiled['bytecode'],compiled['debug'],compiled['document'])
+        compiled=self.request('debug-compile',files=snapshot,entry=entry,cancelled=cancelled,
+                              submitted_at=submitted_at)['result']
+        artifact=prepare_debug(compiled['bytecode'],compiled['debug'],take_ownership=True)
         artifact.source_project=deepcopy(dict(files=snapshot,entry=entry))
-        artifact.ir=compiled.get('ir')
-        artifact.image=compiled.get('image')
+        if include_ir:
+            artifact.ir=self.request('inspect-ir',files=snapshot,entry=entry,cancelled=cancelled,
+                                     submitted_at=submitted_at)['result']['ir']
         return artifact
 
     def read_project(self, path):
-        from .project import safe_name
+        from .module_paths import safe_name
         path=Path(path).resolve();root=path.parent
         files={};pending=[path.name]
         library=self.sources({})

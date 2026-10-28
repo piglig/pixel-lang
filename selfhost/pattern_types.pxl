@@ -1,0 +1,37 @@
+import "model.pxl" as model
+import "types.pxl" as types
+import "pattern_coverage.pxl" as coverage
+
+// Intern only the subject's reachable constructor domains. The placeholder is
+// published before visiting payloads so recursive enum identities stay finite.
+fn Domain(typeId: int, indices: inout map[string, int], domains: inout [coverage.Domain], resolved: inout model.ResolvedTypes) -> int {
+    let key = string(typeId)
+    if indices.has(key) { return indices[key] }
+    let index = len(domains)
+    indices[key] = index
+    let closed = resolved.types[typeId].kind == "enum"
+    domains.append(coverage.Domain{closed, constructors: []})
+    if closed {
+        var constructors: [coverage.Constructor] = []
+        for variant in types.VariantTypes(typeId, &resolved) {
+            var fields: [int] = []
+            for field in variant.fields { fields.append(Domain(field.typeId, &indices, &domains, &resolved)) }
+            constructors.append(coverage.Constructor{tag: variant.name, fields})
+        }
+        domains[index].constructors = constructors
+    }
+    return index
+}
+
+export fn Analyze(rows: [coverage.Row], subjects: [int], resolved: inout model.ResolvedTypes) -> coverage.Analysis {
+    var indices = map[string, int]{}
+    var domains: [coverage.Domain] = []
+    var roots: [int] = []
+    for subject in subjects {
+        if subject < 0 || subject >= len(resolved.types) {
+            return coverage.Analysis{status: "invalid", exhaustive: false, unreachable: []}
+        }
+        roots.append(Domain(subject, &indices, &domains, &resolved))
+    }
+    return coverage.Check(rows, roots, domains, 100000)
+}

@@ -1,0 +1,39 @@
+import "error.pxl" as errors
+export record Parsed { options: map[string, string], files: [string] }
+export effect fn Args() -> [string] = programArgs()
+fn Contains(values: [string], value: string) -> bool {
+    for candidate in values { if candidate == value { return true } }
+    return false
+}
+// Long options accept --name=value or --name value. -- ends option parsing.
+export fn Parse(values: [string], flags: [string], options: [string]) -> Result[Parsed, Error] {
+    var result: Parsed = Parsed{options: map[string, string]{}, files: []}
+    var positional = false
+    var index = 0
+    while index < len(values) {
+        let value = values[index]
+        index += 1
+        if positional { result.files.append(value); continue }
+        if value == "--" { positional = true; continue }
+        if len(value) < 2 || slice(value, 0, 2) != "--" { result.files.append(value); continue }
+        let parts = split(slice(value, 2, len(value)), "=")
+        let name = parts[0]
+        if result.options.has(name) { return .Err(errors.New("cli.repeated_option", "Repeated option: --" + name, "Parse", "--" + name)) }
+        if Contains(flags, name) {
+            if len(parts) != 1 { return .Err(errors.New("cli.flag_value", "Flag does not take a value: --" + name, "Parse", "--" + name)) }
+            result.options[name] = "true"
+        } else {
+            if !Contains(options, name) { return .Err(errors.New("cli.unknown_option", "Unknown option: --" + name, "Parse", "--" + name)) }
+            var argument = ""
+            if len(parts) > 1 { argument = join(slice(parts, 1, len(parts)), "=") }
+            else {
+                if index >= len(values) { return .Err(errors.New("cli.missing_value", "Missing value for --" + name, "Parse", "--" + name)) }
+                argument = values[index]
+                if len(argument) >= 2 && slice(argument, 0, 2) == "--" { return .Err(errors.New("cli.missing_value", "Missing value for --" + name, "Parse", "--" + name)) }
+                index += 1
+            }
+            result.options[name] = argument
+        }
+    }
+    return .Ok(result)
+}

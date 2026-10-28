@@ -1,3 +1,4 @@
+import "failures.pxl" as failures
 import "picture_colors.pxl" as colors
 import "png.pxl" as png
 import "picture.pxl" as picture
@@ -6,142 +7,153 @@ import "pixel_decode.pxl" as decode
 import "pixel_project.pxl" as project
 import "model.pxl" as model
 
-export record Document { root: layout.Source, modules: map[layout.Source], entry: string }
-export record Pieces { sources: map[layout.Source], decoded: map[decode.Output], entry: string, ids: [string] }
-fn Bytes(image: png.Image, count: int) -> [int] {
-    if count < 0 || (count + 2) / 3 > image.width * image.height { fail("Truncated picture header") }
-    let bytes: [int] = []
+export record Document { root: layout.Source, modules: map[string, layout.Source], entry: string }
+export record Pieces { sources: map[string, layout.Source], decoded: map[string, decode.Output], entry: string, ids: [string] }
+fn Bytes(image: png.Raster, count: int) -> Result[[int], Error] {
+    if count < 0 || (count + 2) / 3 > image.width * image.height { return .Err(failures.New("Truncated picture header")) }
+    var bytes: [int] = []
     var index = 0
     while index < count {
-        let offset = (index / 3) * 4
-        if image.rgba[offset + 3] != 255 { fail("Picture header pixels must be opaque") }
-        append(bytes, image.rgba[offset + index % 3])
+        let pixel = index / 3
+        let offset = (pixel / image.width) * image.stride + 1 + (pixel % image.width) * image.channels
+        if image.channels == 4 && image.scanlines[offset + 3] != 255 { return .Err(failures.New("Picture header pixels must be opaque")) }
+        bytes.append(image.scanlines[offset + index % 3])
         index += 1
     }
-    return bytes
+    return .Ok(bytes)
 }
 fn Word(bytes: [int], start: int) -> int {
     return bytes[start] * 16777216 + bytes[start + 1] * 65536 + bytes[start + 2] * 256 + bytes[start + 3]
 }
-export fn ReadSelected(bytes: [int], outputLimit: int, selected: map[bool], all: bool) -> Pieces {
-    let image = png.Decode(bytes, outputLimit)
-    let prefix = Bytes(image, 20)
-    let magic = [80, 88, 73, 77, 71, 8, 13, 10]
-    for index, byte in magic { if prefix[index] != byte { fail("Unknown picture signature") } }
+export fn ReadSelected(bytes: [int], outputLimit: int, selected: map[string, bool], all: bool) -> Result[Pieces, Error] {
+    let image = png.DecodeRaster(bytes, outputLimit)?
+    let prefix = Bytes(image, 20)?
+    let magic = [80, 88, 73, 77, 71, 9, 13, 10]
+    for index, byte in magic { if prefix[index] != byte { return .Err(failures.New("Unknown picture signature")) } }
     let size = Word(prefix, 8)
     let length = Word(prefix, 12)
-    if size < 1 || size > 16000000 || length < 1 || length > 16000000 { fail("Invalid picture header length") }
-    let packed = slice(Bytes(image, 20 + size), 20, 20 + size)
-    if crc32(packed) != Word(prefix, 16) { fail("Picture header CRC mismatch") }
-    let raw = zlibDecompress(packed, length)
-    if len(raw) != length { fail("Picture header length mismatch") }
-    let header = jsonDecode[picture.Header](utf8Decode(raw))
-    if header.format != "pixel-image" || (header.version != "0.8" && header.version != "0.9") { fail("Unsupported picture container") }
-    if len(header.canvas) != 2 || header.canvas[0] != image.width || header.canvas[1] != image.height { fail("Picture canvas mismatch") }
+    if size < 1 || size > 16000000 || length < 1 || length > 16000000 { return .Err(failures.New("Invalid picture header length")) }
+    let packed = slice(Bytes(image, 20 + size)?, 20, 20 + size)
+    if crc32(packed) != Word(prefix, 16) { return .Err(failures.New("Picture header CRC mismatch")) }
+    let raw = zlibDecompress(packed, length)?
+    if len(raw) != length { return .Err(failures.New("Picture header length mismatch")) }
+    let header = jsonDecode::[picture.Header](utf8Decode(raw)?)?
+    if header.format != "pixel-image" || header.version != "0.9" { return .Err(failures.New("Unsupported picture container")) }
+    if len(header.canvas) != 2 || header.canvas[0] != image.width || header.canvas[1] != image.height { return .Err(failures.New("Picture canvas mismatch")) }
     let scale = header.scale
-    if scale < 4 || scale > 24 || len(header.modules) < 1 || len(header.modules) > 128 { fail("Invalid picture scale or module table") }
+    if scale < 4 || scale > 24 || len(header.modules) < 1 || len(header.modules) > 128 { return .Err(failures.New("Invalid picture scale or module table")) }
     let headerBottom = (20 + size + image.width * 3 - 1) / (image.width * 3)
-    let documents = map[layout.Source]{}
-    let decoded = map[decode.Output]{}
-    let rectangles: [[int]] = []
-    let seen = map[bool]{}
-    let ids: [string] = []
+    var documents: map[string, layout.Source] = map[string, layout.Source]{}
+    var decoded: map[string, decode.Output] = map[string, decode.Output]{}
+    var rectangles: [[int]] = []
+    var seen: map[string, bool] = map[string, bool]{}
+    var ids: [string] = []
     let palette = colors.Build()
     var total = 0
     for item in header.modules {
-        if has(seen, item.id) { fail("Duplicate picture module ID") }
+        if seen.has(item.id) { return .Err(failures.New("Duplicate picture module ID")) }
         seen[item.id] = true
         if item.id != "main" {
-            let id = parseInt(item.id)
-            if id < 1 || id > 65535 || string(id) != item.id { fail("Invalid picture module ID") }
+            let id = parseInt(item.id)?
+            if id < 1 || id > 65535 || string(id) != item.id { return .Err(failures.New("Invalid picture module ID")) }
         }
         let spec = item.source
         var spatial = spec.spatial
         match spec.linkChunks {
-            Some(chunks) => {
-                if header.version != "0.9" || len(spatial.links) != 0 { fail("Ambiguous picture links") }
-                spatial = layout.Spatial{links: picture.UnpackLinks(chunks)}
+            .Some(chunks) => {
+                if len(spatial.links) != 0 { return .Err(failures.New("Ambiguous picture links")) }
+                spatial = layout.Spatial{links: picture.UnpackLinks(chunks)?}
             }
-            None => { if header.version == "0.9" { fail("Missing picture link chunks") } }
+            .None => { return .Err(failures.New("Missing picture link chunks")) }
         }
-        let source = layout.Source{magic: spec.magic, versions: spec.versions, encoding: spec.encoding, dimensions: spec.dimensions, pixels: [], spatial, metadata: spec.metadata}
+        var source = layout.Source{magic: spec.magic, versions: spec.versions, encoding: spec.encoding, dimensions: spec.dimensions, pixels: [], spatial, metadata: spec.metadata}
         let validation = decode.Decode(source, item.id)
-        if len(validation.diagnostics) > 0 { fail(validation.diagnostics[0].message) }
-        if len(item.origin) != 2 { fail("Invalid picture module origin") }
+        if len(validation.diagnostics) > 0 { return .Err(failures.New(validation.diagnostics[0].message)) }
+        if len(item.origin) != 2 { return .Err(failures.New("Invalid picture module origin")) }
         let x = item.origin[0]
         let y = item.origin[1]
         let w = source.dimensions[0]
         let h = source.dimensions[1]
         total += w * h
         // Compare against available extent to avoid untrusted-origin overflow.
-        if total > 1000000 || x < 0 || x > image.width || y < headerBottom || y > image.height { fail("Picture module out of bounds") }
-        if w * scale > image.width - x || h * scale > image.height - y { fail("Picture module out of bounds") }
+        if total > 1000000 || x < 0 || x > image.width || y < headerBottom || y > image.height { return .Err(failures.New("Picture module out of bounds")) }
+        if w * scale > image.width - x || h * scale > image.height - y { return .Err(failures.New("Picture module out of bounds")) }
         let rectangle = [x, y, x + w * scale, y + h * scale]
         for previous in rectangles {
-            if rectangle[0] < previous[2] && rectangle[2] > previous[0] && rectangle[1] < previous[3] && rectangle[3] > previous[1] { fail("Overlapping picture modules") }
+            if rectangle[0] < previous[2] && rectangle[2] > previous[0] && rectangle[1] < previous[3] && rectangle[3] > previous[1] { return .Err(failures.New("Overlapping picture modules")) }
         }
-        append(rectangles, rectangle)
+        rectangles.append(rectangle)
         var key = item.id
         if key == "main" { key = "0" }
-        append(ids, key)
-        if !all && !has(selected, key) { continue }
+        ids.append(key)
+        if !all && !selected.has(key) { continue }
+        var pixels: [layout.Pixel] = []
         var gy = 0
         while gy < h {
             var gx = 0
             while gx < w {
                 let left = x + gx * scale + 1
                 let top = y + gy * scale + 1
-                let start = (top * image.width + left) * 4
-                let red = image.rgba[start]
-                let green = image.rgba[start + 1]
-                let blue = image.rgba[start + 2]
-                let alpha = image.rgba[start + 3]
+                let start = top * image.stride + 1 + left * image.channels
+                let red = image.scanlines[start]
+                let green = image.scanlines[start + 1]
+                let blue = image.scanlines[start + 2]
+                var alpha = 255
+                if image.channels == 4 { alpha = image.scanlines[start + 3] }
                 var dy = 0
                 while dy < scale - 2 {
                     var dx = 0
                     while dx < scale - 2 {
-                        let offset = ((top + dy) * image.width + left + dx) * 4
-                        if image.rgba[offset] != red || image.rgba[offset + 1] != green || image.rgba[offset + 2] != blue || image.rgba[offset + 3] != alpha { fail("Nonuniform picture tile") }
+                        let offset = (top + dy) * image.stride + 1 + (left + dx) * image.channels
+                        if image.scanlines[offset] != red || image.scanlines[offset + 1] != green || image.scanlines[offset + 2] != blue || (image.channels == 4 && image.scanlines[offset + 3] != alpha) { return .Err(failures.New("Nonuniform picture tile")) }
                         dx += 1
                     }
                     dy += 1
                 }
                 if red != 16 || green != 20 || blue != 24 || alpha != 255 {
-                    if alpha != 255 || !has(palette.reverse, string(red)) { fail("Unknown picture tile color") }
+                    if alpha != 255 || !palette.reverse.has(string(red)) { return .Err(failures.New("Unknown picture tile color")) }
                     let mapping = palette.reverse[string(red)]
-                    append(source.pixels, layout.Pixel{position: [gx, gy], rgba: [mapping.category, mapping.green[green], mapping.blue[blue], 255]})
+                    pixels.append(layout.Pixel{position: [gx, gy], rgba: [mapping.category, mapping.green[green], mapping.blue[blue], 255]})
                 }
                 gx += 1
             }
             gy += 1
         }
+        source.pixels = pixels
         let checked = decode.Decode(source, item.id)
-        if len(checked.diagnostics) > 0 { fail(checked.diagnostics[0].message) }
+        if len(checked.diagnostics) > 0 { return .Err(failures.New(checked.diagnostics[0].message)) }
         documents[key] = source
         decoded[key] = checked
     }
-    if !has(seen, "main") { fail("Missing picture entry module") }
-    for key in keys(selected) {
-        if !has(documents, key) { fail("Missing selected picture module") }
+    if !seen.has("main") { return .Err(failures.New("Missing picture entry module")) }
+    for key in selected.keys() {
+        if !documents.has(key) { return .Err(failures.New("Missing selected picture module")) }
     }
-    return Pieces{sources: documents, decoded, entry: header.entry, ids}
+    return .Ok(Pieces{sources: documents, decoded, entry: header.entry, ids})
 }
-export fn Decode(bytes: [int], outputLimit: int) -> Document {
-    let pieces = ReadSelected(bytes, outputLimit, map[bool]{}, true)
+export fn Decode(bytes: [int], outputLimit: int) -> Result[Document, Error] {
+    let pieces = ReadSelected(bytes, outputLimit, map[string, bool]{}, true)?
     let root = pieces.sources["0"]
-    delete(pieces.sources, "0")
-    return Document{root, modules: pieces.sources, entry: pieces.entry}
+    var modules = pieces.sources
+    modules.remove("0")
+    return .Ok(Document{root, modules, entry: pieces.entry})
 }
-export fn LoadFile(path: string, byteLimit: int, outputLimit: int) -> model.Project {
-    var phase = "io"
-    try {
-        let bytes = readBytes(path, byteLimit)
-        phase = "image"
-        let pieces = ReadSelected(bytes, outputLimit, map[bool]{}, true)
-        let root = pieces.sources["0"]
-        delete(pieces.sources, "0")
-        return project.BuildDecoded(root, pieces.sources, pieces.decoded)
-    } catch error {
-        return model.Project{modules: [], diagnostics: [model.Diagnostic{source: path, phase, message: error.message, start: 0, end: 0, line: 1, column: 1}]}
+fn Invalid(path: string, phase: string, error: Error) -> model.Project {
+    return model.Project{entryName: "main", modules: [], diagnostics: [model.Diagnostic{source: path, phase, message: error.message, start: 0, end: 0, line: 1, column: 1}]}
+}
+export effect fn LoadFile(path: string, byteLimit: int, outputLimit: int) -> model.Project {
+    match readBytes(path, byteLimit) {
+        .Ok(bytes) => {
+            match ReadSelected(bytes, outputLimit, map[string, bool]{}, true) {
+                .Ok(pieces) => {
+                    let root = pieces.sources["0"]
+                    var modules = pieces.sources
+                    modules.remove("0")
+                    return project.BuildDecoded(root, modules, pieces.decoded)
+                },
+                .Err(error) => { return Invalid(path, "image", error) }
+            }
+        },
+        .Err(error) => { return Invalid(path, "io", error) }
     }
 }

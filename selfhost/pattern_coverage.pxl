@@ -1,0 +1,154 @@
+// Constructor-matrix usefulness for typed patterns. Binding names and `_` are
+// both represented by an empty tag; products are multiple subject columns.
+// Closed domains describe enums; open domains describe literal-bearing scalars.
+export record Pattern { tag: string, fields: [Pattern] }
+export record Constructor { tag: string, fields: [int] }
+export record Domain { closed: bool, constructors: [Constructor] }
+export record Row { patterns: [Pattern], guarded: bool }
+export record Analysis { status: string, exhaustive: bool, unreachable: [int] }
+record Context { domains: [Domain], inhabited: [bool], remaining: int, limited: bool }
+
+fn Spend(c: inout Context) -> bool {
+    if c.remaining <= 0 { c.limited = true; return false }
+    c.remaining -= 1
+    return true
+}
+fn Wildcards(count: int) -> [Pattern] {
+    var result: [Pattern] = []
+    var index = 0
+    while index < count { result.append(Pattern{tag: "", fields: []}); index += 1 }
+    return result
+}
+fn Inhabited(domains: [Domain]) -> [bool] {
+    var result: [bool] = []
+    for domain in domains { result.append(!domain.closed) }
+    var changed = true
+    while changed {
+        changed = false
+        for index, domain in domains {
+            if result[index] { continue }
+            for constructor in domain.constructors {
+                var ready = true
+                for field in constructor.fields { if !result[field] { ready = false; break } }
+                if ready { result[index] = true; changed = true; break }
+            }
+        }
+    }
+    return result
+}
+fn Live(constructor: Constructor, c: Context) -> bool {
+    for field in constructor.fields { if !c.inhabited[field] { return false } }
+    return true
+}
+fn Valid(pattern: Pattern, domain: int, c: inout Context) -> bool {
+    if !Spend(&c) { return false }
+    if pattern.tag == "" { return len(pattern.fields) == 0 }
+    let typ = c.domains[domain]
+    if !typ.closed { return len(pattern.fields) == 0 }
+    for constructor in typ.constructors {
+        if constructor.tag != pattern.tag { continue }
+        if len(constructor.fields) != len(pattern.fields) { return false }
+        for index, field in pattern.fields {
+            if !Valid(field, constructor.fields[index], &c) { return false }
+        }
+        return true
+    }
+    return false
+}
+fn Specialize(matrix: [[Pattern]], tag: string, arity: int, c: inout Context) -> [[Pattern]] {
+    var result: [[Pattern]] = []
+    for row in matrix {
+        if !Spend(&c) { return result }
+        let head = row[0]
+        if head.tag != "" && head.tag != tag { continue }
+        var selected = head.fields
+        if head.tag == "" { selected = Wildcards(arity) }
+        selected.extend(slice(row, 1, len(row)))
+        result.append(selected)
+    }
+    return result
+}
+fn Default(matrix: [[Pattern]], c: inout Context) -> [[Pattern]] {
+    var result: [[Pattern]] = []
+    for row in matrix {
+        if !Spend(&c) { return result }
+        if row[0].tag == "" { result.append(slice(row, 1, len(row))) }
+    }
+    return result
+}
+fn Useful(matrix: [[Pattern]], row: [Pattern], subjects: [int], c: inout Context) -> bool {
+    if !Spend(&c) { return false }
+    if len(row) == 0 { return len(matrix) == 0 }
+    if !c.inhabited[subjects[0]] { return false }
+    let head = row[0]
+    let domain = c.domains[subjects[0]]
+    let tail = slice(row, 1, len(row))
+    let tailTypes = slice(subjects, 1, len(subjects))
+    if head.tag != "" {
+        var fieldTypes: [int] = []
+        for constructor in domain.constructors {
+            if constructor.tag == head.tag { fieldTypes = constructor.fields; break }
+        }
+        var selected = head.fields
+        selected.extend(tail)
+        fieldTypes.extend(tailTypes)
+        return Useful(Specialize(matrix, head.tag, len(head.fields), &c), selected, fieldTypes, &c)
+    }
+    var present = map[string, bool]{}
+    for previous in matrix {
+        if !Spend(&c) { return false }
+        if previous[0].tag != "" { present[previous[0].tag] = true }
+    }
+    var complete = domain.closed
+    for constructor in domain.constructors {
+        if Live(constructor, c) && !present.has(constructor.tag) { complete = false }
+    }
+    if complete {
+        for constructor in domain.constructors {
+            if !Spend(&c) { return false }
+            if !Live(constructor, c) { continue }
+            var selected = Wildcards(len(constructor.fields))
+            selected.extend(tail)
+            var fieldTypes = constructor.fields
+            fieldTypes.extend(tailTypes)
+            if Useful(Specialize(matrix, constructor.tag, len(constructor.fields), &c), selected, fieldTypes, &c) { return true }
+            if c.limited { return false }
+        }
+        return false
+    }
+    return Useful(Default(matrix, &c), tail, tailTypes, &c)
+}
+
+export fn Check(rows: [Row], subjects: [int], domains: [Domain], budget: int) -> Analysis {
+    let invalid = Analysis{status: "invalid", exhaustive: false, unreachable: []}
+    for domain in domains {
+        if !domain.closed && len(domain.constructors) > 0 { return invalid }
+        var seen = map[string, bool]{}
+        for constructor in domain.constructors {
+            if constructor.tag == "" || seen.has(constructor.tag) { return invalid }
+            seen[constructor.tag] = true
+            for field in constructor.fields { if field < 0 || field >= len(domains) { return invalid } }
+        }
+    }
+    for subject in subjects { if subject < 0 || subject >= len(domains) { return invalid } }
+    var c = Context{domains, inhabited: Inhabited(domains), remaining: budget, limited: false}
+    var matrix: [[Pattern]] = []
+    var unreachable: [int] = []
+    for index, row in rows {
+        if len(row.patterns) != len(subjects) { return invalid }
+        for position, pattern in row.patterns {
+            if !Valid(pattern, subjects[position], &c) {
+                if c.limited { return Analysis{status: "limit", exhaustive: false, unreachable: []} }
+                return invalid
+            }
+        }
+        let useful = Useful(matrix, row.patterns, subjects, &c)
+        if c.limited { return Analysis{status: "limit", exhaustive: false, unreachable: []} }
+        if !useful { unreachable.append(index) }
+        // A guard may fail, so only an unguarded arm establishes coverage.
+        if !row.guarded { matrix.append(row.patterns) }
+    }
+    let missing = Useful(matrix, Wildcards(len(subjects)), subjects, &c)
+    if c.limited { return Analysis{status: "limit", exhaustive: false, unreachable: []} }
+    return Analysis{status: "ok", exhaustive: !missing, unreachable}
+}

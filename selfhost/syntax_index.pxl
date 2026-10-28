@@ -6,15 +6,19 @@ export fn Key(module: int, node: int) -> string = string(module) + ":" + string(
 // itself points to its enclosing function, so the array is also an owner chain.
 // Lambda bodies stay with their enclosing named function for schema discovery.
 export fn Owners(syntax: model.Parsed) -> [int] {
-    let owners: [int] = []
-    for node in syntax.nodes { append(owners, -1) }
-    let pending = slice(syntax.roots, 0, len(syntax.roots))
-    while len(pending) > 0 {
-        let index = pop(pending)
-        let node = syntax.nodes[index]
-        var owner = owners[index]
-        if node.kind == "fn" { owner = index }
-        for child in node.children { owners[child] = owner; append(pending, child) }
+    var owners: [int] = []
+    for node in syntax.nodes { owners.append(-1) }
+    var pending = syntax.roots
+    while true {
+        match pending.pop() {
+            .Some(index) => {
+                let node = syntax.nodes[index]
+                var owner = owners[index]
+                if model.CallableDeclaration(node.kind) { owner = index }
+                for child in node.children { owners[child] = owner; pending.append(child) }
+            },
+            .None => { break }
+        }
     }
     return owners
 }

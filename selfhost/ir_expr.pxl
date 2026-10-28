@@ -1,206 +1,624 @@
+import "checked_operations.pxl" as checkedOperations
 import "ir_state.pxl" as state
 import "model.pxl" as model
+import "checker_spatial.pxl" as spatial
 import "types.pxl" as types
 
+fn EmitValues(values: [int], c: inout state.Context, planned: inout model.ClosurePlan) {
+    for value in values { Emit(value, &c, &planned) }
+}
+
+record CheckedBuiltin { name: string, result: string }
+record CheckedDecode { result: string }
 record Collection { type: string, count: int }
 record RecordValue { type: string, fields: [string] }
 record EnumValue { type: string, variant: string, fields: [string] }
 record EnumTest { type: string, variant: string }
 record EnumField { type: string, variant: string, field: string }
-fn Enum(c: state.Context, index: int, name: string, arguments: [int]) {
-    let resolved = c.planned.named.checked.resolved
-    let typeId = state.ExpressionType(c, index)
+record AccessOperand { slot: int, type: string, path: [json] }
+record ValueAddress { root: int, base: int, value: int, path: [json], indices: [int] }
+fn Address(target: int, read: bool, c: inout state.Context, planned: inout model.ClosurePlan) -> ValueAddress {
+    let nodes = planned.named.checked.resolved.bound.project.modules[c.frame.module].syntax.nodes
+    var reversed: [int] = []
+    var root = target
+    while nodes[root].kind == "field" || nodes[root].kind == "index" {
+        reversed.append(root); root = nodes[root].children[0]
+    }
+    let slot = state.Slot(state.Reference(c, root), target, planned, &c)
+    let base = state.Temporary(target, planned, &c)
+    let value = state.Temporary(target, planned, &c)
+    state.Emit("LOAD", jsonFrom(slot), target, planned, &c)
+    state.Emit("STORE", jsonFrom(base), target, planned, &c)
+    state.Emit("LOAD", jsonFrom(base), target, planned, &c)
+    var path: [json] = []
+    var indices: [int] = []
+    if len(reversed) == 0 { state.Emit("STORE", jsonFrom(value), target, planned, &c) }
+    var cursor = len(reversed) - 1
+    while cursor >= 0 {
+        let selector = nodes[reversed[cursor]]
+        var part = jsonNull()
+        if selector.kind == "field" { part = jsonFrom(map[string, string]{"field": selector.text}) }
+        else {
+            part = jsonFrom(map[string, bool]{"index": true})
+            let temporary = state.Temporary(reversed[cursor], planned, &c)
+            Emit(selector.children[1], &c, &planned); state.Emit("STORE", jsonFrom(temporary), target, planned, &c)
+            indices.append(temporary); state.Emit("LOAD", jsonFrom(temporary), target, planned, &c)
+        }
+        path.append(part)
+        if cursor > 0 || read {
+            if selector.kind == "field" { state.Emit("FIELD", jsonFrom(selector.text), target, planned, &c) }
+            else { state.Op("INDEX", target, planned, &c) }
+            if cursor == 0 { state.Emit("STORE", jsonFrom(value), target, planned, &c) }
+        } else { state.Emit("VALUE_CHECK", jsonFrom([part]), target, planned, &c) }
+        cursor -= 1
+    }
+    return ValueAddress{root: slot, base, value, path: path, indices: indices}
+}
+fn WriteAddress(address: ValueAddress, index: int, planned: model.ClosurePlan, c: inout state.Context) {
+    if len(address.path) > 0 {
+        let value = state.Temporary(index, planned, &c)
+        state.Emit("STORE", jsonFrom(value), index, planned, &c)
+        state.Emit("LOAD", jsonFrom(address.base), index, planned, &c)
+        for temporary in address.indices { state.Emit("LOAD", jsonFrom(temporary), index, planned, &c) }
+        state.Emit("LOAD", jsonFrom(value), index, planned, &c)
+        state.Emit("VALUE_SET", jsonFrom(address.path), index, planned, &c)
+    }
+    state.Emit("STORE", jsonFrom(address.root), index, planned, &c)
+}
+export fn ValueAssignment(index: int, c: inout state.Context, planned: inout model.ClosurePlan) {
+
+    let nodes = planned.named.checked.resolved.bound.project.modules[c.frame.module].syntax.nodes
+    let node = nodes[index]
+    let address = Address(node.children[0], node.text != "=", &c, &planned)
+    if node.text != "=" { state.Emit("LOAD", jsonFrom(address.value), index, planned, &c) }
+    Emit(node.children[1], &c, &planned)
+    if node.text != "=" {
+        let typeId = state.ExpressionType(node.children[0], &c, &planned)
+        var op = state.Binary(slice(node.text, 0, 1))
+        if op == "ADD" && state.TypeName(typeId, planned.named.checked.resolved) == "str" { op = "CONCAT" }
+        if planned.named.checked.resolved.types[typeId].kind == "spatial" { state.Emit("SPATIAL_BINARY", jsonFrom(slice(node.text, 0, 1)), index, planned, &c) }
+        else { state.Op(op, index, planned, &c) }
+    }
+    WriteAddress(address, index, planned, &c)
+}
+record CollectionMethod { method: string, result: string }
+fn ValueMethod(index: int, receiver: int, method: string, c: inout state.Context, planned: inout model.ClosurePlan) {
+
+    let node = planned.named.checked.resolved.bound.project.modules[c.frame.module].syntax.nodes[index]
+    if method == "get" || method == "has" || method == "keys" {
+        Emit(receiver, &c, &planned)
+        for argument in slice(node.children, 1, len(node.children)) { Emit(argument, &c, &planned) }
+        var operation = method
+        if method == "get" { operation = "lookup" }
+        state.Emit("BUILTIN", jsonFrom(operation), index, planned, &c); return
+    }
+    let address = Address(receiver, true, &c, &planned)
+    state.Emit("LOAD", jsonFrom(address.value), index, planned, &c)
+    for argument in slice(node.children, 1, len(node.children)) { Emit(argument, &c, &planned) }
+    let result = state.Temporary(index, planned, &c)
+    state.Emit("VALUE_COLLECTION", jsonFrom(CollectionMethod{method, result: state.TypeName(state.ExpressionType(index, &c, &planned), planned.named.checked.resolved)}), index, planned, &c)
+    state.Emit("STORE", jsonFrom(result), index, planned, &c)
+    WriteAddress(address, index, planned, &c)
+    state.Emit("LOAD", jsonFrom(result), index, planned, &c)
+}
+
+fn Enum(index: int, name: string, arguments: [int], c: inout state.Context, planned: inout model.ClosurePlan) {
+
+    let typeId = state.ExpressionType(index, &c, &planned)
     if typeId < 0 { return }
-    for variant in types.VariantTypes(resolved, typeId) {
+    for variant in types.VariantTypes(typeId, &planned.named.checked.resolved) {
         if variant.name != name { continue }
-        if len(variant.fields) != len(arguments) { state.Report(c, index, "Enum payload arity mismatch"); return }
-        let fields: [string] = []
-        for field in variant.fields { append(fields, field.name) }
-        for argument in arguments { Emit(c, argument) }
-        state.Emit(c, "ENUM", jsonFrom(EnumValue{type: state.TypeName(resolved, typeId), variant: name, fields}), index)
+        if len(variant.fields) != len(arguments) { state.Report(index, "Enum payload arity mismatch", planned, &c); return }
+        var fields: [string] = []
+        for field in variant.fields { fields.append(field.name) }
+        for argument in arguments { Emit(argument, &c, &planned) }
+        state.Emit("ENUM", jsonFrom(EnumValue{type: state.TypeName(typeId, planned.named.checked.resolved), variant: name, fields: fields}), index, planned, &c)
         return
     }
-    state.Report(c, index, "Unknown concrete enum variant: " + name)
+    state.Report(index, "Unknown concrete enum variant: " + name, planned, &c)
 }
-fn EnumBase(c: state.Context, node: int) -> bool {
+fn EnumBase(c: state.Context, node: int, planned: model.ClosurePlan) -> bool {
     let key = state.Key(c.frame.module, node)
-    if !has(c.expressionTypes, key) { return false }
+    if !c.expressionTypes.has(key) { return false }
     let typeId = c.expressionTypes[key]
     if typeId < 0 { return false }
-    return c.planned.named.checked.resolved.types[typeId].kind == "enum"
+    let resolved = planned.named.checked.resolved
+    return resolved.types[typeId].kind == "enum"
 }
-export fn Match(c: state.Context, index: int, body: fn(state.Context, int)) {
-    let resolved = c.planned.named.checked.resolved
-    let nodes = resolved.bound.project.modules[c.frame.module].syntax.nodes
+fn Pattern(index: int, slot: int, next: int, c: inout state.Context, planned: inout model.ClosurePlan) {
+    let nodes = planned.named.checked.resolved.bound.project.modules[c.frame.module].syntax.nodes
     let node = nodes[index]
-    let typeId = state.ExpressionType(c, node.children[0])
+    if node.kind == "wildcard_pattern" { return }
+    if node.kind == "binding" {
+        let key = state.Key(c.frame.module, index)
+        if !c.declarations.has(key) { state.Report(index, "Missing pattern binding", planned, &c); return }
+        let binding = state.Slot(c.declarations[key], index, planned, &c)
+        state.Emit("LOAD", jsonFrom(slot), index, planned, &c)
+        state.Emit("BIND", jsonFrom(binding), index, planned, &c)
+        return
+    }
+    let typeId = state.ExpressionType(index, &c, &planned)
     if typeId < 0 { return }
-    let typ = state.TypeName(resolved, typeId)
-    let variants = types.VariantTypes(resolved, typeId)
-    let slot = state.Temporary(c, index)
-    let end = state.Label(c)
-    Emit(c, node.children[0]); state.Emit(c, "STORE", jsonFrom(slot), index)
+    let typ = state.TypeName(typeId, planned.named.checked.resolved)
+    state.Emit("LOAD", jsonFrom(slot), index, planned, &c)
+    state.Emit("ENUM_IS", jsonFrom(EnumTest{type: typ, variant: node.text}), index, planned, &c)
+    state.Emit("JUMP_IF_FALSE", jsonFrom(next), index, planned, &c)
+    var first = 0
+    if len(node.children) > 0 && nodes[node.children[0]].kind == "pattern_qualifier" { first = 1 }
+    for variant in types.VariantTypes(typeId, &planned.named.checked.resolved) {
+        if variant.name != node.text { continue }
+        for position, field in variant.fields {
+            let child = node.children[first + position]
+            if nodes[child].kind == "wildcard_pattern" { continue }
+            let payload = state.Temporary(child, planned, &c)
+            state.Emit("LOAD", jsonFrom(slot), child, planned, &c)
+            state.Emit("ENUM_GET", jsonFrom(EnumField{type: typ, variant: node.text, field: field.name}), child, planned, &c)
+            state.Emit("STORE", jsonFrom(payload), child, planned, &c)
+            Pattern(child, payload, next, &c, &planned)
+        }
+    }
+}
+export fn Match(index: int, body: fn(int, inout state.Context, inout model.ClosurePlan), c: inout state.Context, planned: inout model.ClosurePlan) {
+    let nodes = planned.named.checked.resolved.bound.project.modules[c.frame.module].syntax.nodes
+    let node = nodes[index]
+    var slots: [int] = []
+    // Evaluate every subject once, from left to right, before any pattern/guard.
+    for subject in nodes[node.children[0]].children {
+        let slot = state.Temporary(subject, planned, &c)
+        slots.append(slot)
+        Emit(subject, &c, &planned); state.Emit("STORE", jsonFrom(slot), subject, planned, &c)
+    }
+    let end = state.Label(&c)
     for armId in slice(node.children, 1, len(node.children)) {
         let arm = nodes[armId]
-        let pattern = nodes[arm.children[0]]
-        let parts = split(pattern.text, ".")
-        let name = parts[len(parts) - 1]
-        let next = state.Label(c)
-        let wildcard = pattern.kind == "type" && pattern.text == "_" && len(pattern.children) == 0
-        if !wildcard {
-            state.Emit(c, "LOAD", jsonFrom(slot), armId)
-            state.Emit(c, "ENUM_IS", jsonFrom(EnumTest{type: typ, variant: name}), armId)
-            state.Emit(c, "JUMP_IF_FALSE", jsonFrom(next), armId)
-            for variant in variants {
-                if variant.name != name { continue }
-                var position = 1
-                while position < len(arm.children) - 1 {
-                    state.Emit(c, "LOAD", jsonFrom(slot), armId)
-                    state.Emit(c, "ENUM_GET", jsonFrom(EnumField{type: typ, variant: name, field: variant.fields[position - 1].name}), armId)
-                    let key = state.Key(c.frame.module, arm.children[position])
-                    if !has(c.declarations, key) { state.Report(c, armId, "Missing pattern binding"); return }
-                    state.Emit(c, "BIND", jsonFrom(state.Slot(c, c.declarations[key], armId)), armId)
-                    position += 1
-                }
-            }
+        let next = state.Label(&c)
+        for position, pattern in nodes[arm.children[0]].children { Pattern(pattern, slots[position], next, &c, &planned) }
+        if len(arm.children) == 3 {
+            let guard = nodes[arm.children[1]].children[0]
+            Emit(guard, &c, &planned)
+            state.Emit("JUMP_IF_FALSE", jsonFrom(next), guard, planned, &c)
         }
-        body(c, arm.children[len(arm.children) - 1])
-        state.Emit(c, "JUMP", jsonFrom(end), armId)
-        state.Emit(c, "LABEL", jsonFrom(next), armId)
+        body(arm.children[len(arm.children) - 1], &c, &planned)
+        state.Emit("JUMP", jsonFrom(end), armId, planned, &c)
+        state.Emit("LABEL", jsonFrom(next), armId, planned, &c)
     }
-    state.Emit(c, "TRAP", jsonFrom("Non-exhaustive match reached at runtime"), index)
-    state.Emit(c, "LABEL", jsonFrom(end), index)
+    state.Emit("TRAP", jsonFrom("Non-exhaustive match reached at runtime"), index, planned, &c)
+    state.Emit("LABEL", jsonFrom(end), index, planned, &c)
 }
-fn FunctionValue(c: state.Context, target: int, node: int) {
+fn FunctionValue(target: int, node: int, planned: model.ClosurePlan, c: inout state.Context) {
     let frame = c.frames.functions[target]
     for slot in frame.slots {
-        if slot.kind == "capture" { state.Emit(c, "CAPTURE", jsonFrom(state.Slot(c, slot.symbol, node)), node) }
+        if slot.kind == "capture" {
+            let typ = state.TypeName(slot.typeId, planned.named.checked.resolved)
+            state.Emit("CAPTURE_VALUE", jsonFrom(state.CaptureBinding{slot: state.Slot(slot.symbol, node, planned, &c), type: typ}), node, planned, &c)
+        }
     }
     var op = "FUNCTION"
     if frame.captures > 0 { op = "CLOSURE" }
-    state.Emit(c, op, jsonFrom(string(target)), node)
+    state.Emit(op, jsonFrom(string(target)), node, planned, &c)
 }
-export fn Emit(c: state.Context, index: int) {
+record Propagation { source: string, target: string }
+export fn Statement(index: int, c: inout state.Context, planned: inout model.ClosurePlan) {
     if len(c.diagnostics) > 0 { return }
-    let resolved = c.planned.named.checked.resolved
-    let node = resolved.bound.project.modules[c.frame.module].syntax.nodes[index]
+    let nodes = planned.named.checked.resolved.bound.project.modules[c.frame.module].syntax.nodes
+    let node = nodes[index]
     let children = node.children
-    if node.kind == "literal_int" { state.ConstantValue(c, "int", jsonFrom(parseInt(node.text)), index); return }
-    if node.kind == "literal_float64" { state.ConstantValue(c, "float64", jsonFrom(parseFloat64(node.text)), index); return }
-    if node.kind == "literal_str" { state.ConstantValue(c, "str", jsonFrom(node.text), index); return }
-    if node.kind == "literal_keyword" { state.ConstantValue(c, "bool", jsonFrom(node.text == "true"), index); return }
-    if node.kind == "match" { Match(c, index, Emit); return }
-    if node.kind == "name" {
-        let symbol = state.Reference(c, index)
-        if symbol >= 0 && resolved.bound.symbols[symbol].kind == "builtin" && resolved.bound.symbols[symbol].name == "None" { Enum(c, index, "None", []); return }
+    if node.kind == "match_stmt" { Match(index, Statement, &c, &planned); return }
+    if node.kind == "block" { for child in children { Statement(child, &c, &planned) }; return }
+    if node.kind == "let" || node.kind == "var" {
+        Emit(children[len(children) - 1], &c, &planned)
+        let key = state.Key(c.frame.module, index)
+        if !c.declarations.has(key) { state.Report(index, "Missing declaration binding", planned, &c); return }
+        state.Emit("BIND", jsonFrom(state.Slot(c.declarations[key], index, planned, &c)), index, planned, &c); return
     }
-    if node.kind == "field" && EnumBase(c, children[0]) { Enum(c, index, node.text, []); return }
-    if node.kind == "annotate" { Emit(c, children[0]); return }
+    if node.kind == "assign" {
+        let target = nodes[children[0]]
+        if target.kind == "field" || target.kind == "index" {
+            let container = state.ExpressionType(target.children[0], &c, &planned)
+            if container >= 0 {
+                ValueAssignment(index, &c, &planned); return
+            }
+        }
+        var slot = -1
+        if target.kind == "name" {
+            slot = state.Slot(state.Reference(c, children[0]), index, planned, &c)
+            if slot < 0 { return }
+            if node.text != "=" { state.Emit("LOAD", jsonFrom(slot), index, planned, &c) }
+        } else if target.kind == "field" {
+            Emit(target.children[0], &c, &planned)
+            if node.text != "=" { state.Op("DUP", index, planned, &c); state.Emit("FIELD", jsonFrom(target.text), index, planned, &c) }
+        } else if target.kind == "index" {
+            Emit(target.children[0], &c, &planned); Emit(target.children[1], &c, &planned)
+            if node.text != "=" { state.Op("DUP2", index, planned, &c); state.Op("INDEX", index, planned, &c) }
+        } else { state.Report(index, "Invalid assignment target", planned, &c); return }
+        Emit(children[1], &c, &planned)
+        if node.text != "=" {
+            var op = state.Binary(slice(node.text, 0, 1))
+            var typeId = -1
+            if slot >= 0 { typeId = c.frame.slots[slot].typeId }
+            else { typeId = state.ExpressionType(children[0], &c, &planned) }
+            if op == "ADD" && typeId >= 0 && state.TypeName(typeId, planned.named.checked.resolved) == "str" { op = "CONCAT" }
+            if op == "" { state.Report(index, "Unknown assignment operation", planned, &c); return }
+            if typeId >= 0 && planned.named.checked.resolved.types[typeId].kind == "spatial" { state.Emit("SPATIAL_BINARY", jsonFrom(slice(node.text, 0, 1)), index, planned, &c) }
+            else { state.Op(op, index, planned, &c) }
+        }
+        if target.kind == "name" { state.Emit("STORE", jsonFrom(slot), index, planned, &c) }
+        else if target.kind == "field" { state.Emit("FIELD_SET", jsonFrom(target.text), index, planned, &c) }
+        else { state.Op("INDEX_SET", index, planned, &c) }
+        return
+    }
+    if node.kind == "return" || node.kind == "expression_body" {
+        if len(children) > 0 { Emit(children[0], &c, &planned) } else { state.Unit(index, planned, &c) }
+        state.Op("RETURN", index, planned, &c); return
+    }
+    if node.kind == "expression_stmt" { Emit(children[0], &c, &planned); state.Op("POP", index, planned, &c); return }
+    if node.kind == "if" {
+        let otherwise = state.Label(&c)
+        let end = state.Label(&c)
+        Emit(children[0], &c, &planned); state.Emit("JUMP_IF_FALSE", jsonFrom(otherwise), index, planned, &c)
+        Statement(children[1], &c, &planned); state.Emit("JUMP", jsonFrom(end), index, planned, &c)
+        state.Emit("LABEL", jsonFrom(otherwise), index, planned, &c)
+        if len(children) > 2 { Statement(children[2], &c, &planned) }
+        state.Emit("LABEL", jsonFrom(end), index, planned, &c); return
+    }
+    if node.kind == "while" {
+        let stack = state.Temporary(index, planned, &c)
+        state.Op("STACK_DEPTH", index, planned, &c)
+        state.Emit("STORE", jsonFrom(stack), index, planned, &c)
+        let start = state.Label(&c)
+        let end = state.Label(&c)
+        state.Emit("LABEL", jsonFrom(start), index, planned, &c)
+        Emit(children[0], &c, &planned); state.Emit("JUMP_IF_FALSE", jsonFrom(end), index, planned, &c)
+        c.breaks.append(end); c.continues.append(start); c.loopStacks.append(stack)
+        Statement(children[1], &c, &planned); state.Emit("JUMP", jsonFrom(start), index, planned, &c)
+        state.Emit("LABEL", jsonFrom(end), index, planned, &c)
+        c.breaks.pop(); c.continues.pop(); c.loopStacks.pop(); return
+    }
+    if node.kind == "for" {
+        let stack = state.Temporary(index, planned, &c)
+        state.Op("STACK_DEPTH", index, planned, &c)
+        state.Emit("STORE", jsonFrom(stack), index, planned, &c)
+        let paired = len(children) == 4
+        let iteration = state.Temporary(index, planned, &c)
+        let cursor = state.Temporary(index, planned, &c)
+        var values = -1
+        if paired { values = state.Temporary(index, planned, &c) }
+        let start = state.Label(&c)
+        let advance = state.Label(&c)
+        let end = state.Label(&c)
+        Emit(children[len(children) - 2], &c, &planned)
+        var mode = "single"
+        if paired { mode = "pair" }
+        state.Emit("ITER_SNAPSHOT", jsonFrom(mode), index, planned, &c)
+        if paired { state.Emit("STORE", jsonFrom(values), index, planned, &c) }
+        state.Emit("STORE", jsonFrom(iteration), index, planned, &c)
+        state.ConstantValue("int", jsonFrom(0), index, planned, &c)
+        state.Emit("STORE", jsonFrom(cursor), index, planned, &c)
+        state.Emit("LABEL", jsonFrom(start), index, planned, &c)
+        state.Emit("LOAD", jsonFrom(cursor), index, planned, &c)
+        state.Emit("LOAD", jsonFrom(iteration), index, planned, &c)
+        state.Emit("BUILTIN", jsonFrom("len"), index, planned, &c)
+        state.Op("LT", index, planned, &c)
+        state.Emit("JUMP_IF_FALSE", jsonFrom(end), index, planned, &c)
+        var binding = 0
+        while binding < len(children) - 2 {
+            var sequence = iteration
+            if binding == 1 { sequence = values }
+            state.Emit("LOAD", jsonFrom(sequence), index, planned, &c)
+            state.Emit("LOAD", jsonFrom(cursor), index, planned, &c)
+            state.Op("INDEX", index, planned, &c)
+            let key = state.Key(c.frame.module, children[binding])
+            if !c.declarations.has(key) { state.Report(index, "Missing iteration binding", planned, &c); return }
+            state.Emit("BIND", jsonFrom(state.Slot(c.declarations[key], index, planned, &c)), index, planned, &c)
+            binding += 1
+        }
+        c.breaks.append(end); c.continues.append(advance); c.loopStacks.append(stack)
+        Statement(children[len(children) - 1], &c, &planned)
+        c.breaks.pop(); c.continues.pop(); c.loopStacks.pop()
+        state.Emit("LABEL", jsonFrom(advance), index, planned, &c)
+        state.Emit("LOAD", jsonFrom(cursor), index, planned, &c)
+        state.ConstantValue("int", jsonFrom(1), index, planned, &c)
+        state.Op("ADD", index, planned, &c)
+        state.Emit("STORE", jsonFrom(cursor), index, planned, &c)
+        state.Emit("JUMP", jsonFrom(start), index, planned, &c)
+        state.Emit("LABEL", jsonFrom(end), index, planned, &c)
+        return
+    }
+    if node.kind == "break" || node.kind == "continue" {
+        if len(c.loopStacks) == 0 { state.Report(index, "Loop exit has no operand boundary", planned, &c); return }
+        state.Emit("UNWIND", jsonFrom(c.loopStacks[len(c.loopStacks) - 1]), index, planned, &c)
+        let targets = c.breaks
+        if node.kind == "continue" {
+            if len(c.continues) == 0 { state.Report(index, "Continue has no loop", planned, &c); return }
+            state.Emit("JUMP", jsonFrom(c.continues[len(c.continues) - 1]), index, planned, &c)
+        } else {
+            if len(targets) == 0 { state.Report(index, "Break has no loop", planned, &c); return }
+            state.Emit("JUMP", jsonFrom(targets[len(targets) - 1]), index, planned, &c)
+        }
+        return
+    }
+    if model.NamedCallable(node.kind) { state.Report(index, "Named functions must be declared at module level", planned, &c); return }
+    state.Report(index, "Statement lowering is not implemented: " + node.kind, planned, &c)
+}
+export fn Emit(index: int, c: inout state.Context, planned: inout model.ClosurePlan) {
+    if len(c.diagnostics) > 0 { return }
+
+    let node = planned.named.checked.resolved.bound.project.modules[c.frame.module].syntax.nodes[index]
+    let children = node.children
+    if node.kind == "value_block" {
+        var result = false
+        for child in children {
+            let item = planned.named.checked.resolved.bound.project.modules[c.frame.module].syntax.nodes[child]
+            if item.kind == "block_result" { Emit(item.children[0], &c, &planned); result = true }
+            else { Statement(child, &c, &planned) }
+        }
+        if !result { state.Unit(index, planned, &c) }
+        return
+    }
+    if node.kind == "propagate" {
+        let source = state.ExpressionType(children[0], &c, &planned)
+        let signature = planned.named.checked.resolved.types[c.frame.typeId]
+        let target = types.Substitute(signature.arguments[len(signature.arguments) - 1], c.parameters, c.arguments, &planned.named.checked.resolved)
+        Emit(children[0], &c, &planned)
+        state.Emit("PROPAGATE", jsonFrom(Propagation{source: state.TypeName(source, planned.named.checked.resolved), target: state.TypeName(target, planned.named.checked.resolved)}), index, planned, &c)
+        return
+    }
+    if node.kind == "context_variant" { Enum(index, node.text, [], &c, &planned); return }
+    if node.kind == "inout_argument" {
+        let address = Address(children[0], true, &c, &planned)
+        let typ = state.ExpressionType(children[0], &c, &planned)
+        if typ < 0 { return }
+        for temporary in address.indices { state.Emit("LOAD", jsonFrom(temporary), index, planned, &c) }
+        state.Emit("ACCESS", jsonFrom(AccessOperand{slot: address.root, type: state.TypeName(typ, planned.named.checked.resolved), path: address.path}), index, planned, &c)
+        return
+    }
+    if node.kind == "literal_int" {
+        match parseInt(node.text) {
+            .Ok(value) => { state.ConstantValue("int", jsonFrom(value), index, planned, &c) },
+            .Err(error) => { state.Report(index, error.message, planned, &c) }
+        }
+        return
+    }
+    if node.kind == "literal_float64" {
+        match parseFloat64(node.text) {
+            .Ok(value) => { state.ConstantValue("float64", jsonFrom(value), index, planned, &c) },
+            .Err(error) => { state.Report(index, error.message, planned, &c) }
+        }
+        return
+    }
+    if node.kind == "literal_str" { state.ConstantValue("str", jsonFrom(node.text), index, planned, &c); return }
+    if node.kind == "literal_keyword" { state.ConstantValue("bool", jsonFrom(node.text == "true"), index, planned, &c); return }
+    if node.kind == "match" { Match(index, Emit, &c, &planned); return }
+    if node.kind == "field" && EnumBase(c, children[0], planned) { Enum(index, node.text, [], &c, &planned); return }
+    if node.kind == "annotate" { Emit(children[0], &c, &planned); return }
     if node.kind == "lambda" {
-        for target, frame in c.frames.functions { if frame.closure >= 0 && frame.owner == c.frame.owner && frame.node == index && frame.module == c.frame.module { FunctionValue(c, target, index); return } }
-        state.Report(c, index, "Closure has no function frame"); return
+        for target, frame in c.frames.functions { if frame.closure >= 0 && frame.owner == c.frame.owner && frame.node == index && frame.module == c.frame.module { FunctionValue(target, index, planned, &c); return } }
+        state.Report(index, "Closure has no function frame", planned, &c); return
     }
     if node.kind == "name" || node.kind == "specialize" || node.kind == "field" {
         let targetKey = state.Key(c.frame.owner, index)
-        if has(c.targets, targetKey) { FunctionValue(c, c.targets[targetKey], index); return }
+        if c.targets.has(targetKey) { FunctionValue(c.targets[targetKey], index, planned, &c); return }
         let symbol = state.Reference(c, index)
-        if symbol >= 0 && resolved.bound.symbols[symbol].kind != "builtin" { state.Emit(c, "LOAD", jsonFrom(state.Slot(c, symbol, index)), index); return }
-        if node.kind == "field" { Emit(c, children[0]); state.Emit(c, "FIELD", jsonFrom(node.text), index); return }
+        if symbol >= 0 && planned.named.checked.resolved.bound.symbols[symbol].kind != "builtin" { state.Emit("LOAD", jsonFrom(state.Slot(symbol, index, planned, &c)), index, planned, &c); return }
+        if node.kind == "field" {
+            let receiver = state.ExpressionType(children[0], &c, &planned)
+            var operation = ""
+            if receiver >= 0 && planned.named.checked.resolved.types[receiver].kind == "spatial" {
+                operation = spatial.Property(planned.named.checked.resolved.types[receiver].name, node.text)
+            }
+            Emit(children[0], &c, &planned)
+            if operation != "" { state.Emit("SPACE_OP", jsonFrom(operation), index, planned, &c) }
+            else { state.Emit("FIELD", jsonFrom(node.text), index, planned, &c) }
+            return
+        }
     }
     if node.kind == "unary" {
-        let operand = resolved.bound.project.modules[c.frame.module].syntax.nodes[children[0]]
-        if node.text == "-" && operand.kind == "literal_int" { state.ConstantValue(c, "int", jsonFrom(parseInt("-" + operand.text)), index); return }
-        Emit(c, children[0])
+        let operand = planned.named.checked.resolved.bound.project.modules[c.frame.module].syntax.nodes[children[0]]
+        if node.text == "-" && operand.kind == "literal_int" {
+            match parseInt("-" + operand.text) {
+                .Ok(value) => { state.ConstantValue("int", jsonFrom(value), index, planned, &c) },
+                .Err(error) => { state.Report(index, error.message, planned, &c) }
+            }
+            return
+        }
+        Emit(children[0], &c, &planned)
         var op = "NOT"
         if node.text == "-" { op = "NEG" }
-        state.Op(c, op, index); return
+        state.Op(op, index, planned, &c); return
     }
     if node.kind == "binary" {
-        Emit(c, children[0])
-        if node.text == "&&" || node.text == "and" || node.text == "||" || node.text == "or" {
-            let end = state.Label(c)
-            state.Op(c, "DUP", index)
+        Emit(children[0], &c, &planned)
+        if node.text == "&&" || node.text == "||" {
+            let end = state.Label(&c)
+            state.Op("DUP", index, planned, &c)
             var op = "JUMP_IF_FALSE"
-            if node.text == "||" || node.text == "or" { op = "JUMP_IF_TRUE" }
-            state.Emit(c, op, jsonFrom(end), index); state.Op(c, "POP", index)
-            Emit(c, children[1]); state.Emit(c, "LABEL", jsonFrom(end), index)
+            if node.text == "||" { op = "JUMP_IF_TRUE" }
+            state.Emit(op, jsonFrom(end), index, planned, &c); state.Op("POP", index, planned, &c)
+            Emit(children[1], &c, &planned); state.Emit("LABEL", jsonFrom(end), index, planned, &c)
         } else {
-            Emit(c, children[1])
+            Emit(children[1], &c, &planned)
+            let leftType = state.ExpressionType(children[0], &c, &planned)
+            let rightType = state.ExpressionType(children[1], &c, &planned)
+            if leftType >= 0 && rightType >= 0 && (planned.named.checked.resolved.types[leftType].kind == "spatial" || planned.named.checked.resolved.types[rightType].kind == "spatial") {
+                state.Emit("SPATIAL_BINARY", jsonFrom(node.text), index, planned, &c)
+                return
+            }
             var op = state.Binary(node.text)
             if op == "ADD" {
-                let typeId = state.ExpressionType(c, index)
-                if typeId >= 0 && state.TypeName(resolved, typeId) == "str" { op = "CONCAT" }
+                let typeId = state.ExpressionType(index, &c, &planned)
+                if typeId >= 0 && state.TypeName(typeId, planned.named.checked.resolved) == "str" { op = "CONCAT" }
             }
-            if op == "" { state.Report(c, index, "Unknown binary operation") } else { state.Op(c, op, index) }
+            if op == "" { state.Report(index, "Unknown binary operation", planned, &c) } else { state.Op(op, index, planned, &c) }
         }
         return
     }
     if node.kind == "call" {
-        let callee = resolved.bound.project.modules[c.frame.module].syntax.nodes[children[0]]
-        if callee.kind == "specialize" {
-            let base = state.Reference(c, callee.children[0])
-            if base >= 0 && resolved.bound.symbols[base].kind == "builtin" && resolved.bound.symbols[base].name == "jsonDecode" {
-                Emit(c, children[1])
-                let typeId = state.ExpressionType(c, index)
-                if typeId >= 0 { state.Emit(c, "JSON_DECODE", jsonFrom(state.TypeName(resolved, typeId)), index) }
+        let callee = planned.named.checked.resolved.bound.project.modules[c.frame.module].syntax.nodes[children[0]]
+        let declaration = state.Reference(c, children[0])
+        if declaration >= 0 && planned.named.checked.resolved.bound.symbols[declaration].kind == "flow" {
+            let key = state.Key(c.frame.owner, index)
+            if !c.targets.has(key) { state.Report(index, "Missing flow instance target", planned, &c); return }
+            for argument in slice(children, 1, len(children)) { Emit(argument, &c, &planned) }
+            state.Emit("FLOW_NEW", jsonFrom(string(c.targets[key])), index, planned, &c)
+            return
+        }
+        if callee.kind == "field" && callee.text == "step" {
+            let receiver = callee.children[0]
+            let symbol = state.Reference(c, receiver)
+            if symbol >= 0 && planned.named.checked.resolved.bound.symbols[symbol].kind == "flow_instance" {
+                for argument in slice(children, 1, len(children)) { Emit(argument, &c, &planned) }
+                let child = planned.named.checked.resolved.bound.symbols[symbol].node
+                state.Emit("FLOW_CHILD_STEP", jsonFrom(state.ChildStep{node: child, reference: receiver}), index, planned, &c)
                 return
             }
         }
-        if callee.kind == "field" && EnumBase(c, callee.children[0]) { Enum(c, index, callee.text, slice(children, 1, len(children))); return }
+        if callee.kind == "context_variant" { Enum(index, callee.text, slice(children, 1, len(children)), &c, &planned); return }
+        // A variant qualifier can still name a generic enum. The checked call
+        // carries the concrete result; it is not a runtime method receiver.
+        if callee.kind == "field" && EnumBase(c, callee.children[0], planned) { Enum(index, callee.text, slice(children, 1, len(children)), &c, &planned); return }
+        if callee.kind == "field" && state.Reference(c, children[0]) < 0 {
+            let receiver = state.ExpressionType(callee.children[0], &c, &planned)
+            if receiver >= 0 && planned.named.checked.resolved.types[receiver].kind == "flow_handle" {
+                Emit(callee.children[0], &c, &planned)
+                for argument in slice(children, 1, len(children)) { Emit(argument, &c, &planned) }
+                if callee.text != "step" { state.Report(index, "Unknown flow instance method", planned, &c); return }
+                state.Emit("FLOW_STEP", jsonFrom(state.TypeName(receiver, planned.named.checked.resolved)), index, planned, &c)
+                return
+            }
+            if receiver >= 0 && (planned.named.checked.resolved.types[receiver].kind == "array" || planned.named.checked.resolved.types[receiver].kind == "map") {
+                ValueMethod(index, callee.children[0], callee.text, &c, &planned); return
+            }
+            if receiver >= 0 && planned.named.checked.resolved.types[receiver].kind == "spatial" {
+                let operation = spatial.Method(planned.named.checked.resolved.types[receiver].name,callee.text)
+                if operation == "" { state.Report(index,"Unknown spatial method: " + callee.text,planned,&c); return }
+                Emit(callee.children[0],&c,&planned)
+                for argument in slice(children,1,len(children)) { Emit(argument,&c,&planned) }
+                state.Emit("SPACE_OP",jsonFrom(operation),index,planned,&c)
+                return
+            }
+        }
+        if callee.kind == "specialize" {
+            let base = state.Reference(c, callee.children[0])
+            if base >= 0 && planned.named.checked.resolved.bound.symbols[base].kind == "builtin" && planned.named.checked.resolved.bound.symbols[base].name == "Space" {
+                Emit(children[1], &c, &planned)
+                let typeId = state.ExpressionType(index, &c, &planned)
+                if typeId >= 0 { state.Emit("SPACE_NEW", jsonFrom(state.TypeName(typeId, planned.named.checked.resolved)), index, planned, &c) }
+                return
+            }
+            if base >= 0 && planned.named.checked.resolved.bound.symbols[base].kind == "builtin" && planned.named.checked.resolved.bound.symbols[base].name == "zlibDecompress" {
+                Emit(children[1], &c, &planned); Emit(children[2], &c, &planned)
+                let typeId = state.ExpressionType(index, &c, &planned)
+                if typeId >= 0 { state.Emit("RESULT_BUILTIN", jsonFrom(CheckedBuiltin{name: "zlibDecompress", result: state.TypeName(typeId, planned.named.checked.resolved)}), index, planned, &c) }
+                return
+            }
+            if base >= 0 && planned.named.checked.resolved.bound.symbols[base].kind == "builtin" && planned.named.checked.resolved.bound.symbols[base].name == "jsonDecode" {
+                Emit(children[1], &c, &planned)
+                let typeId = state.ExpressionType(index, &c, &planned)
+                if typeId >= 0 {
+                    if types.AmbiguousJsonOption(typeId, &planned.named.checked.resolved) { state.Report(index, "Cannot decode adjacent Option types", planned, &c); return }
+                    state.Emit("RESULT_DECODE", jsonFrom(CheckedDecode{result: state.TypeName(typeId, planned.named.checked.resolved)}), index, planned, &c)
+                }
+                return
+            }
+        }
         let target = state.Reference(c, children[0])
-        if target >= 0 && resolved.bound.symbols[target].kind == "builtin" {
-            let name = resolved.bound.symbols[target].name
-            if name == "Some" || name == "None" { Enum(c, index, name, slice(children, 1, len(children))); return }
-            if name == "jsonDecode" { state.Report(c, index, "jsonDecode requires explicit type arguments"); return }
-            for argument in slice(children, 1, len(children)) { Emit(c, argument) }
-            if name == "print" { state.Op(c, "PRINT", index); state.Unit(c, index) }
-            else { state.Emit(c, "BUILTIN", jsonFrom(name), index) }
+        if target >= 0 && planned.named.checked.resolved.bound.symbols[target].kind == "builtin" {
+            let name = planned.named.checked.resolved.bound.symbols[target].name
+            if name == "jsonDecode" { state.Report(index, "jsonDecode requires explicit type arguments", planned, &c); return }
+            for argument in slice(children, 1, len(children)) { Emit(argument, &c, &planned) }
+            if name == "print" { state.Op("PRINT", index, planned, &c); state.Unit(index, planned, &c) }
+            else if checkedOperations.Handles(name) {
+                let typeId = state.ExpressionType(index, &c, &planned)
+                if typeId >= 0 { state.Emit("RESULT_BUILTIN", jsonFrom(CheckedBuiltin{name, result: state.TypeName(typeId, planned.named.checked.resolved)}), index, planned, &c) }
+            }
+            else { state.Emit("BUILTIN", jsonFrom(name), index, planned, &c) }
             return
         }
         var direct = -1
         let targetKey = state.Key(c.frame.owner, index)
-        if has(c.targets, targetKey) { direct = c.targets[targetKey] }
-        var typeId = -1
-        if direct >= 0 { FunctionValue(c, direct, index); typeId = c.frames.functions[direct].typeId }
-        else {
-            Emit(c, children[0])
-            let callKey = state.Key(c.frame.module, index)
-            if has(c.callTypes, callKey) { typeId = types.Substitute(resolved, c.callTypes[callKey], c.parameters, c.arguments) }
-            if typeId < 0 { typeId = state.ExpressionType(c, children[0]) }
+        if c.targets.has(targetKey) { direct = c.targets[targetKey] }
+        if direct >= 0 && c.frames.functions[direct].captures == 0 {
+            for argument in slice(children, 1, len(children)) { Emit(argument, &c, &planned) }
+            state.Emit("CALL", jsonFrom(string(direct)), index, planned, &c)
+            return
         }
-        for argument in slice(children, 1, len(children)) { Emit(c, argument) }
-        if typeId >= 0 { state.Emit(c, "INVOKE", jsonFrom(state.TypeName(resolved, typeId)), index) }
+        var typeId = -1
+        if direct >= 0 { FunctionValue(direct, index, planned, &c); typeId = c.frames.functions[direct].typeId }
+        else {
+            Emit(children[0], &c, &planned)
+            let callKey = state.Key(c.frame.module, index)
+            if c.callTypes.has(callKey) { typeId = types.Substitute(c.callTypes[callKey], c.parameters, c.arguments, &planned.named.checked.resolved) }
+            if typeId < 0 { typeId = state.ExpressionType(children[0], &c, &planned) }
+        }
+        for argument in slice(children, 1, len(children)) { Emit(argument, &c, &planned) }
+        if typeId >= 0 { state.Emit("INVOKE", jsonFrom(state.TypeName(typeId, planned.named.checked.resolved)), index, planned, &c) }
         return
     }
     if node.kind == "map" || node.kind == "map_inferred" {
         var start = 1
         if node.kind == "map_inferred" { start = 0 }
         for child in slice(children, start, len(children)) {
-            let entry = resolved.bound.project.modules[c.frame.module].syntax.nodes[child]
-            Emit(c, entry.children[0]); Emit(c, entry.children[1])
+            let entry = planned.named.checked.resolved.bound.project.modules[c.frame.module].syntax.nodes[child]
+            EmitValues(entry.children, &c, &planned)
         }
-        let typeId = state.ExpressionType(c, index)
-        if typeId >= 0 { state.Emit(c, "MAP", jsonFrom(Collection{type: state.TypeName(resolved, typeId), count: (len(children) - start) * 2}), index) }
+        let typeId = state.ExpressionType(index, &c, &planned)
+        if typeId >= 0 { state.Emit("MAP", jsonFrom(Collection{type: state.TypeName(typeId, planned.named.checked.resolved), count: (len(children) - start) * 2}), index, planned, &c) }
         return
     }
     if node.kind == "array" {
-        for child in children { Emit(c, child) }
-        let typeId = state.ExpressionType(c, index)
-        if typeId >= 0 { state.Emit(c, "ARRAY", jsonFrom(Collection{type: state.TypeName(resolved, typeId), count: len(children)}), index) }
+        EmitValues(children, &c, &planned)
+        let typeId = state.ExpressionType(index, &c, &planned)
+        if typeId >= 0 { state.Emit("ARRAY", jsonFrom(Collection{type: state.TypeName(typeId, planned.named.checked.resolved), count: len(children)}), index, planned, &c) }
         return
     }
-    if node.kind == "index" { Emit(c, children[0]); Emit(c, children[1]); state.Op(c, "INDEX", index); return }
-    if node.kind == "construct" {
-        let fields: [string] = []
+    if node.kind == "index" { Emit(children[0], &c, &planned); Emit(children[1], &c, &planned); state.Op("INDEX", index, planned, &c); return }
+    if node.kind == "record_update" {
+        let typeId = state.ExpressionType(index, &c, &planned)
+        if typeId < 0 { return }
+        let base = state.Temporary(index, planned, &c)
+        Emit(children[0], &c, &planned); state.Emit("STORE", jsonFrom(base), index, planned, &c)
+        var replacements: map[string, int] = map[string, int]{}
+        // Preserve source evaluation order independently of schema field order.
         for child in slice(children, 1, len(children)) {
-            let field = resolved.bound.project.modules[c.frame.module].syntax.nodes[child]
-            append(fields, field.text)
-            if len(field.children) > 0 { Emit(c, field.children[0]) }
-            else { state.Emit(c, "LOAD", jsonFrom(state.Slot(c, state.Reference(c, child), child)), child) }
+            let field = planned.named.checked.resolved.bound.project.modules[c.frame.module].syntax.nodes[child]
+            let slot = state.Temporary(child, planned, &c)
+            if len(field.children) > 0 {
+                Emit(field.children[0], &c, &planned)
+            }
+            else { state.Emit("LOAD", jsonFrom(state.Slot(state.Reference(c, child), child, planned, &c)), child, planned, &c) }
+            state.Emit("STORE", jsonFrom(slot), child, planned, &c)
+            replacements[field.text] = slot
         }
-        let typeId = state.ExpressionType(c, index)
-        if typeId >= 0 { state.Emit(c, "RECORD", jsonFrom(RecordValue{type: state.TypeName(resolved, typeId), fields}), index) }
+        var fields: [string] = []
+        for field in types.FieldTypes(typeId, &planned.named.checked.resolved) {
+            fields.append(field.name)
+            if replacements.has(field.name) { state.Emit("LOAD", jsonFrom(replacements[field.name]), index, planned, &c) }
+            else {
+                state.Emit("LOAD", jsonFrom(base), index, planned, &c)
+                state.Emit("FIELD", jsonFrom(field.name), index, planned, &c)
+            }
+        }
+        state.Emit("RECORD", jsonFrom(RecordValue{type: state.TypeName(typeId, planned.named.checked.resolved), fields: fields}), index, planned, &c)
         return
     }
-    state.Report(c, index, "Expression lowering is not implemented: " + node.kind)
+    if node.kind == "construct" {
+        var fields: [string] = []
+        for child in slice(children, 1, len(children)) {
+            let field = planned.named.checked.resolved.bound.project.modules[c.frame.module].syntax.nodes[child]
+            fields.append(field.text)
+            if len(field.children) > 0 {
+                Emit(field.children[0], &c, &planned)
+            }
+            else { state.Emit("LOAD", jsonFrom(state.Slot(state.Reference(c, child), child, planned, &c)), child, planned, &c) }
+        }
+        let typeId = state.ExpressionType(index, &c, &planned)
+        if typeId >= 0 {
+            var op = "RECORD"
+            if planned.named.checked.resolved.types[typeId].kind == "spatial" { op = "SPATIAL_VALUE" }
+            if planned.named.checked.resolved.types[typeId].kind == "spatial" && planned.named.checked.resolved.types[typeId].name == "Transform3" { op = "SPATIAL_TRANSFORM" }
+            state.Emit(op, jsonFrom(RecordValue{type: state.TypeName(typeId, planned.named.checked.resolved), fields: fields}), index, planned, &c)
+        }
+        return
+    }
+    state.Report(index, "Expression lowering is not implemented: " + node.kind, planned, &c)
 }

@@ -1,109 +1,148 @@
 import "model.pxl" as model
 import "spatial_layout.pxl" as layout
 import "pixel_tokens.pxl" as tokens
+import "types.pxl" as types
+import "literal_pixels.pxl" as literals
 
-export record Context { checked: model.ExpressionCheck, module: int, regions: [layout.Region], origins: [int], references: map[int], declarations: map[int], expressions: map[int], calls: map[int], annotations: map[int], symbolIds: map[int], lambdas: [int], imports: map[bool], diagnostics: [model.Diagnostic] }
+export record Context { module: int, regions: [layout.Region], origins: [int], references: map[string, int], declarations: map[string, int], expressions: map[string, int], calls: map[string, int], annotations: map[string, int], symbolIds: map[string, int], tokenIndices: map[int, map[string, int]], bodies: [int], imports: map[string, bool], diagnostics: [model.Diagnostic] }
 export fn Key(module: int, node: int) -> string = string(module) + ":" + string(node)
-export fn Report(c: Context, index: int, message: string) {
-    let source = c.checked.resolved.bound.project.modules[c.module]
+export fn Report(index: int, message: string, checked: model.ExpressionCheck, c: inout Context) {
+    let source = checked.resolved.bound.project.modules[c.module]
     let node = source.syntax.nodes[index]
     var line = 1
     var column = 1
     for token in source.syntax.tokens { if token.start >= node.start { line = token.line; column = token.column; break } }
-    append(c.diagnostics, model.Diagnostic{source: source.path, phase: "pixels", message, start: node.start, end: node.end, line, column})
+    c.diagnostics.append(model.Diagnostic{source: source.path, phase: "pixels", message, start: node.start, end: node.end, line, column})
 }
-export fn Token(colors: [[int]], category: int, name: string) { append(colors, tokens.Symbol(category, name)) }
-export fn Id(c: Context, colors: [[int]], symbol: int, node: int) {
-    if symbol < 0 || symbol > 65535 { Report(c, node, "Pixel symbol identity exceeds 16-bit range"); return }
-    append(colors, tokens.Identifier(symbol))
+export fn Text(value: string, index: int, checked: model.ExpressionCheck, c: inout Context, colors: inout [[int]]) {
+    match literals.Text(value) {
+        .Ok(encoded) => { for color in encoded { colors.append(color) } },
+        .Err(error) => { Report(index, error.message, checked, &c) }
+    }
 }
-export fn ModuleId(c: Context, module: int) -> int {
-    if module == len(c.checked.resolved.bound.project.modules) - 1 { return 0 }
+export fn Token(category: int, name: string, node: int, checked: model.ExpressionCheck, c: inout Context, colors: inout [[int]]) {
+    match tokens.Symbol(category, name, c.tokenIndices) {
+        .Ok(color) => { colors.append(color) },
+        .Err(error) => { Report(node, error.message, checked, &c) }
+    }
+}
+export fn Id(symbol: int, node: int, checked: model.ExpressionCheck, c: inout Context, colors: inout [[int]]) {
+    if symbol < 0 || symbol > 65535 { Report(node, "Pixel symbol identity exceeds 16-bit range", checked, &c); return }
+    match tokens.Identifier(symbol) {
+        .Ok(color) => { colors.append(color) },
+        .Err(error) => { Report(node, error.message, checked, &c) }
+    }
+}
+export fn ModuleId(module: int, checked: model.ExpressionCheck) -> int {
+    if module == len(checked.resolved.bound.project.modules) - 1 { return 0 }
     return module + 1
 }
-export fn Declare(c: Context, node: int) -> int {
+export fn Declare(node: int, checked: model.ExpressionCheck, c: inout Context) -> int {
     let key = string(node)
-    if has(c.declarations, key) { return c.declarations[key] }
-    Report(c, node, "Missing declaration identity")
+    if c.declarations.has(key) { return c.declarations[key] }
+    Report(node, "Missing declaration identity", checked, &c)
     return -1
 }
-export fn Reference(c: Context, node: int) -> int {
+export fn Reference(node: int, checked: model.ExpressionCheck, c: inout Context) -> int {
     let key = string(node)
-    if has(c.references, key) { return c.references[key] }
-    Report(c, node, "Missing reference identity")
+    if c.references.has(key) { return c.references[key] }
+    Report(node, "Missing reference identity", checked, &c)
     return -1
 }
-export fn Row(c: Context, colors: [[int]], parent: int, node: int) -> int {
+export fn Row(colors: [[int]], parent: int, node: int, c: inout Context) -> int {
     let index = len(c.regions)
     if len(colors) == 0 { return parent }
-    append(c.regions, layout.Region{colors, parent}); append(c.origins, node)
+    c.regions.append(layout.Region{colors: colors, parent}); c.origins.append(node)
     return index
 }
-export fn Import(c: Context, module: int, node: int) {
-    if module == c.module || has(c.imports, string(module)) { return }
+export fn Import(module: int, node: int, checked: model.ExpressionCheck, c: inout Context) {
+    if module == c.module || c.imports.has(string(module)) { return }
     c.imports[string(module)] = true
-    let colors: [[int]] = []
-    Token(colors, 64, "import"); Id(c, colors, ModuleId(c, module), node)
-    Row(c, colors, -1, node)
+    var colors: [[int]] = []
+    Token(64, "import", node, checked, &c, &colors); Id(ModuleId(module, checked), node, checked, &c, &colors)
+    Row(colors, -1, node, &c)
 }
-export fn Type(c: Context, colors: [[int]], typeId: int, node: int) {
-    if typeId < 0 { Report(c, node, "Missing pixel type"); return }
-    let typ = c.checked.resolved.types[typeId]
+export fn Type(typeId: int, node: int, checked: model.ExpressionCheck, c: inout Context, colors: inout [[int]]) {
+    if typeId < 0 { Report(node, "Missing pixel type", checked, &c); return }
+    let typ = checked.resolved.types[typeId]
     if typ.kind == "type_parameter" {
-        Token(colors, 96, "parameter"); Token(colors, 80, "(")
-        Id(c, colors, len(c.checked.resolved.bound.symbols) + typeId, node)
-        Token(colors, 80, ")"); return
+        Token(96, "parameter", node, checked, &c, &colors); Token(80, "(", node, checked, &c, &colors)
+        Id(len(checked.resolved.bound.symbols) + typeId, node, checked, &c, &colors)
+        Token(80, ")", node, checked, &c, &colors); return
     }
     if typ.kind == "primitive" {
         var name = typ.name
         if name == "string" { name = "str" }
-        Token(colors, 96, name); return
+        Token(96, name, node, checked, &c, &colors); return
     }
-    if typ.kind == "array" { Type(c, colors, typ.arguments[0], node); Token(colors, 80, "["); Token(colors, 80, "]"); return }
-    if typ.kind == "map" { Token(colors, 96, "map"); Token(colors, 80, "("); Type(c, colors, typ.arguments[0], node); Token(colors, 80, ")"); return }
+    if typ.kind == "inout" {
+        Token(96, "inout", node, checked, &c, &colors); Token(80, "(", node, checked, &c, &colors)
+        Type(typ.arguments[0], node, checked, &c, &colors); Token(80, ")", node, checked, &c, &colors); return
+    }
+    if typ.kind == "array" { Type(typ.arguments[0], node, checked, &c, &colors); Token(80, "[", node, checked, &c, &colors); Token(80, "]", node, checked, &c, &colors); return }
+    if typ.kind == "map" { Token(96, "map", node, checked, &c, &colors); Token(80, "(", node, checked, &c, &colors); Type(typ.arguments[0], node, checked, &c, &colors); Token(80, ",", node, checked, &c, &colors); Type(typ.arguments[1], node, checked, &c, &colors); Token(80, ")", node, checked, &c, &colors); return }
     if typ.kind == "function" {
-        Token(colors, 96, "function"); Token(colors, 80, "(")
+        var marker = "function"
+        if typ.name == "effect" { marker = "effect_function" }
+        Token(96, marker, node, checked, &c, &colors); Token(80, "(", node, checked, &c, &colors)
         var index = 0
         while index < len(typ.arguments) - 1 {
-            if index > 0 { Token(colors, 80, ",") }
-            Type(c, colors, typ.arguments[index], node); index += 1
+            if index > 0 { Token(80, ",", node, checked, &c, &colors) }
+            Type(typ.arguments[index], node, checked, &c, &colors); index += 1
         }
-        Token(colors, 80, ")"); Token(colors, 80, "->"); Token(colors, 80, "(")
-        Type(c, colors, typ.arguments[len(typ.arguments) - 1], node); Token(colors, 80, ")"); return
+        Token(80, ")", node, checked, &c, &colors); Token(80, "->", node, checked, &c, &colors); Token(80, "(", node, checked, &c, &colors)
+        Type(typ.arguments[len(typ.arguments) - 1], node, checked, &c, &colors); Token(80, ")", node, checked, &c, &colors); return
     }
-    if typ.module == -1 && typ.name == "Error" { Token(colors, 96, "Error"); return }
-    if typ.module == -1 && typ.name == "Option" { Token(colors, 96, "Option"); Token(colors, 80, "("); Type(c, colors, typ.arguments[0], node); Token(colors, 80, ")"); return }
-    if (typ.kind == "record" || typ.kind == "enum") && typ.module >= 0 {
-        Import(c, typ.module, node)
+    if typ.kind == "spatial" || typ.kind == "flow_handle" {
+        Token(96, typ.name, node, checked, &c, &colors); Token(80, "(", node, checked, &c, &colors)
+        for position, argument in typ.arguments {
+            if position > 0 { Token(80, ",", node, checked, &c, &colors) }
+            Type(argument, node, checked, &c, &colors)
+        }
+        Token(80, ")", node, checked, &c, &colors); return
+    }
+    if typ.module == -1 && typ.name == "Error" { Token(96, "Error", node, checked, &c, &colors); return }
+    if typ.module == -1 && typ.name == "Result" {
+        Token(96, "Result", node, checked, &c, &colors); Token(80, "(", node, checked, &c, &colors)
+        Type(typ.arguments[0], node, checked, &c, &colors); Token(80, ",", node, checked, &c, &colors)
+        Type(typ.arguments[1], node, checked, &c, &colors); Token(80, ")", node, checked, &c, &colors); return
+    }
+    if typ.module == -1 && typ.name == "Option" { Token(96, "Option", node, checked, &c, &colors); Token(80, "(", node, checked, &c, &colors); Type(typ.arguments[0], node, checked, &c, &colors); Token(80, ")", node, checked, &c, &colors); return }
+    if (typ.kind == "record" || typ.kind == "enum" || typ.kind == "frame") && typ.module >= 0 {
+        Import(typ.module, node, checked, &c)
         var symbol = -1
         let key = Key(typ.module, typ.declaration)
-        if has(c.symbolIds, key) { symbol = c.symbolIds[key] }
-        Token(colors, 96, "record"); Token(colors, 80, "("); Id(c, colors, ModuleId(c, typ.module), node); Token(colors, 80, "."); Id(c, colors, symbol, node)
+        if c.symbolIds.has(key) { symbol = c.symbolIds[key] }
+        var category = "record"
+        if typ.kind == "frame" { category = "frame" }
+        Token(96, category, node, checked, &c, &colors); Token(80, "(", node, checked, &c, &colors); Id(ModuleId(typ.module, checked), node, checked, &c, &colors); Token(80, ".", node, checked, &c, &colors); Id(symbol, node, checked, &c, &colors)
         if len(typ.arguments) > 0 {
-            Token(colors, 80, "[")
-            for index, argument in typ.arguments { if index > 0 { Token(colors, 80, ",") }; Type(c, colors, argument, node) }
-            Token(colors, 80, "]")
+            Token(80, "[", node, checked, &c, &colors)
+            for index, argument in typ.arguments { if index > 0 { Token(80, ",", node, checked, &c, &colors) }; Type(argument, node, checked, &c, &colors) }
+            Token(80, "]", node, checked, &c, &colors)
         }
-        Token(colors, 80, ")"); return
+        Token(80, ")", node, checked, &c, &colors); return
     }
-    Report(c, node, "Type pixel emission is not implemented: " + typ.kind)
+    Report(node, "Type pixel emission is not implemented: " + typ.kind, checked, &c)
 }
-export fn ExpressionType(c: Context, node: int) -> int {
-    if has(c.expressions, string(node)) { return c.expressions[string(node)] }
-    Report(c, node, "Missing expression type for pixels"); return -1
+export fn ExpressionType(node: int, checked: model.ExpressionCheck, c: inout Context) -> int {
+    if c.expressions.has(string(node)) { return c.expressions[string(node)] }
+    Report(node, "Missing expression type for pixels", checked, &c); return -1
 }
 
-export fn Generics(c: Context, colors: [[int]], parameters: [int], node: int) {
+export fn Generics(parameters: [int], node: int, checked: model.ExpressionCheck, c: inout Context, colors: inout [[int]]) {
     if len(parameters) == 0 { return }
-    Token(colors, 80, "[")
+    Token(80, "[", node, checked, &c, &colors)
     for index, parameter in parameters {
-        if index > 0 { Token(colors, 80, ",") }
-        Id(c, colors, len(c.checked.resolved.bound.symbols) + parameter, node)
+        if index > 0 { Token(80, ",", node, checked, &c, &colors) }
+        Id(len(checked.resolved.bound.symbols) + parameter, node, checked, &c, &colors)
+        let constraint = types.Constraint(parameter, checked.resolved)
+        if constraint != "" { Token(80, ":", node, checked, &c, &colors); Token(96, constraint, node, checked, &c, &colors) }
     }
-    Token(colors, 80, "]")
+    Token(80, "]", node, checked, &c, &colors)
 }
-export fn Annotation(c: Context, node: int) -> int {
+export fn Annotation(node: int, checked: model.ExpressionCheck, c: inout Context) -> int {
     let key = Key(c.module, node)
-    if has(c.annotations, key) { return c.annotations[key] }
-    Report(c, node, "Missing type annotation for pixels"); return -1
+    if c.annotations.has(key) { return c.annotations[key] }
+    Report(node, "Missing type annotation for pixels", checked, &c); return -1
 }

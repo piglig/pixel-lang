@@ -1,11 +1,44 @@
 # Layered verification
 
-[中文](../../zh-CN/contributing/verification.md) · [English](verification.md) · [Documentation](../README.md)
+[简体中文](../../zh-CN/contributing/verification.md) · [English](verification.md) · [Documentation](../README.md)
 
-Run commands from the repository root with `.venv/bin/python`. Run output goes to a
-new directory outside the checkout, preventing generated
-reports from changing the tested inputs. A gate returns nonzero for failed tests,
-unverified child evidence, timeouts or changed input fingerprints.
+Choose related, merge or release according to the change. Artifact acceptance also includes isolated installation and real-editor checks; these boundaries are not interchangeable.
+
+
+**On this page**
+
+- [Test organization](#test-organization)
+- [Daily related changes](#daily-related-changes)
+- [Before merge](#before-merge)
+- [Before release](#before-release)
+- [Performance budget](#performance-budget)
+- [Resume completed stages](#resume-completed-stages)
+- [Parallel scheduling](#parallel-scheduling)
+- [GitHub CI and distributions](#github-ci-and-distributions)
+- [Native spatial installation acceptance](#native-spatial-installation-acceptance)
+- [Native compiler distribution](#native-compiler-distribution)
+- [Further reading](#further-reading)
+
+## Test organization
+
+Standard-library effects, readonly access and value isolation live in `tests/test_stdlib_contracts.py`
+and share one service initialization. Generated-compiler gates reuse that class with the candidate
+artifact. `tests/test_collection_callbacks.py` retains an independent sorting oracle, PNG/source
+recovery and replay boundaries instead of duplicating example delivery in another test file.
+
+Name tests after current semantics or subsystems, not language versions, migration
+batches or development phases. Basic syntax belongs in `tests/test_syntax.py`;
+closures, generics, errors, collections and editor behavior have their own topics.
+Cases with the same topic and lifecycle share a class-level compiler service and
+close it during class cleanup. Distinct execution engines and delivery boundaries
+still need separate verification; grouping topics does not remove their assertions.
+When moving cases, update the generated-compiler runner and documentation references,
+and compare test-method inventories and unique test IDs to catch missing cases or
+duplicate collection through imported TestCase classes. Do not retain forwarding modules.
+
+Parser syntax and rejection cases live in `test_selfhost_parser.py` and participate in generated-compiler acceptance.
+`test_parser_backends.py` checks isolated/integrated AST equality, editor recovery and native/VM equivalence.
+It reuses native drivers per class and does not use an older compiler as a migration oracle.
 
 ## Daily related changes
 
@@ -37,7 +70,10 @@ VS Code extension-host acceptance is separately required for releases.
 
 Includes the merge gate, then all three compiler generations with complete
 artifact equality, full uncached compiler PNG delivery/recovery, recovery using
-the generated compiler, and regressions using the PNG-recovered compiler. The
+the generated compiler, complete source recovery/self-compilation, and regressions
+using the PNG-recovered compiler. Source recovery must rebuild the compiler, use
+that compiler to compile the recovered sources again with identical bytecode, and
+execute a smoke program. Recovering executable bytecode alone does not satisfy this gate. The
 installed artifact must equal the accepted stage3 artifact. This command is
 intentionally expensive; daily edits should use the related gate.
 
@@ -89,8 +125,10 @@ runtime/compiler/test input invalidates the whole previous gate.
 
 ## Parallel scheduling
 
-`--workers` applies to both related and merge regression stages. Independent tests
-run in bounded processes; compiler generations retain their dependency order.
+`--workers` applies to both related and merge regression stages. Each test class
+stays contiguous in one process to avoid repeating expensive class setup. The worker
+count is an upper bound; one test class uses one process. Independent classes are
+balanced using historical test costs or case counts. Compiler generations retain their dependency order.
 Performance stages run after regression processes exit.
 
 ```sh
@@ -104,6 +142,8 @@ when comparing worker counts; report wall time and memory together. The sum of w
 peak RSS is a conservative sum of individual high-water marks, not a measurement of
 simultaneous total memory. `--resume-from` is a separate, explicitly recorded mechanism.
 
+Full self-hosted lexer, parser and planning corpora use a native driver bound to the tested bytecode. A batch prepares its driver once; each execution keeps independent resource limits. Small valid and invalid cases retain native/VM differential checks, while the full corpus still checks lexer reference results or AST/planning constraints. Reusing a driver does not reuse test outcomes, and faster validation is not a measurement of Studio compilation latency.
+
 ## GitHub CI and distributions
 
 PRs and main pushes run `.github/workflows/ci.yml`: Linux/Python 3.11 and macOS/Python 3.13 regression, bilingual documentation checks, extension checks, packaging, clean installation and real VS Code acceptance. `full-acceptance.yml` runs full bootstrap and PNG roundtrips separately, manually or weekly. Official GitHub Actions are pinned by commit; logs and evidence are retained as workflow artifacts.
@@ -112,7 +152,139 @@ Manually run `preview-release.yml` for all release checks and downloadable verif
 
 ```sh
 .venv/bin/python scripts/build_distribution.py --output /tmp/pixel-distribution-NEW
-.venv/bin/python tests/clean_install.py /tmp/pixel-distribution-NEW/pixellang-0.9.0a1-py3-none-any.whl --report /tmp/pixel-clean-NEW.json
+.venv/bin/python tests/clean_install.py /tmp/pixel-distribution-NEW/*.whl --report /tmp/pixel-clean-NEW.json
 ```
 
 `config/release.json` explicitly maps Python `0.9.0a1`, extension `0.9.0` and preview tag `v0.9.0-alpha.1`. Deliveries include a wheel, VSIX, package/compiler identity manifest `release.json` and `SHA256SUMS`. Packaging checks both archives for matching licenses, compiler and versions and fails if inputs change. Successful packaging alone does not prove full release acceptance.
+
+## Native spatial installation acceptance
+
+Native spatial acceptance also checks the installed runtime; imports from the
+source checkout are not a substitute:
+
+```sh
+.venv/bin/python scripts/verify_native_install.py \
+  --wheel /tmp/pixel-distribution-NEW/*.whl \
+  --compiler pixellang/artifacts/compiler.json --report /tmp/pixel-native-install-NEW.json
+```
+
+The script creates an isolated environment, checks the installation path and
+compiler hash, and runs neighborhood, weighted-route and multi-file native elevator programs. It emits PNGs,
+deletes the original sources, executes the images, recovers source and changes a
+recovered link weight to verify the new output. This does not replace full compiler
+PNG delivery verification.
+
+Install the VSIX into a separate isolated VS Code profile. The `python` argument
+points to `env/bin/python` in the environment reported by the previous step:
+
+```sh
+node vscode/scripts/test-installed.js \
+  /tmp/pixel-distribution-NEW/pixellang-studio-0.9.0.vsix \
+  /path/to/isolated/env/bin/python pixellang/artifacts/compiler.json \
+  /tmp/pixel-native-vsix-NEW.json
+```
+
+The script verifies the extension's isolated installation path and bundled compiler
+identity, then runs native spatial extension-host acceptance. Coverage includes
+link payload paging, history, unsaved coordinate changes, rejection of stale debug
+views and neighborhood results after restart. Desktop pointer dragging and keyboard
+undo still require separate real interaction acceptance.
+
+Set `PIXELLANG_TEST_SUITE` to select a focused installed-extension suite. Use a
+new report path for each run and run editor suites sequentially, since they share
+the desktop. The VSIX and isolated Python environment remain the inputs above.
+
+| Suite | Coverage |
+| --- | --- |
+| `native-spatial-debug` (default) | Spatial debugging, coordinate edits and restarted execution |
+| `native-graphs` | Unsaved graph edits, expired actions, undo and projection refresh |
+| `native-computed` | Computed positions, source navigation and protection against literal overwrite |
+| `native-format` | Native formatting of unsaved text, missing imports, idempotence and stale responses |
+| `application` | Typed events, recording/replay, event debugging, durable journals |
+
+For example, prefix the installed-test command with
+`PIXELLANG_TEST_SUITE=native-format` and choose a separate formatter report.
+`native-spatial-pointer` waits for actual desktop dragging and keyboard undo;
+starting it does not prove interaction success. Its terminal result must pass.
+
+## Native compiler distribution
+
+The default installed compiler requires a native executable, its source map,
+compiler bytecode and a matching manifest. It fails explicitly if the native
+bundle is absent, changed or built for another platform. Build on each target
+platform with Python, a C11 compiler and zlib development headers available.
+A checked-in bytecode seed can generate a native seed without launching the
+installed compiler service:
+
+```sh
+.venv/bin/python - <<'PYTHON'
+import json
+from pathlib import Path
+from pixellang.native_codegen import build_native
+code = json.loads(Path("pixellang/artifacts/compiler.json").read_text())
+build_native(code, "build/native-seed/compiler", optimization=1, max_depth=1024)
+PYTHON
+.venv/bin/python scripts/verify_native_selfhost.py \
+  --seed pixellang/artifacts/compiler.json \
+  --native-compiler build/native-seed/compiler \
+  --output build/native-acceptance
+.venv/bin/python scripts/stage_native_compiler.py \
+  --acceptance build/native-acceptance --output build/native-bundle
+```
+
+Use new output directories for each acceptance run. The compiler uses
+`optimization=1` with function inlining disabled. This compacts temporary stack
+storage without the expensive code expansion of full optimization. Unoptimized
+compiler builds can exhaust the native stack before reporting deep parser input;
+therefore `optimization=0` is not the compiler acceptance configuration.
+The acceptance command checks successive compiler generations, complete PNG
+export/recovery, recovered compiler self-compilation and a smoke program.
+
+Staging does not activate or publish anything. Back up `pixellang/artifacts`,
+then copy the four files from the verified bundle into it (manifest last). Run
+`scripts/build_distribution.py --output <new-directory>` to build and check the
+platform wheel and VSIX. Complete isolated installation and Studio acceptance
+before publishing. The macOS deployment target comes from the actual executable;
+a local Linux wheel is not a manylinux portability claim.
+
+The separate native text-recovery gate recovers the complete module closure of
+the compiler entry from PNG, compiles the recovered text, builds that compiler
+as machine code, and requires it to reproduce its own recovered sources exactly.
+It must also compile the original source snapshot into the exact canonical candidate
+bytecode (`canonicalCompilerEqual: true`); a self-consistent recovered compiler alone
+is insufficient.
+A source snapshot can also contain independent entry points; they are not part
+of this PNG. The gate discovers the expected closure using the native parser,
+checks all input fingerprints, and runs the recovered compiler smoke in both the
+reference VM and native code, requiring the expected output from each. This is the
+single full compiler source-recovery gate; the reference VM does not repeat the
+entire compiler self-compilation workload. Use a fresh output directory and inspect `summary.json`; only
+`verified: true` confirms success.
+
+```sh
+.venv/bin/python scripts/verify_native_source_recovery.py \
+  --compiler build/native-acceptance/compiler-g3.json \
+  --native-compiler build/native-acceptance/compiler-g3 \
+  --image build/native-acceptance/compiler.png \
+  --sources build/native-acceptance/sources.json \
+  --output build/native-text-recovery
+```
+
+Generated-artifact regression accepts a matching native candidate for its compiler-service
+tests. The release runner supplies this executable for both the installed and
+PNG-recovered compiler. The runner validates the bytecode/executable/map binding
+and records their hashes; it never replaces the candidate with an installed
+compiler. Tests that inspect VM state or directly execute component drivers still
+use the reference VM, so this option does not make the entire suite native.
+
+```sh
+.venv/bin/python scripts/verify_generated_compiler.py \
+  --compiler build/native-acceptance/recovered-compiler.json \
+  --native-compiler build/native-acceptance/recovered-compiler \
+  --sources build/native-acceptance/sources.json \
+  --output build/recovered-regression --workers 4
+```
+
+## Further reading
+
+- [Documentation index](../README.md)

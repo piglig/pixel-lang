@@ -23,6 +23,8 @@ if args.report and args.report.exists():parser.error('Report already exists')
 repo = Path(__file__).resolve().parents[1]
 root = Path(tempfile.mkdtemp(prefix="pixel-clean-toolchain-")).resolve()
 env = dict(os.environ)
+env['PIXELLANG_CACHE_DIR'] = str(root / 'cache')
+env.pop('PIXELLANG_DISABLE_CACHE', None)
 env.pop("PYTHONPATH", None)
 env.pop("VIRTUAL_ENV", None)
 
@@ -95,7 +97,7 @@ probe = root / "stdlib-probe"
 probe.mkdir()
 (probe / "pixel.toml").write_text('format = 1\n[project]\nname = "stdlib-probe"\n')
 (probe / "main.pxl").write_text(
-    'import "std/csv.pxl" as csv\nimport "std/stats.pxl" as stats\nfn main() { print(csv.Parse(input()))\nprint(stats.Summary([2, 4])) }'
+    'import "std/csv.pxl" as csv\nimport "std/stats.pxl" as stats\neffect fn main() { match csv.Parse(input()) { .Ok(rows) => { print(rows) }, .Err(error) => { print(error); assert(false) } }\nmatch stats.Summary([2, 4]) { .Some(summary) => { print(summary) }, .None => { assert(false) } } }'
 )
 probe_build = json.loads(run([pixel, "build", probe]))
 shutil.copy(probe_build["image"], root / "stdlib.png")

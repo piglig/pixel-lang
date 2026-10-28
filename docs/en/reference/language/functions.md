@@ -1,105 +1,116 @@
-# Function values and lexical closures (language 0.8)
+# Functions, effects and closures
 
-[中文](../../../zh-CN/reference/language/functions.md) · [English](functions.md) · [Documentation](../../README.md)
+[简体中文](../../../zh-CN/reference/language/functions.md) · [English](functions.md) · [Documentation](../../README.md)
 
-Function values, anonymous functions and captures are supported in text and semantic
-pixel programs.
-## Types and calls
+Function signatures describe parameters, results, update permissions and external effects. Closures capture creation-time values; calls follow a defined evaluation order.
 
-Function types use `fn(T, U) -> R`; a unit result omits the arrow, as in `fn(int)`.
-Parameter names are not part of type identity. Types are invariant and require exact
-parameter/result matches, including explicit numeric conversions.
 
-`[fn(int) -> string]` is an array of functions; `fn(int) -> [string]` returns an
-array. Functions may accept or return other functions. Named functions, qualified
-references such as `library.transform`, and explicitly specialized references such
-as `library.identity[int]` can be stored or passed as callbacks. Specialization and
-module access checks are the same as for direct calls. Private caller types remain
-usable as arguments to public generic functions.
+**On this page**
 
-Calls evaluate the callable expression first, then arguments left to right, exactly
-once each. Returned functions (`choose()(42)`), record fields and indexed functions
-can be called directly. A failed target read prevents argument effects. Changing a
-stored function during argument evaluation does not replace the selected target.
-Lexical locals shadow module aliases for field selection and invocation.
+- [Contract and interface](#contract-and-interface)
+- [Function types and permissions](#function-types-and-permissions)
+- [Lambdas and value captures](#lambdas-and-value-captures)
+- [Evaluation, delivery, and debugging](#evaluation-delivery-and-debugging)
+- [Further reading](#further-reading)
 
-## Anonymous functions and captures
+## Contract and interface
 
-Anonymous functions have named parameters and either a block or an expression
-body. Parameter annotations may be omitted when a function context supplies them.
-An omitted result is inferred from context or consistent return expressions; a
-non-unit function must return on every path. Named function signatures remain
-explicit. Examples: `fn(x) = x + 1` in an `fn(int) -> int` context, and
-`collections.Map(values, fn(x) = string(x))`. Missing input evidence is an error,
-not a dynamic type. Generic checking uses callback results as output constraints.
+The development compiler uses one `fn` family. Plain functions have no external
+effects; I/O and runtime instance creation or advancement require `effect fn`.
+Legacy `component` declarations and function types are rejected.
 
-An explicitly annotated closure remains valid:
+```pixellang
+fn Twice(value: int) -> int = value * 2
+effect fn main() { print(Twice(21)) }
+```
 
-```go
-fn counter() -> fn() -> int {
+## Function types and permissions
+
+Write function types as `fn(T, U) -> R`. A unit return may omit the arrow, as in
+`fn(int)`. Effect-permitting function types use `effect fn(T) -> R`. Parameter
+names do not affect type identity. `effect` is a modifier only immediately before
+`fn`; it remains available as an ordinary identifier elsewhere.
+
+Functions without external effects can satisfy effect-permitting callback types,
+not vice versa; `inout` access modes must still match.
+Parameters are contravariant and results covariant. Containers and nominal type
+arguments do not acquire implicit conversions through that rule.
+
+```pixellang
+fn Apply(value: int, operation: fn(int) -> int) -> int = operation(value)
+effect fn Report(value: int) { print(value) }
+effect fn Visit(value: int, operation: effect fn(int)) { operation(value) }
+effect fn main() { Visit(Apply(3, Twice), Report) }
+```
+
+The declared contract governs calls, even when an effectful function currently has
+an empty body. An effectful caller cannot grant I/O permission to a callee without `effect`.
+Variables, record callbacks, generics, and dynamic calls retain effect information.
+The runtime also enforces call boundaries.
+
+Effect violations are diagnosed at the definition that breaks its contract, without inferring implementation effects into callers. Calls use the expression's static function type: even `let alias: effect fn() = pure` requires effect permission when called. Successfully checked functions with unchanged semantic dependencies reuse effect validation.
+
+Local `var` updates are not external effects. Explicit writeback uses a separate
+parameter access permission:
+
+```pixellang
+fn Increment(value: inout int) { value += 1 }
+effect fn main() {
     var count = 0
-    return fn() -> int {
-        count += 1
-        return count
-    }
+    Increment(&count)
+    print(count)
 }
 ```
 
-Closures capture lexical bindings. Closures capturing the same mutable binding
-observe assignments by the defining function and sibling closures. Immutable
-bindings cannot be rebound, but referenced objects retain shared mutable identity.
-Captures remain alive after the defining call returns. Nested closures carry access
-to required outer bindings transitively; separate calls create separate environments.
+Function types retain the mode, for example `fn(inout int)`. Both the parameter and
+call argument must declare access explicitly. Access cannot escape or be captured.
+Overlapping writes through the same root variable are rejected; separate variables
+can be written independently. `&` is restricted to call arguments, not a reference value.
 
-Every entry into a declaration creates a fresh binding. For iteration, pattern and
-catch bindings are also fresh on each entry. A closure escaping one iteration keeps
-that iteration's binding. Recursive closures can be formed by assigning a lambda to
-an already initialized mutable function binding; a declaration's own name is not
-available in its initializer.
+`fn` guarantees no external effects, not the absence of caller-visible changes.
+A function with `inout` parameters writes back to its arguments. The absence of
+`effect` alone does not justify memoizing, merging, or reordering calls. Local value
+updates leave caller values unchanged; explicit parameter updates must be preserved.
 
-Function values have no equality or JSON representation. Equality and JSON decoding
-are rejected by checking; JSON encoding raises json.unsupported_type, including
-functions encountered inside collections or records.
+## Lambdas and value captures
 
-## Pixels, cells and replay
+Lambdas use `fn(x: T) -> R { ... }` or `fn(x: T) = expression`. Context may provide
+parameter types, as in `fn(x) = x + 1`; insufficient evidence is an error. Effectful
+lambdas explicitly use `effect fn(...)`.
 
-Semantic pixels encode function types, anonymous-function references and separate
-body regions. Decoding reconstructs nested anonymous ASTs; duplicate, missing,
-reused and unreferenced body identities are rejected. Capture requirements are
-recomputed from lexical references, independent of authoring metadata.
+Every closure captures the values present at creation, and captures are readonly.
+Later outer-variable updates do not alter existing closures:
 
-`captures.py` assigns declaration identities and propagates transitive captures.
-The checker resolves capture types, mutability and slots. Each concrete anonymous
-body has a checked VM function with explicit parameter and captured-cell signatures.
+```pixellang
+effect fn main() {
+    var offset = 2
+    let add = fn(value: int) -> int = value + offset
+    offset = 10
+    print(add(3)) // 5
+}
+```
 
-CAPTURE boxes a binding once and reuses its cell. BIND enters a fresh binding; STORE
-updates the existing cell, and LOAD reads its value. CLOSURE constructs a callable
-with traced captured cells. INVOKE passes those same cells to the anonymous body.
-GC follows both callable environments and cell contents, including cycles. Machine
-snapshots preserve identities; debugger value traversal unwraps cells.
+Nested closures and individual loop iterations follow the same rule. Use flow for
+persistent instance state. Captures do not provide hidden shared mutation. Ordinary
+value captures need no permission conversion; inout access cannot be captured.
+Implementation progress is tracked in the [design principles](../../internals/design.md).
 
-The internal type spelling uses a delimited result (`fn(int)->(str)[]`). Pixel types
-likewise delimit the result to distinguish outer arrays from result arrays. Unit is
-explicit in pixels and omitted in authoring display.
+## Evaluation, delivery, and debugging
 
-## Related tests
+Evaluate the callable first, then each argument once in source order. Replacing
+the variable that held the callable while evaluating arguments does not replace
+the target already selected for this call.
 
-- `tests/test_function_types_v6.py`: text and pixel type roundtrips.
-- `tests/test_function_values_v6.py`: named/specialized callbacks, call order,
-  module shadowing, source recovery and negative type/access checks.
-- `tests/test_captures_v6.py`: lexical identities and transitive capture analysis.
-- `tests/test_capture_cells_v6.py`: cell sharing, fresh bindings, GC and checkpoints.
-- `tests/test_closures_v6.py`: escaped counters, independent environments, siblings,
-  iteration bindings, nested generic captures, GC, recursion, immutable bindings,
-  PNG-only execution, every-step replay, navigation and debug locals.
+PNG preserves function types, effects, lambda body identities, and capture relationships.
+Recovered source rechecks the same contracts, including effect permissions on its entry
+wrapper. Bytecode uses `CAPTURE_VALUE` to create readonly capture cells; legacy `CAPTURE`
+is rejected. Checkpoints and replay preserve captured values rather than rereading
+outer bindings to reconstruct a closure.
 
+Relevant tests include `test_function_effect_runtime.py`, `test_native_function_effects.py`,
+`test_value_captures.py`, `test_native_value_captures.py`, and `test_native_inout_png.py`.
 
+## Further reading
 
-Generic callback algorithms are now available in `std/collections.pxl`; see
-[collections](collections.md) and the runnable callback-analysis example.
-
-Closure environment views now hide internal function identifiers and label captures
-with source names. Paging and reverse-time views retain reference paths. Nested
-anonymous-function formatting is indented and idempotent. Additional tests reject
-malformed capture schemas, direct calls that bypass environments, captured entries,
-and missing or unreferenced lambda body regions.
+- [Documentation index](../../README.md)
+- [Language overview](overview.md)

@@ -1,0 +1,276 @@
+import "type_cache_model.pxl" as cacheModel
+import "model.pxl" as model
+import "types.pxl" as types
+import "checker_state.pxl" as checkerState
+import "source_identity.pxl" as sourceIdentity
+
+// Persistent identities never contain executable arena indices. Nested syntax
+// belongs to its top-level declaration and is addressed by its child path.
+export record Identity { nodes: map[string, string], modules: map[string, int], locations: map[string, model.NodeType], symbols: map[string, int], symbolKeys: [string], definitions: map[string, int] }
+export record CachedCall { node: string, symbol: string, kind: string, arguments: [int], functionType: int }
+export record CachedPlan { plan: model.TypedFlow, nodes: map[string, string], symbols: map[string, string] }
+export record Entry { plans: [CachedPlan], fingerprint: [string], dependencies: [string], types: [cacheModel.CachedType], expressions: [cacheModel.CachedValue], symbols: [cacheModel.CachedValue], calls: [CachedCall] }
+export record Snapshot { contracts: map[string, [string]], entries: map[string, Entry] }
+export record Reuse { previous: Snapshot, current: Snapshot, identity: Identity, dependencies: [string], hits: int, checked: int }
+record Encoding { ids: map[string, int], values: [cacheModel.CachedType] }
+export fn Empty() -> Snapshot = Snapshot{contracts: map[string, [string]]{}, entries: map[string, Entry]{}}
+fn Relocated(id: int, relocated: [int]) -> int { if id < 0 { return -1 }; return relocated[id] }
+fn SymbolKey(id: int, identity: Identity) -> string { if id < 0 { return "" }; return identity.symbolKeys[id] }
+fn NodeKey(module: int, node: int) -> string = string(module) + ":" + string(node)
+export fn Disabled() -> Reuse = Reuse{previous: Empty(), current: Empty(), identity: Identity{nodes: map[string, string]{}, modules: map[string, int]{}, locations: map[string, model.NodeType]{}, symbols: map[string, int]{}, symbolKeys: [], definitions: map[string, int]{}}, dependencies: [], hits: 0, checked: 0}
+export fn WantLocations(previous: Snapshot, wanted: inout map[string, bool]) {
+    for key, entry in previous.entries {
+        for typ in entry.types { if typ.origin != "" { wanted[typ.origin] = true } }
+        for value in entry.expressions { wanted[value.key] = true }
+        for call in entry.calls { wanted[call.node] = true }
+        for plan in entry.plans { for old, node in plan.nodes { wanted[node] = true } }
+    }
+}
+export fn Begin(previous: Snapshot, resolved: model.ResolvedTypes, sourceIndex: sourceIdentity.Index) -> Reuse {
+    var identity = Identity{nodes: map[string, string]{}, modules: map[string, int]{}, locations: map[string, model.NodeType]{}, symbols: map[string, int]{}, symbolKeys: [], definitions: map[string, int]{}}
+    identity.nodes = sourceIndex.nodes
+    identity.locations = sourceIndex.locations
+    for module, source in resolved.bound.project.modules { identity.modules[source.path] = module }
+    identity.definitions = resolved.definitionTypes
+    for id, symbol in resolved.bound.symbols {
+        var key = "builtin:" + symbol.name
+        if symbol.module >= 0 {
+            let node = NodeKey(symbol.module, symbol.node)
+            key = "missing:" + node
+            if identity.nodes.has(node) { key = identity.nodes[node] }
+        }
+        identity.symbolKeys.append(key)
+        identity.symbols[key] = id
+    }
+    return Reuse{previous, current: Empty(), identity, dependencies: [], hits: 0, checked: 0}
+}
+fn Syntax(module: int, node: int, header: bool, project: model.Project, parts: inout [string]) {
+    let item = project.modules[module].syntax.nodes[node]
+    if header && (item.kind == "block" || item.kind == "expression_body") { return }
+    parts.append(item.kind); parts.append(item.text); parts.append(string(len(item.children)))
+    for child in item.children { Syntax(module, child, header, project, &parts) }
+}
+fn Origin(typ: model.TypeInfo, identity: Identity) -> string {
+    if typ.module < 0 { return "" }
+    return identity.nodes[NodeKey(typ.module, typ.declaration)]
+}
+fn Encode(id: int, resolved: model.ResolvedTypes, identity: Identity, encoding: inout Encoding) -> int {
+    if id < 0 { return -1 }
+    if encoding.ids.has(string(id)) { return encoding.ids[string(id)] }
+    let typ = resolved.types[id]
+    var arguments: [int] = []
+    for argument in typ.arguments { arguments.append(Encode(argument, resolved, identity, &encoding)) }
+    let index = len(encoding.values)
+    encoding.values.append(cacheModel.CachedType{kind: typ.kind, name: typ.name, origin: Origin(typ, identity), arguments})
+    encoding.ids[string(id)] = index
+    return index
+}
+fn Contract(module: int, node: int, resolved: model.ResolvedTypes, reuse: inout Reuse) {
+    let key = reuse.identity.nodes[NodeKey(module, node)]
+    if !reuse.current.contracts.has(key) {
+        var parts: [string] = []
+        Syntax(module, node, true, resolved.bound.project, &parts)
+        reuse.current.contracts[key] = parts
+    }
+    reuse.dependencies.append(key)
+}
+fn Dependency(id: int, resolved: model.ResolvedTypes, reuse: inout Reuse, seen: inout map[string, bool], parts: inout [string]) {
+    if id < 0 || seen.has(string(id)) { return }
+    seen[string(id)] = true
+    let typ = resolved.types[id]
+    parts.append(typ.kind); parts.append(typ.name)
+    if typ.module >= 0 {
+        parts.append(Origin(typ, reuse.identity))
+        Contract(typ.module, typ.declaration, resolved, &reuse)
+        // Instantiated nominals carry their schema on the generic definition.
+        let definition = NodeKey(typ.module, typ.declaration)
+        if reuse.identity.definitions.has(definition) && reuse.identity.definitions[definition] != id {
+            Dependency(reuse.identity.definitions[definition], resolved, &reuse, &seen, &parts)
+        }
+    }
+    for argument in typ.arguments { Dependency(argument, resolved, &reuse, &seen, &parts) }
+    for field in typ.fields { parts.append(field.name); Dependency(field.typeId, resolved, &reuse, &seen, &parts) }
+    for variant in typ.variants {
+        parts.append(variant.name)
+        for field in variant.fields { parts.append(field.name); Dependency(field.typeId, resolved, &reuse, &seen, &parts) }
+    }
+}
+fn Owned(module: int, node: int, root: string, identity: Identity) -> bool {
+    let key = NodeKey(module, node)
+    if !identity.nodes.has(key) { return false }
+    let value = identity.nodes[key]
+    return value == root || (len(value) > len(root) && slice(value, 0, len(root) + 1) == root + "/")
+}
+fn OwnedNodes(module: int, node: int, resolved: model.ResolvedTypes, output: inout [int]) {
+    output.append(node)
+    for child in resolved.bound.project.modules[module].syntax.nodes[node].children { OwnedNodes(module, child, resolved, &output) }
+}
+export fn Fingerprint(module: int, node: int, c: checkerState.State, resolved: model.ResolvedTypes, reuse: inout Reuse) -> [string] {
+    let root = reuse.identity.nodes[NodeKey(module, node)]
+    var parts: [string] = []
+    reuse.dependencies = []
+    var seen: map[string, bool] = map[string, bool]{}
+    var nodes: [int] = []
+    OwnedNodes(module, node, resolved, &nodes)
+    let syntax = resolved.bound.project.modules[module].syntax.nodes
+    for current in nodes {
+        let item = syntax[current]
+        parts.append(item.kind); parts.append(item.text); parts.append(string(len(item.children)))
+    }
+    for current in nodes {
+        let key = NodeKey(module, current)
+        if c.references.has(key) {
+            let id = c.references[key]
+            let symbol = resolved.bound.symbols[id]
+            parts.append(reuse.identity.symbolKeys[id])
+            parts.append(symbol.kind); parts.append(string(symbol.mutable)); parts.append(string(symbol.exported))
+            if symbol.module != module || !Owned(module, symbol.node, root, reuse.identity) {
+                Dependency(symbol.typeId, resolved, &reuse, &seen, &parts)
+                if symbol.module >= 0 { Contract(symbol.module, symbol.node, resolved, &reuse) }
+            }
+        }
+        if c.annotations.has(key) { Dependency(c.annotations[key], resolved, &reuse, &seen, &parts) }
+    }
+    return parts
+}
+export fn Take(module: int, node: int, fingerprint: [string], c: inout checkerState.State, resolved: inout model.ResolvedTypes, reuse: inout Reuse, flows: inout [model.TypedFlow]) -> bool {
+    let root = reuse.identity.nodes[NodeKey(module, node)]
+    if !reuse.previous.entries.has(root) { reuse.checked += 1; return false }
+    let entry = reuse.previous.entries[root]
+    if entry.fingerprint != fingerprint { reuse.checked += 1; return false }
+    for key in entry.dependencies {
+        if !reuse.previous.contracts.has(key) || !reuse.current.contracts.has(key) || reuse.previous.contracts[key] != reuse.current.contracts[key] { reuse.checked += 1; return false }
+    }
+    // Validate all external identities before modifying the current result.
+    for typ in entry.types { if typ.origin != "" && !reuse.identity.locations.has(typ.origin) { reuse.checked += 1; return false } }
+    for value in entry.expressions { if !reuse.identity.locations.has(value.key) { reuse.checked += 1; return false } }
+    for value in entry.symbols { if !reuse.identity.symbols.has(value.key) { reuse.checked += 1; return false } }
+    for call in entry.calls {
+        if !reuse.identity.locations.has(call.node) || (call.symbol != "" && !reuse.identity.symbols.has(call.symbol)) { reuse.checked += 1; return false }
+    }
+    for cached in entry.plans {
+        for old, key in cached.nodes { if !reuse.identity.locations.has(key) { reuse.checked += 1; return false } }
+        for old, key in cached.symbols { if !reuse.identity.symbols.has(key) { reuse.checked += 1; return false } }
+    }
+    var relocated: [int] = []
+    for typ in entry.types {
+        var arguments: [int] = []
+        for argument in typ.arguments { arguments.append(Relocated(argument, relocated)) }
+        var owner = -1
+        var declaration = -1
+        if typ.origin != "" { let location = reuse.identity.locations[typ.origin]; owner = location.module; declaration = location.node }
+        relocated.append(types.Reintern(typ.kind, typ.name, owner, declaration, arguments, &resolved))
+    }
+    for value in entry.expressions {
+        let location = reuse.identity.locations[value.key]
+        c.expressions.append(model.NodeType{module: location.module, node: location.node, typeId: Relocated(value.typeId, relocated)})
+    }
+    for value in entry.symbols { checkerState.AssignSymbol(reuse.identity.symbols[value.key], Relocated(value.typeId, relocated), &resolved) }
+    for call in entry.calls {
+        let location = reuse.identity.locations[call.node]
+        var arguments: [int] = []
+        for argument in call.arguments { arguments.append(Relocated(argument, relocated)) }
+        var symbol = -1
+        if call.symbol != "" { symbol = reuse.identity.symbols[call.symbol] }
+        c.calls.append(model.CallResolution{module: location.module, node: location.node, symbol, kind: call.kind, arguments, functionType: Relocated(call.functionType, relocated)})
+    }
+    for cached in entry.plans { flows.append(RestorePlan(module, cached, relocated, reuse.identity)) }
+    reuse.current.entries[root] = entry
+    reuse.hits += 1
+    return true
+}
+export fn Save(module: int, node: int, fingerprint: [string], firstExpression: int, firstCall: int, c: checkerState.State, resolved: model.ResolvedTypes, plans: [model.TypedFlow], reuse: inout Reuse) {
+    let root = reuse.identity.nodes[NodeKey(module, node)]
+    var encoding = Encoding{ids: map[string, int]{}, values: []}
+    var expressions: [cacheModel.CachedValue] = []
+    var symbols: [cacheModel.CachedValue] = []
+    var calls: [CachedCall] = []
+    for value in slice(c.expressions, firstExpression, len(c.expressions)) {
+        expressions.append(cacheModel.CachedValue{key: reuse.identity.nodes[NodeKey(value.module, value.node)], typeId: Encode(value.typeId, resolved, reuse.identity, &encoding)})
+    }
+    var nodes: [int] = []
+    OwnedNodes(module, node, resolved, &nodes)
+    for current in nodes {
+        let key = NodeKey(module, current)
+        if c.declarations.has(key) {
+            let id = c.declarations[key]
+            symbols.append(cacheModel.CachedValue{key: reuse.identity.symbolKeys[id], typeId: Encode(resolved.bound.symbols[id].typeId, resolved, reuse.identity, &encoding)})
+        }
+    }
+    for call in slice(c.calls, firstCall, len(c.calls)) {
+        var arguments: [int] = []
+        for argument in call.arguments { arguments.append(Encode(argument, resolved, reuse.identity, &encoding)) }
+        calls.append(CachedCall{node: reuse.identity.nodes[NodeKey(call.module, call.node)], symbol: SymbolKey(call.symbol, reuse.identity), kind: call.kind, arguments, functionType: Encode(call.functionType, resolved, reuse.identity, &encoding)})
+    }
+    var cachedPlans: [CachedPlan] = []
+    for plan in plans {
+        var keys = map[string, string]{}
+        for current in nodes { keys[string(current)] = reuse.identity.nodes[NodeKey(module, current)] }
+        var targets = map[string, string]{}
+        for instance in plan.instances { targets[string(instance.symbol)] = SymbolKey(instance.symbol, reuse.identity) }
+        cachedPlans.append(CachedPlan{plan: EncodePlan(plan, resolved, reuse.identity, &encoding), nodes: keys, symbols: targets})
+    }
+    reuse.current.entries[root] = Entry{plans: cachedPlans, fingerprint, dependencies: reuse.dependencies, types: encoding.values, expressions, symbols, calls}
+}
+
+
+fn EncodeConstant(value: model.FlowConstant, resolved: model.ResolvedTypes, identity: Identity, encoding: inout Encoding) -> model.FlowConstant {
+    var children: [model.FlowConstant] = []
+    for child in value.children { children.append(EncodeConstant(child, resolved, identity, &encoding)) }
+    return value with { typeId: Encode(value.typeId, resolved, identity, &encoding), children }
+}
+fn EncodePlan(plan: model.TypedFlow, resolved: model.ResolvedTypes, identity: Identity, encoding: inout Encoding) -> model.TypedFlow {
+    var initializers = map[string, model.FlowConstant]{}
+    for key, value in plan.initializers { initializers[key] = EncodeConstant(value, resolved, identity, &encoding) }
+    var instances: [model.FlowInstance] = []
+    for instance in plan.instances {
+        var inputs: [model.TypeField] = []
+        for field in instance.inputs { inputs.append(field with { typeId: Encode(field.typeId, resolved, identity, &encoding) }) }
+        instances.append(instance with { inputs, result: Encode(instance.result, resolved, identity, &encoding) })
+    }
+    return plan with { initializers, instances }
+}
+fn Node(id: int, nodes: map[string, int]) -> int { if id < 0 { return id }; return nodes[string(id)] }
+fn Nodes(values: [int], nodes: map[string, int]) -> [int] {
+    var output: [int] = []
+    for value in values { output.append(Node(value, nodes)) }
+    return output
+}
+fn RestoreConstant(value: model.FlowConstant, nodes: map[string, int], relocated: [int]) -> model.FlowConstant {
+    var children: [model.FlowConstant] = []
+    for child in value.children { children.append(RestoreConstant(child, nodes, relocated)) }
+    return value with { node: Node(value.node, nodes), typeId: Relocated(value.typeId, relocated), children }
+}
+fn RestorePlan(module: int, cached: CachedPlan, relocated: [int], identity: Identity) -> model.TypedFlow {
+    var nodes = map[string, int]{}
+    for old, key in cached.nodes { nodes[old] = identity.locations[key].node }
+    let plan = cached.plan
+    let old = plan.graph
+    var dependencies: [model.FlowDependency] = []
+    for edge in old.dependencies { dependencies.append(model.FlowDependency{source: Node(edge.source, nodes), target: Node(edge.target, nodes), reference: Node(edge.reference, nodes)}) }
+    let graph = old with { declaration: Node(old.declaration, nodes), values: Nodes(old.values, nodes), dependencies,
+        instances: Nodes(old.instances, nodes), states: Nodes(old.states, nodes), updates: Nodes(old.updates, nodes),
+        output: Node(old.output, nodes), order: Nodes(old.order, nodes) }
+    var initializers = map[string, model.FlowConstant]{}
+    for key, value in plan.initializers { initializers[string(nodes[key])] = RestoreConstant(value, nodes, relocated) }
+    var instances: [model.FlowInstance] = []
+    for instance in plan.instances {
+        var inputs: [model.TypeField] = []
+        for field in instance.inputs { inputs.append(field with { typeId: Relocated(field.typeId, relocated) }) }
+        instances.append(instance with { node: Node(instance.node, nodes), symbol: identity.symbols[cached.symbols[string(instance.symbol)]], inputs, result: Relocated(instance.result, relocated) })
+    }
+    return plan with { module, graph, initializers, instances }
+}
+fn ConstantSize(value: model.FlowConstant) -> int {
+    var result = 1 + len(value.fields)
+    for child in value.children { result += ConstantSize(child) }
+    return result
+}
+export fn PlanSize(cached: CachedPlan) -> int {
+    let plan = cached.plan
+    let graph = plan.graph
+    var result = len(cached.nodes) + len(cached.symbols) + len(graph.values) + len(graph.dependencies) + len(graph.instances) + len(graph.states) + len(graph.updates) + len(graph.order) + 1
+    for key, value in plan.initializers { result += ConstantSize(value) }
+    for instance in plan.instances { result += 1 + len(instance.inputs) }
+    return result
+}

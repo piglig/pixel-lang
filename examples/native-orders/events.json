@@ -1,0 +1,4 @@
+[
+  {"tick": 1, "input": {"variant": "Pay", "fields": {"cents": 1299}}},
+  {"tick": 2, "input": {"variant": "Ship", "fields": {"tracking": "PK-001"}}}
+]

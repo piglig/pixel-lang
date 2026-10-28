@@ -1,29 +1,57 @@
-// Copy the outer array; referenced elements retain their identity.
-export fn Copy[T](values: [T]) -> [T] = slice(values, 0, len(values))
+import "error.pxl" as errors
+// Equality includes complete values, not allocation identities.
+export fn Contains[T: Equatable](values: [T], target: T) -> bool {
+    for value in values { if value == target { return true } }
+    return false
+}
 
-// Repeated mutable values share the same object, as ordinary assignment does.
-export fn Repeat[T](value: T, count: int) -> [T] {
-    if count < 0 { fail("repeat count must be nonnegative") }
-    let result: [T] = []
-    var index = 0
-    while index < count {
-        append(result, value)
-        index += 1
+// Preserve first occurrence order. No hashing contract is implied.
+export fn Unique[T: Equatable](values: [T]) -> [T] {
+    var result: [T] = []
+    for value in values {
+        var present = false
+        for existing in result { if existing == value { present = true; break } }
+        if !present { result.append(value) }
     }
     return result
 }
 
+// Stable natural ordering for numbers and strings, with isolated results.
+export fn Sorted[T: Ordered](values: [T]) -> [T] {
+    return SortedBy::[T](values, fn(left: T, right: T) = left < right)
+}
+
+// An explicit initial value defines the empty result and fixes the numeric type.
+export fn Sum[T: Numeric](values: [T], initial: T) -> T {
+    var total = initial
+    for value in values { total += value }
+    return total
+}
+
+// Repeated positions share values; local edits preserve the other positions.
+export fn Repeat[T](value: T, count: int) -> Result[[T], Error] {
+    if count < 0 { return .Err(errors.New("collection.negative_count", "Repeat count must be nonnegative", "Repeat", "")) }
+    var result: [T] = []
+    let snapshot = value
+    var index = 0
+    while index < count {
+        result.append(snapshot)
+        index += 1
+    }
+    return .Ok(result)
+}
+
 // Visit the entry snapshot in order; return a fresh outer array.
 export fn Map[T, U](values: [T], transform: fn(T) -> U) -> [U] {
-    let result: [U] = []
-    for value in values { append(result, transform(value)) }
+    var result: [U] = []
+    for value in values { result.append(transform(value)) }
     return result
 }
 
 export fn Filter[T](values: [T], predicate: fn(T) -> bool) -> [T] {
-    let result: [T] = []
+    var result: [T] = []
     for value in values {
-        if predicate(value) { append(result, value) }
+        if predicate(value) { result.append(value) }
     }
     return result
 }
@@ -35,21 +63,21 @@ export fn Fold[T, A](values: [T], initial: A, combine: fn(A, T) -> A) -> A {
 }
 
 // Group order follows first occurrence; each group's items preserve input order.
-export fn GroupBy[T](values: [T], keyOf: fn(T) -> string) -> map[[T]] {
-    let result = map[[T]]{}
+export fn GroupBy[T, K: Hashable](values: [T], keyOf: fn(T) -> K) -> map[K, [T]] {
+    var result: map[K, [T]] = map[K, [T]]{}
     for value in values {
         let key = keyOf(value)
-        if !has(result, key) { result[key] = [] }
-        append(result[key], value)
+        if !result.has(key) { result[key] = [] }
+        result[key].append(value)
     }
     return result
 }
 
 // Stable bottom-up merge sort. The comparator defines a strict ordering.
-// Copy before invoking callbacks; never reorder the caller's outer array.
-export fn Sort[T](values: [T], less: fn(T, T) -> bool) -> [T] {
-    var source = Copy[T](values)
-    var target = Copy[T](values)
+// Local values isolate writes from the input and each other.
+export fn SortedBy[T](values: [T], less: fn(T, T) -> bool) -> [T] {
+    var source = values
+    var target = values
     let count = len(source)
     var width = 1
     while width < count {
@@ -85,4 +113,9 @@ export fn Sort[T](values: [T], less: fn(T, T) -> bool) -> [T] {
         width *= 2
     }
     return source
+}
+
+// Update a histogram through explicit caller access; overflow is fatal.
+export fn Increment[K: Hashable](counts: inout map[K, int], key: K) {
+    counts[key] = match counts.get(key) { .Some(count) => count + 1, .None => 1 }
 }

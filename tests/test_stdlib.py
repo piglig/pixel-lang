@@ -3,18 +3,18 @@ import io
 import json
 import unittest
 
-from pixellang.compiler import compile_source
-from pixellang.picture import decode_picture, encode_picture
-from pixellang.project import compile_project, project_text
 from pixellang.vm import VM
+from pixellang.compiler_client import CompilerClient
 
 
 class StandardLibraryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.csv_source, cls.csv_program = compile_project(
+        cls.compiler = CompilerClient()
+        cls.addClassCleanup(cls.compiler.close)
+        cls.csv_program = cls.compiler.debug_project(
             {
-                "main.pxl": 'import "std/csv.pxl" as csv\nfn main() {\ntry {\n    let rows = csv.Parse(input())\n    print(rows)\n    print(csv.Parse(csv.Encode(rows)))\n} catch error { print(error.message) }\n}'
+                "main.pxl": 'import "std/csv.pxl" as csv\neffect fn main() {\n match Roundtrip() { .Ok(value) => {}, .Err(error) => print(error.message) }\n}\neffect fn Roundtrip() -> Result[int, Error] {\n let rows = csv.Parse(input())?\n print(rows)\n print(csv.Parse(csv.Encode(rows)?)?)\n return .Ok(0)\n}'
             }
         )
 
@@ -47,19 +47,23 @@ class StandardLibraryTests(unittest.TestCase):
                 self.assertTrue(actual[0].startswith("CSV "))
 
     def test_stdlib_is_bundled_as_pixels_and_recovered(self):
-        restored = decode_picture(encode_picture(self.csv_source))
-        sources = project_text(restored)
-        self.assertIn("std/csv.pxl", sources["files"])
-        self.assertIn("fn Parse", sources["files"]["std/csv.pxl"])
-        output = VM(compile_source(restored).bytecode, input_text='a,"b,c"').run()
+        image = self.compiler.request('export-png', **self.csv_program.source_project)['result']['image']
+        sources = self.compiler.request('recover-png', image=image)['result']
+        self.assertEqual(len(sources['files']), 3)
+        for name, text in sources['files'].items():
+            info = self.compiler.request('module-info', files={name: text}, entry=name)['result']
+            for imported in info['imports']:
+                self.assertIn(imported, sources['files'])
+        recovered_bytecode = self.compiler.request('compile-png', image=image)['result']['bytecode']
+        output = VM(recovered_bytecode, input_text='a,"b,c"').run()
         self.assertEqual(output, [[["a", "b,c"]], [["a", "b,c"]]])
-        rebuilt = compile_project(sources["files"], sources["entry"])[1]
-        self.assertEqual(VM(rebuilt.bytecode, input_text='a,"b,c"').run(), output)
+        rebuilt = self.compiler.request('compile', **sources)['result']['bytecode']
+        self.assertEqual(VM(rebuilt, input_text='a,"b,c"').run(), output)
 
     def test_sort_stats_negative_duplicate_and_empty(self):
-        _, compiled = compile_project(
+        compiled = self.compiler.debug_project(
             {
-                "main.pxl": 'import "std/sort.pxl" as sort\nimport "std/stats.pxl" as stats\nfn main() {\nlet values = [3, -8, 3, 0, -1]\nprint(sort.Ints(values))\nprint(values)\nprint(stats.Summary(values))\nprint(sort.Ints([]: [int]))\ntry { print(stats.Summary([]: [int])) } catch err { print(err.kind) }\n}'
+                "main.pxl": 'import "std/collections.pxl" as collections\nimport "std/stats.pxl" as stats\neffect fn main() {\n let values = [3, -8, 3, 0, -1]\n print(collections.Sorted(values))\n print(values)\n match stats.Summary(values) { Option.Some(value) => print(value), Option.None => print("empty") }\n let empty: [int] = []\n print(collections.Sorted(empty))\n match stats.Summary(empty) { Option.Some(value) => print(value), Option.None => print("empty") }\n}'
             }
         )
         self.assertEqual(
@@ -69,15 +73,15 @@ class StandardLibraryTests(unittest.TestCase):
                 [3, -8, 3, 0, -1],
                 {"count": 5, "total": -3, "min": -8, "max": 3, "mean": 0},
                 [],
-                "user",
+                "empty",
             ],
         )
 
     def test_merge_sort_larger_input(self):
         values = [(n * 73) % 211 - 100 for n in range(300)]
-        _, compiled = compile_project(
+        compiled = self.compiler.debug_project(
             {
-                "main.pxl": 'import "std/sort.pxl" as sort\nfn main() { print(sort.Ints('
+                "main.pxl": 'import "std/collections.pxl" as collections\neffect fn main() { print(collections.Sorted('
                 + json.dumps(values)
                 + ")) }"
             }

@@ -1,23 +1,72 @@
 from pathlib import Path
+import json
+import os
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from pixellang.bootstrap import normalized
-from pixellang.compiler_service import Limits
-from pixellang.compiler_worker import CompilerWorker, encode_wire, decode_wire
-from pixellang.project import compile_project
+from pixellang.native_bundle import load_bundle
+from pixellang.compiler_service import CompilerService, Limits
+from pixellang.compiler_worker import CompilerWorker, encode_wire, decode_wire, dump_response, load_response
 from pixellang.vm import VM
 
 
+def unresponsive_worker(connection, cancelled, marker, limits):
+    connection.send({'ready': True})
+    connection.recv()
+    Path(marker).write_text('executing')
+    time.sleep(30)
+
+
+def late_success_worker(connection, cancelled, marker, limits):
+    connection.send({'ready': True})
+    first=True
+    while True:
+        directory=connection.recv()
+        if directory is None:return
+        folder=Path(directory)
+        request=json.loads((folder/'request.json').read_text())
+        if first:
+            Path(marker).write_text('executing')
+            cancelled.wait(2)
+            first=False
+        (folder/'result.bin').write_bytes(dump_response(dict(status='ok',id=request['id'],result=request['id'])))
+        connection.send({'done':True})
+
+
+def descendant_worker(connection, cancelled, marker, limits):
+    connection.send({'ready':True})
+    connection.recv()
+    # A child that ignores graceful termination must still be stopped when the
+    # supervisor kills its worker. Publish only after the handler is installed.
+    child=subprocess.Popen([sys.executable,'-c',
+        'import os,signal,time; from pathlib import Path; '
+        'signal.signal(signal.SIGTERM,signal.SIG_IGN); '
+        f'Path({str(marker)!r}).write_text(str(os.getpid())); time.sleep(30)'])
+    child.wait()
+
+
 class CompilerWorkerTests(unittest.TestCase):
+    def test_internal_response_preserves_sharing_and_rejects_executable_objects(self):
+        span={'source':'猫.pxl','points':[[1,2]]}
+        result=load_response(dump_response({'spans':[span,span],'image':b'\x00\xff'}))
+        self.assertIs(result['spans'][0],result['spans'][1])
+        self.assertEqual(result['image'],b'\x00\xff')
+        for payload in (dump_response({'callable':eval}),dump_response({})+b'trailing',b'broken'):
+            with self.subTest(payload=payload),self.assertRaises(ValueError):load_response(payload)
+
     @classmethod
     def setUpClass(cls):
         cls.folder=TemporaryDirectory()
         cls.path=Path(cls.folder.name)/'compiler.json'
-        root=Path(__file__).resolve().parents[1]
-        code=compile_project({p.name:p.read_text() for p in (root/'selfhost').glob('*.pxl')})[1].bytecode
+        # Transport tests use the validated installed compiler. Self-compilation
+        # belongs to the bootstrap gates and need not precede every worker test.
+        code=load_bundle(Path(__file__).resolve().parents[1]/'pixellang/artifacts')[0]
         cls.path.write_text(normalized(code))
 
     @classmethod
@@ -33,8 +82,8 @@ class CompilerWorkerTests(unittest.TestCase):
             pid=worker.process.pid
             warm=worker.request(request)
             self.assertEqual(worker.process.pid,pid)
-            self.assertEqual(warm['metrics']['parseHits'],1)
-            self.assertEqual(warm['result']['checkedModules'],[])
+            self.assertEqual(warm['metrics']['parseHits'],0)
+            self.assertEqual(warm['result']['checkedModules'],['main.pxl'])
             request['operation']='export-png'
             png=worker.request(request)
             self.assertEqual(png['status'],'ok',png)
@@ -42,7 +91,19 @@ class CompilerWorkerTests(unittest.TestCase):
             self.assertEqual(restored['status'],'ok',restored)
             self.assertEqual(VM(restored['result']['bytecode']).run(),[])
 
-    def test_running_cancel_kills_child_and_next_request_restarts(self):
+    def test_normal_close_reaps_worker_without_signaling_departed_group(self):
+        worker=CompilerWorker()
+        self.addCleanup(worker.close)
+        response=worker.request(dict(version=1,operation='check',files={'main.pxl':'fn main(){}'}))
+        self.assertEqual(response['status'],'ok',response)
+        process=worker.process
+        with patch('pixellang.compiler_worker.os.killpg',side_effect=AssertionError('graceful close must not signal a departed group')):
+            worker.close()
+        self.assertIsNone(worker.process)
+        self.assertTrue(worker.closed)
+        self.assertTrue(process._closed)
+
+    def test_running_cancel_preserves_responsive_child_and_cache(self):
         request=dict(version=1,id=1,operation='check',files={'main.pxl':'fn main(){}'})
         with CompilerWorker(self.path) as worker:
             self.assertEqual(worker.request(request)['status'],'ok')
@@ -55,10 +116,50 @@ class CompilerWorkerTests(unittest.TestCase):
             finally:timer.cancel()
             self.assertEqual(result['status'],'cancelled',result)
             self.assertLess(time.monotonic()-began,3)
-            self.assertIsNone(worker.process)
+            self.assertIsNotNone(worker.process)
+            self.assertEqual(worker.process.pid,pid)
             again=worker.request(request)
             self.assertEqual(again['status'],'ok',again)
-            self.assertNotEqual(worker.process.pid,pid)
+            self.assertEqual(worker.process.pid,pid)
+            self.assertEqual(again['metrics']['parseHits'],0)
+
+    def test_unresponsive_cancel_still_terminates_child(self):
+        with TemporaryDirectory() as directory:
+            marker=Path(directory)/'started'
+            with patch('pixellang.compiler_worker._worker',unresponsive_worker), CompilerWorker(marker) as worker:
+                began=time.monotonic()
+                result=worker.request(dict(version=1,operation='check'),cancelled=marker.exists)
+                self.assertEqual(result['status'],'cancelled',result)
+                self.assertLess(time.monotonic()-began,3)
+                self.assertIsNone(worker.process)
+
+    @unittest.skipUnless(os.name=='posix','POSIX process groups required')
+    def test_forced_cancel_stops_native_descendant_even_after_leader_exit(self):
+        with TemporaryDirectory() as directory:
+            marker=Path(directory)/'child-pid'
+            with patch('pixellang.compiler_worker._worker',descendant_worker),CompilerWorker(marker) as worker:
+                result=worker.request(dict(version=1,operation='check'),cancelled=marker.exists)
+                self.assertEqual(result['status'],'cancelled',result)
+                pid=int(marker.read_text())
+                deadline=time.monotonic()+2
+                while True:
+                    state=subprocess.run(['ps','-o','stat=','-p',str(pid)],capture_output=True,text=True).stdout.strip()
+                    if not state or state.startswith('Z'):break
+                    if time.monotonic()>=deadline:self.fail(f'Compiler descendant {pid} is still running: {state}')
+                    time.sleep(.02)
+                self.assertIsNone(worker.process)
+
+    def test_cancel_discards_late_success_before_reusing_child(self):
+        with TemporaryDirectory() as directory:
+            marker=Path(directory)/'started'
+            with patch('pixellang.compiler_worker._worker',late_success_worker), CompilerWorker(marker) as worker:
+                result=worker.request(dict(version=1,id=1),cancelled=marker.exists)
+                self.assertEqual(result['status'],'cancelled',result)
+                self.assertNotIn('result',result)
+                pid=worker.process.pid
+                again=worker.request(dict(version=1,id=2))
+                self.assertEqual((again['status'],again['id'],again['result']),('ok',2,2))
+                self.assertEqual(worker.process.pid,pid)
 
     def test_supervisor_deadline_and_closed_worker(self):
         with CompilerWorker(self.path,limits=Limits(seconds=.001)) as worker:

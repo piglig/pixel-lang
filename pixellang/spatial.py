@@ -1,15 +1,11 @@
-"""Region detection and explicit/default spatial relationships."""
+"""Explicit semantic regions and parent relationships."""
 
-from collections import defaultdict
 from itertools import pairwise
 
 from .model import PixelError, Region, Span
 
 
 def analyze(tokens, links):
-    rows = defaultdict(list)
-    for t in tokens:
-        rows[t.position[1]].append(t)
     by_pos = {t.position: t for t in tokens}
     for link in links:
         if tuple(link["from"]) not in by_pos or tuple(link["to"]) not in by_pos:
@@ -19,63 +15,7 @@ def analyze(tokens, links):
                 "Connection endpoint is not a semantic pixel",
                 Span(tokens[0].span.source if tokens else "<source>", (p,)),
             )
-    marked = any(link["kind"] == "region" for link in links)
-    if marked:
-        regions, position_region = explicit_regions(tokens, links, by_pos)
-    else:
-        regions, position_region = [], {}
-        for y, row in sorted(rows.items()):
-            row.sort(key=lambda t: t.position[0])
-            span = Span.merge(*(t.span for t in row))
-            edges = [e for e in links if e["kind"] == "next" and e["from"][1] == y]
-            if edges:
-                nxt, incoming = {}, set()
-                for e in edges:
-                    a, b = tuple(e["from"]), tuple(e["to"])
-                    if b[1] != y or a in nxt or b in incoming:
-                        raise PixelError(
-                            "spatial",
-                            "Next links must form one unbranched chain within a region",
-                            span,
-                        )
-                    nxt[a] = b
-                    incoming.add(b)
-                starts = [t.position for t in row if t.position not in incoming]
-                if len(starts) != 1:
-                    raise PixelError(
-                        "spatial", "Next links contain a cycle or disconnected chain", span
-                    )
-                order, seen, p = [], set(), starts[0]
-                while p is not None:
-                    if p in seen:
-                        raise PixelError("spatial", "Cyclic next connection", span)
-                    seen.add(p)
-                    order.append(by_pos[p])
-                    p = nxt.get(p)
-                if len(order) != len(row):
-                    raise PixelError(
-                        "spatial",
-                        "Explicit next chain must cover every token in the region",
-                        span,
-                    )
-                row = order
-            elif any(b.position[0] - a.position[0] > 3 for a, b in pairwise(row)):
-                raise PixelError(
-                    "spatial",
-                    "Disconnected row: gap exceeds two empty cells; add explicit next connections",
-                    span,
-                )
-            region = Region(len(regions), row, min(t.position[0] for t in row), span)
-            regions.append(region)
-            for t in row:
-                position_region[t.position] = region.id
-    if not marked:
-        stack = []
-        for r in regions:
-            while stack and regions[stack[-1]].indent >= r.indent:
-                stack.pop()
-            r.parent = stack[-1] if stack else None
-            stack.append(r.id)
+    regions, position_region = explicit_regions(tokens, links, by_pos)
     explicit = set()
     for e in links:
         if e["kind"] != "child":
@@ -91,7 +31,6 @@ def analyze(tokens, links):
                 regions[child].span,
             )
         regions[child].parent = parent
-        regions[child].explicit_parent = True
         explicit.add(child)
     for r in regions:
         if r.parent is not None:
@@ -106,9 +45,11 @@ def analyze(tokens, links):
                 "else",
                 "while",
                 "fn",
+                "effect_fn",
+                "flow",
                 "lambda_body",
-                "try",
-                "catch",
+                "effect_body",
+                "value_body",
                 "for",
                 "match",
                 "case",
@@ -128,7 +69,6 @@ def describe(regions, links):
             {
                 "id": r.id,
                 "parent": r.parent,
-                "explicit_parent": r.explicit_parent,
                 "span": r.span.to_dict(),
                 "tokens": [
                     {"kind": t.kind, "value": t.value, "position": list(t.position)}
@@ -176,7 +116,7 @@ def explicit_regions(tokens, links, by_pos):
             assigned[cursor] = len(regions)
             ordered.append(by_pos[cursor])
             cursor = nxt.get(cursor)
-        regions.append(Region(len(regions), ordered, head[0], Span.merge(*(t.span for t in ordered))))
+        regions.append(Region(len(regions), ordered, Span.merge(*(t.span for t in ordered))))
     if len(assigned) != len(tokens):
         fail("Explicit regions must cover every semantic pixel")
     return regions, assigned

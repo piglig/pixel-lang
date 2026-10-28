@@ -3,37 +3,57 @@ import "model.pxl" as model
 import "frames.pxl" as frames
 import "ir_state.pxl" as ir
 export record Function { name: string, source: string, module: string, names: [string], typeArguments: [string] }
-export record Output { functions: map[Function], types: map[string] }
-export fn Build(planned: model.ClosurePlan) -> Output {
-    let resolved = planned.named.checked.resolved
-    let output = Output{functions: map[Function]{}, types: map[string]{}}
+export record Output { functions: map[string, Function], types: map[string, string] }
+export fn Build(planned: inout model.ClosurePlan) -> Output {
+
+    var output: Output = Output{functions: map[string, Function]{}, types: map[string, string]{}}
     if len(planned.diagnostics) > 0 { return output }
-    let layout = frames.Build(planned)
+    let layout = frames.Build(&planned)
     if len(layout.diagnostics) > 0 { return output }
-    for typ in resolved.types {
-        if typ.module >= 0 && (typ.kind == "record" || typ.kind == "enum") {
-            let path = resolved.bound.project.modules[typ.module].path
+    for typ in planned.named.checked.resolved.types {
+        if typ.module >= 0 && (typ.kind == "record" || typ.kind == "enum" || typ.kind == "frame") {
+            let path = planned.named.checked.resolved.bound.project.modules[typ.module].path
             output.types["@" + string(typ.module) + ":" + string(typ.declaration)] = path + ":" + typ.name
         }
     }
     for id, frame in layout.functions {
-        let source = resolved.bound.project.modules[frame.module]
+        let source = planned.named.checked.resolved.bound.project.modules[frame.module]
         let node = source.syntax.nodes[frame.node]
-        let names: [string] = []
-        for slot in frame.slots { append(names, resolved.bound.symbols[slot.symbol].name) }
-        let arguments: [string] = []
-        for typ in planned.named.instances[frame.owner].arguments { append(arguments, ir.TypeName(resolved, typ)) }
+        var names: [string] = []
+        for slot in frame.slots { names.append(planned.named.checked.resolved.bound.symbols[slot.symbol].name) }
+        var arguments: [string] = []
+        for typ in planned.named.instances[frame.owner].arguments { arguments.append(ir.TypeName(typ, planned.named.checked.resolved)) }
         var module = string(frame.module + 1)
-        if frame.module == len(resolved.bound.project.modules) - 1 { module = "main" }
+        if frame.module == len(planned.named.checked.resolved.bound.project.modules) - 1 { module = "main" }
         var name = node.text
         if name == "" { name = "lambda" }
-        output.functions[string(id)] = Function{name, source: source.path, module, names, typeArguments: arguments}
+        if node.kind == "flow" {
+            var initialNames: [string] = []
+            for child in node.children { if source.syntax.nodes[child].kind == "initial_parameter" { initialNames.append(source.syntax.nodes[child].text) } }
+            for plan in planned.named.checked.flows {
+                if plan.module != frame.module || plan.graph.declaration != frame.node { continue }
+                for cell in plan.graph.states {
+                    let stateName = source.syntax.nodes[cell].text
+                    output.functions["$flow:" + string(id) + ":" + string(cell)] = Function{name: name + ".initial." + stateName, source: source.path, module, names: initialNames, typeArguments: []}
+                }
+                for instance in plan.instances {
+                    let item = source.syntax.nodes[instance.node]
+                    let creation = source.syntax.nodes[item.children[0]]
+                    if len(creation.children) > 1 {
+                        for position, argument in slice(creation.children, 1, len(creation.children)) {
+                            output.functions["$flow:" + string(id) + ":arg:" + string(argument)] = Function{name: name + ".initial." + item.text + ".argument" + string(position), source: source.path, module, names: initialNames, typeArguments: []}
+                        }
+                    }
+                }
+            }
+        }
+        output.functions[string(id)] = Function{name, source: source.path, module, names: names, typeArguments: arguments}
     }
     return output
 }
 
-export fn MapDocument(source: model.Module, document: layout.Source, regions: [layout.Region], origins: [int]) {
-    let mapping = map[ir.Span]{}
+export fn MapDocument(source: model.Module, document: inout layout.Source, regions: [layout.Region], origins: [int]) {
+    var mapping: map[string, ir.Span] = map[string, ir.Span]{}
     var pixel = 0
     for row, region in regions {
         let node = source.syntax.nodes[origins[row]]

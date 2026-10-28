@@ -1,0 +1,10 @@
+// Standard-library data errors share Error so callers can propagate across
+// parsing, paths and I/O without inspecting or rewriting human messages.
+fn Limit(value: string, maximum: int) -> string {
+    if len(value) > maximum { return slice(value, 0, maximum) }
+    return value
+}
+export fn New(code: string, message: string, operation: string, path: string) -> Error = Error{
+    kind: split(code, ".")[0], code, message: Limit(message, 256),
+    operation: Limit(operation, 64), path: Limit(path, 1024), expected: "", actual: ""
+}

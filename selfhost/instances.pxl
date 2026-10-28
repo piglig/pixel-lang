@@ -2,10 +2,10 @@ import "model.pxl" as model
 import "types.pxl" as types
 import "syntax_index.pxl" as syntaxIndex
 
-record Planner { checked: model.ExpressionCheck, signatures: map[int], interned: map[int], instances: [model.FunctionInstance], edges: [model.InstanceEdge], edgeKeys: map[bool], diagnostics: [model.Diagnostic], genericCount: int }
+record Planner { signatures: map[string, int], interned: map[string, int], instances: [model.FunctionInstance], edges: [model.InstanceEdge], edgeKeys: map[string, bool], diagnostics: [model.Diagnostic], genericCount: int }
 fn NodeKey(module: int, node: int) -> string = string(module) + ":" + string(node)
-fn Report(p: Planner, module: int, index: int, message: string) {
-    let source = p.checked.resolved.bound.project.modules[module]
+fn Report(module: int, index: int, message: string, checked: model.ExpressionCheck, p: inout Planner) {
+    let source = checked.resolved.bound.project.modules[module]
     var start = 0
     var end = 0
     var line = 1
@@ -15,51 +15,55 @@ fn Report(p: Planner, module: int, index: int, message: string) {
         start = node.start; end = node.end
         for token in source.syntax.tokens { if token.start >= start { line = token.line; column = token.column; break } }
     }
-    append(p.diagnostics, model.Diagnostic{source: source.path, phase: "instantiate", message, start, end, line, column})
+    p.diagnostics.append(model.Diagnostic{source: source.path, phase: "instantiate", message, start, end, line, column})
 }
-fn Concrete(p: Planner, typeId: int, depth: int) -> bool = types.Concrete(p.checked.resolved, typeId, depth)
-fn Signature(p: Planner, symbol: int) -> model.FunctionSignature {
-    let target = p.checked.resolved.bound.symbols[symbol]
-    return p.checked.resolved.signatures[p.signatures[NodeKey(target.module, target.node)]]
+fn Concrete(typeId: int, depth: int, checked: model.ExpressionCheck) -> bool = types.Concrete(typeId, depth, checked.resolved)
+fn Signature(p: Planner, symbol: int, checked: model.ExpressionCheck) -> model.FunctionSignature {
+    let target = checked.resolved.bound.symbols[symbol]
+    return checked.resolved.signatures[p.signatures[NodeKey(target.module, target.node)]]
 }
-fn Add(p: Planner, symbol: int, arguments: [int], module: int, node: int) -> int {
-    let signature = Signature(p, symbol)
-    if len(signature.parameters) != len(arguments) { Report(p, module, node, "Generic instance arity mismatch"); return -1 }
+fn Add(symbol: int, arguments: [int], module: int, node: int, p: inout Planner, checked: inout model.ExpressionCheck) -> int {
+    let signature = Signature(p, symbol, checked)
+    if len(signature.parameters) != len(arguments) { Report(module, node, "Generic instance arity mismatch", checked, &p); return -1 }
     var key = string(symbol)
     for argument in arguments {
-        if !Concrete(p, argument, 0) { Report(p, module, node, "Instance type is unresolved or exceeds depth 32"); return -1 }
+        if !Concrete(argument, 0, checked) { Report(module, node, "Instance type is unresolved or exceeds depth 32", checked, &p); return -1 }
         key += ":" + string(argument)
     }
-    if has(p.interned, key) { return p.interned[key] }
-    if len(arguments) > 0 && p.genericCount >= 256 { Report(p, module, node, "Generic function instances exceed 256"); return -1 }
-    let typeId = types.Substitute(p.checked.resolved, signature.typeId, signature.parameters, arguments)
-    if !Concrete(p, typeId, 0) { Report(p, module, node, "Function signature is not concrete or exceeds depth 32"); return -1 }
+    if p.interned.has(key) { return p.interned[key] }
+    if len(arguments) > 0 && p.genericCount >= 256 { Report(module, node, "Generic function instances exceed 256", checked, &p); return -1 }
+    let typeId = types.Substitute(signature.typeId, signature.parameters, arguments, &checked.resolved)
+    if !Concrete(typeId, 0, checked) { Report(module, node, "Function signature is not concrete or exceeds depth 32", checked, &p); return -1 }
     let index = len(p.instances)
-    append(p.instances, model.FunctionInstance{symbol, arguments: slice(arguments, 0, len(arguments)), typeId})
+    p.instances.append(model.FunctionInstance{symbol, arguments: slice(arguments, 0, len(arguments)), typeId})
     p.interned[key] = index
     if len(arguments) > 0 { p.genericCount += 1 }
     return index
 }
-fn Index(index: map[[int]], owners: [int], module: int, node: int, item: int) {
+fn Index(owners: [int], module: int, node: int, item: int, index: inout map[string, [int]]) {
     var owner = owners[node]
     // A named function also retains dependencies inside its nested functions,
     // matching the previous containment rule. Lambdas inherit the named owner.
     while owner >= 0 {
         let key = NodeKey(module, owner)
-        if !has(index, key) { index[key] = [] }
-        append(index[key], item)
+        if !index.has(key) { index[key] = [] }
+        index[key].append(item)
         owner = owners[owner]
     }
 }
-fn Edge(p: Planner, caller: int, node: int, target: int, kind: string) {
+fn Edge(caller: int, node: int, target: int, kind: string, p: inout Planner) {
     if target < 0 { return }
     let key = string(caller) + ":" + string(node) + ":" + string(target) + ":" + kind
-    if has(p.edgeKeys, key) { return }
+    if p.edgeKeys.has(key) { return }
     p.edgeKeys[key] = true
-    append(p.edges, model.InstanceEdge{caller, node, target, kind})
+    p.edges.append(model.InstanceEdge{caller, node, target, kind})
 }
 export fn Build(checked: model.ExpressionCheck) -> model.InstancePlan {
-    let p = Planner{checked, signatures: map[int]{}, interned: map[int]{}, instances: [], edges: [], edgeKeys: map[bool]{}, diagnostics: [], genericCount: 0}
+    return BuildEntry(checked.resolved.bound.project.entryName, checked)
+}
+export fn BuildEntry(entryName: string, inputChecked: model.ExpressionCheck) -> model.InstancePlan {
+    var checked = inputChecked
+    var p: Planner = Planner{signatures: map[string, int]{}, interned: map[string, int]{}, instances: [], edges: [], edgeKeys: map[string, bool]{}, diagnostics: [], genericCount: 0}
     if len(checked.diagnostics) > 0 { return model.InstancePlan{checked, instances: [], edges: [], entry: -1, diagnostics: checked.diagnostics} }
     let project = checked.resolved.bound.project
     if len(project.modules) == 0 { return model.InstancePlan{checked, instances: [], edges: [], entry: -1, diagnostics: [model.Diagnostic{source: "<entry>", phase: "instantiate", message: "Entry module is missing", start: 0, end: 0, line: 1, column: 1}]} }
@@ -67,50 +71,58 @@ export fn Build(checked: model.ExpressionCheck) -> model.InstancePlan {
     let entryModule = len(project.modules) - 1
     var entrySymbol = -1
     for index, symbol in checked.resolved.bound.symbols {
-        if symbol.module == entryModule && symbol.kind == "fn" && symbol.name == "main" && checked.resolved.bound.scopes[symbol.scope].owner == -1 { entrySymbol = index; break }
+        if symbol.module == entryModule && symbol.kind == "fn" && symbol.name == entryName && checked.resolved.bound.scopes[symbol.scope].owner == -1 { entrySymbol = index; break }
     }
     var entry = -1
-    if entrySymbol < 0 { Report(p, entryModule, -1, "Entry module must define main") }
+    if entrySymbol < 0 { Report(entryModule, -1, "Entry module must define " + entryName, checked, &p) }
     else {
-        let signature = Signature(p, entrySymbol)
+        let signature = Signature(p, entrySymbol, checked)
         let typ = checked.resolved.types[signature.typeId]
-        if len(signature.parameters) != 0 || typ.kind != "function" || len(typ.arguments) != 1 || typ.arguments[len(typ.arguments) - 1] != types.Scalar(checked.resolved, "unit") {
-            Report(p, entryModule, checked.resolved.bound.symbols[entrySymbol].node, "main must be parameterless and return unit")
-        } else { entry = Add(p, entrySymbol, [], entryModule, checked.resolved.bound.symbols[entrySymbol].node) }
+        if len(signature.parameters) != 0 || typ.kind != "function" || len(typ.arguments) != 1 || typ.arguments[len(typ.arguments) - 1] != types.Scalar("unit", &checked.resolved) {
+            Report(entryModule, checked.resolved.bound.symbols[entrySymbol].node, entryName + " must be non-generic, parameterless and return unit", checked, &p)
+        } else { entry = Add(entrySymbol, [], entryModule, checked.resolved.bound.symbols[entrySymbol].node, &p, &checked) }
     }
-    let owners: [[int]] = []
-    for module in project.modules { append(owners, syntaxIndex.Owners(module.syntax)) }
-    let calls = map[[int]]{}
-    let references = map[[int]]{}
+    var owners: [[int]] = []
+    for module in project.modules { owners.append(syntaxIndex.Owners(module.syntax)) }
+    var calls: map[string, [int]] = map[string, [int]]{}
+    var references: map[string, [int]] = map[string, [int]]{}
     for signature in checked.resolved.signatures {
         let key = NodeKey(signature.module, signature.node)
         calls[key] = []; references[key] = []
     }
-    for index, call in checked.calls { Index(calls, owners[call.module], call.module, call.node, index) }
-    for index, reference in checked.resolved.bound.references { Index(references, owners[reference.module], reference.module, reference.node, index) }
+    for index, call in checked.calls {
+        Index(owners[call.module], call.module, call.node, index, &calls)
+    }
+    for index, reference in checked.resolved.bound.references { Index(owners[reference.module], reference.module, reference.node, index, &references) }
     var cursor = 0
     while cursor < len(p.instances) && len(p.diagnostics) == 0 {
         let instance = p.instances[cursor]
         let owner = checked.resolved.bound.symbols[instance.symbol]
-        let signature = Signature(p, instance.symbol)
+        let signature = Signature(p, instance.symbol, checked)
         let ownerKey = NodeKey(owner.module, owner.node)
+        if owner.kind == "flow" {
+            for flow in checked.flows {
+                if flow.module != owner.module || flow.graph.declaration != owner.node { continue }
+                for node in flow.instances { Edge(cursor, node.node, Add(node.symbol, [], owner.module, node.node, &p, &checked), "flow-node", &p) }
+            }
+        }
         for callIndex in calls[ownerKey] {
             let call = checked.calls[callIndex]
             if call.symbol < 0 { continue }
             let target = checked.resolved.bound.symbols[call.symbol]
-            if target.kind != "fn" { continue }
-            let arguments: [int] = []
-            for argument in call.arguments { append(arguments, types.Substitute(checked.resolved, argument, signature.parameters, instance.arguments)) }
-            let resolved = Add(p, call.symbol, arguments, call.module, call.node)
-            Edge(p, cursor, call.node, resolved, call.kind)
+            if !model.CallableDeclaration(target.kind) { continue }
+            var arguments: [int] = []
+            for argument in call.arguments { arguments.append(types.Substitute(argument, signature.parameters, instance.arguments, &checked.resolved)) }
+            let resolved = Add(call.symbol, arguments, call.module, call.node, &p, &checked)
+            Edge(cursor, call.node, resolved, call.kind, &p)
         }
         for referenceIndex in references[ownerKey] {
             let reference = checked.resolved.bound.references[referenceIndex]
             let target = checked.resolved.bound.symbols[reference.symbol]
-            if target.kind != "fn" { continue }
-            if len(Signature(p, reference.symbol).parameters) > 0 { continue }
-            let resolved = Add(p, reference.symbol, [], reference.module, reference.node)
-            Edge(p, cursor, reference.node, resolved, "reference")
+            if !model.CallableDeclaration(target.kind) { continue }
+            if len(Signature(p, reference.symbol, checked).parameters) > 0 { continue }
+            let resolved = Add(reference.symbol, [], reference.module, reference.node, &p, &checked)
+            Edge(cursor, reference.node, resolved, "reference", &p)
         }
         cursor += 1
     }

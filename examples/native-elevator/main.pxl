@@ -1,0 +1,50 @@
+import "model.pxl" as model
+import "controller.pxl" as controller
+
+export flow Elevator() step(event: model.Command) -> Result[model.View, model.Rejection] {
+    state status: model.Status = model.Status{floor: 0, target: 0, doorsOpen: true}
+    state scene: Space[model.Building, string, bool] = Space::[model.Building, string, bool]("elevator")
+    let decision = controller.Control(status, event)
+    let updated = match decision { .Ok(value) => value, .Err(reason) => status }
+    let arranged = match decision { .Ok(value) => controller.Arrange(scene, value), .Err(reason) => scene }
+    next status = updated
+    next scene = arranged
+    output match decision {
+        .Ok(value) => .Ok(controller.Inspect(value, arranged)),
+        .Err(reason) => .Err(reason)
+    }
+}
+
+effect fn report(result: Result[model.View, model.Rejection]) {
+    match result {
+        .Ok(view) => {
+            print([view.status.floor, view.status.target, view.scene.linkCount()])
+            print(view.status.doorsOpen)
+            print(view.nearbyFloors)
+        },
+        .Err(reason) => { print("rejected: " + controller.Message(reason)) }
+    }
+}
+
+effect fn main() {
+    let lift = Elevator()
+    let other = Elevator()
+    report(lift.step(model.Command.Request(3)))
+    report(lift.step(model.Command.Open))
+    report(lift.step(model.Command.Tick))
+    report(lift.step(model.Command.Tick))
+    let top = lift.step(model.Command.Tick)
+    report(top)
+    report(lift.step(model.Command.Request(1)))
+    report(lift.step(model.Command.Tick))
+    report(lift.step(model.Command.Tick))
+    report(other.step(model.Command.Open))
+    // An earlier snapshot retains its cabin position and docking connection.
+    match top {
+        .Ok(view) => {
+            print(view.scene.get(4).position.y)
+            print(view.scene.linkCount())
+        },
+        .Err(reason) => { print(controller.Message(reason)) }
+    }
+}

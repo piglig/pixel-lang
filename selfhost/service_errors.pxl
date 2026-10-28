@@ -1,0 +1,5 @@
+// Terminal compiler transport failures are explicit values, never language throws.
+record Failure { kind: string, source: string, error: Error }
+export effect fn Report(source: string, error: Error) {
+    print(Failure{kind: "compiler-error", source, error})
+}

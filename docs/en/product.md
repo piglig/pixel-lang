@@ -1,60 +1,37 @@
-# PixelLang product overview
+# What is PixelLang?
 
-[中文](../zh-CN/product.md) · [English](product.md) · [Documentation](README.md)
+[简体中文](../zh-CN/product.md) · [English](product.md) · [Documentation](README.md)
 
-PixelLang is a statically typed language whose colors and spatial relationships
-express program semantics. Developers author algorithms and data-processing projects
-in its own textual syntax, deliver programs as semantic-pixel PNGs, and develop,
-debug and inspect execution in VS Code Studio.
+PixelLang is a statically typed spatial programming language. Write programs as text, deliver and recover them through semantic-pixel PNGs, and use VS Code Studio to edit, debug and inspect state.
 
-## Audience and workflow
+## Capabilities
 
-Primary uses include language implementation research, visual programming, strings,
-arrays, sorting, statistics and multifile data processing. The workflow is:
-author .pxl → check/test → export a PNG containing reachable modules → execute with
-independent input → recover editable source. Recovery preserves meaning and names,
-but not original comments or formatting.
+| Capability | Applications |
+| --- | --- |
+| Values, generics, enums and closures | Algorithms, multi-file programs and typed data processing |
+| Native spatial types | 3D neighborhoods, coordinate transforms, entities and weighted connections |
+| Atomic flow transitions | Order state, controllers and stepwise propagation |
+| Executable PNG | Carry the entry and reachable modules; recover an editable project |
+| Debugging and replay | Inspect provenance, variables, historical state and recorded file effects |
 
-## Product constraints
+## Program delivery
 
-- Colors encode token categories/payloads, not VM opcodes directly. Coordinates, ordering, regions and connections contribute meaning.
-- Images contain decodable pixel programs, use no OCR, and do not execute complete source, AST or bytecode hidden in metadata.
-- Encoding, spatial AST, semantic checking, IR and VM are separate layers. Text can compile directly without an image roundtrip.
-- Source, executable artifacts, runtime state and recordings are distinct. Replay never modifies source or repeats external writes.
-- Builds use explicit dependencies, versioned formats and deterministic processing; complete artifacts can be compared under matching environments, inputs and options.
-- The compiler is implemented in PixelLang. Python still hosts the VM, service, some editor utilities and bootstrap/reference implementation.
+Write `.pxl` → check and test → export PNG → execute with separate input → recover source.
+Exact colors, regions and connections carry program structure. PNG execution uses neither OCR nor executable source or bytecode hidden in metadata. Text compiles directly without an image round-trip. Recovery preserves meaning, not original comments or formatting.
 
-## Current capabilities
+## Space and time
 
-The language provides int64, finite float64, Unicode strings, arrays, string-keyed
-maps, nominal records, generics, enums, Option, match, function values, closures,
-structured errors and typed JSON. Modules use explicit exports and local dependency
-locks. Libraries cover collection callbacks, sorting, CSV, text, statistics, JSON
-and granted file I/O. The runtime checks bounds, types, overflow and budgets and
-supports calls, recursion, GC, debugging and deterministic replay.
-
-VS Code Studio provides navigation, diagnostics, formatting, build/test, PNG export/
-recovery, breakpoints, variables and reverse stepping. Checked 2D editing supports
-literal/operator replacement and adjacent statement movement. The time view's Z
-axis represents execution transitions; source remains two-dimensional. The compiler
-service supports cancellation, deadlines, revision guards and parse/IR/artifact caches.
+XYZ are spatial coordinates that participate in computation. Logical time T is explicit input or execution history; cameras, zoom and graph layout are views. `fn` expresses computation, `flow` owns persistent state and atomic commits, and hosts or libraries schedule events. Spatial programs need neither 3D model files for delivery nor spatial types in every algorithm.
 
 ## Current boundaries
 
-There is no Go/Java syntax or ecosystem compatibility, full 3D source, network I/O,
-network package registry, standalone machine-code backend or WASM backend. Tools
-require Python; the Cython VM is an optional experiment. PNGs must retain exact pixels:
-resizing, lossy compression and color transforms are invalid transport. File access
-requires explicit grants; replay uses recorded effects. Running host calls cannot
-always be interrupted immediately.
+- This is a development preview; syntax, protocols and package formats may change incompatibly.
+- The compiler is written in PixelLang. CLI and Studio use its native executable; Python provides application execution, services and debug replay.
+- The toolchain needs a platform-matched compiler bundle. [Installation](guides/installation.md) distinguishes existing wheels from initial source preparation.
+- Local dependencies are explicit and locked. There is no network package registry or language-level network I/O.
+- Preserve exact PNG pixels. Program input, authorized data directories and the runtime remain separate.
+- Native code generation serves the compiler and verification; normal application development and debugging use PixelVM.
 
-## Quality requirements
+## Where to start
 
-Text and pixel paths must agree, and diagnostics retain provenance. Formats and
-caches cannot bypass type, resource, cancellation or dependency checks. Self-hosting
-requires complete multigeneration artifact comparisons and generated-compiler
-regressions. PNG delivery requires recovery of the complete compiler followed by
-compilation of a fresh program. Run tests, performance and installation acceptance
-separately; plans or previous results do not certify current code. See the
-[language reference](reference/language/overview.md), [architecture](internals/architecture.md)
-and [verification guide](contributing/verification.md).
+Read [your first program](learn/getting-started.md), then explore [spatial programming](guides/spatial-programming.md) and [state machines](guides/state-machines.md). Contributors can start with [architecture](internals/architecture.md) and [contributing](contributing/README.md).

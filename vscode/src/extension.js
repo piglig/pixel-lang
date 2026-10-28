@@ -3,6 +3,9 @@ const vscode = require("vscode"),
   fs = require("node:fs"),
   crypto = require("node:crypto");
 const { Bridge } = require("./bridge");
+const { PendingRequests, waitFor } = require("./pending-requests");
+const { EditorWork } = require("./editor-work");
+const { performance } = require("node:perf_hooks");
 const { PixelDebug } = require("./debug");
 const onboarding = require("./onboarding");
 let api;
@@ -10,6 +13,8 @@ function activate(context) {
   const log = vscode.window.createOutputChannel("PixelLang");
   onboarding.register(vscode, context, log);
   const diagnostics = vscode.languages.createDiagnosticCollection("pixellang");
+  const editorWork = new EditorWork();
+  let spatialVisible = false;
   let bridge,
     panel,
     current,
@@ -18,7 +23,10 @@ function activate(context) {
     runEpoch = 0,
     buildAbort,
     irPending,
+    imagePending,
+    projectionPending,
     input = context.workspaceState.get("input", "");
+  const workspaceRequests = new PendingRequests();
   let spatialState, spatialProject, spatialEpoch = 0, spatialTimer, spatialPending;
   const realPath = filename => fs.existsSync(filename) ? fs.realpathSync(filename) : path.resolve(filename);
   function fileUri(filename) {
@@ -56,14 +64,17 @@ function activate(context) {
     }
     return bridge;
   }
+  const application = require('./application').registerApplication(vscode, context, service);
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
     if (event.affectsConfiguration("pixellang.pythonPath")) {
+      workspaceRequests.clear();
       bridge?.dispose();
       bridge = undefined;
       current = undefined;
     }
   }));
-  async function collect(uri) {
+  async function collect(uri, {signal} = {}) {
+    if (signal?.aborted) throw Object.assign(new Error("Compilation cancelled"), {name: "AbortError"});
     if (uri?.scheme === "pixellang-source") {
       const context = sourceContexts.get(uri.toString());
       if (!context) throw new Error("Source snapshot context expired.");
@@ -87,7 +98,7 @@ function activate(context) {
     let manifestRoot = mountedSource ? realPath(project.root) : selected ? path.dirname(realPath(selected.fsPath)) : root;
     while (manifestRoot === root || !path.relative(root, manifestRoot).startsWith("..")) {
       if (fs.existsSync(path.join(manifestRoot, "pixel.toml"))) {
-        const loaded = await service().call("workspace", { root: manifestRoot });
+        const loaded = await waitFor(workspaceRequests.run(manifestRoot, () => service().call("workspace", { root: manifestRoot })), signal);
         const files = { ...loaded.files };
         let lockError = loaded.lock_error;
         for (const filename of loaded.manifests || []) {
@@ -191,6 +202,7 @@ function activate(context) {
     if (expected === undefined) throw new Error("Source text is unavailable for this recording.");
     const file = fileUri(proj.paths?.[filename] || path.resolve(proj.root, filename));
     try {
+      if (proj.snapshotOnly) throw new Error('Use the recorded event source snapshot');
       const doc = await vscode.workspace.openTextDocument(file);
       if (doc.getText() === expected) return doc;
     } catch (_) {}
@@ -300,16 +312,39 @@ function activate(context) {
       .replace("{{script}}", script)
       .replace("{{css}}", css);
     panel.onDidDispose(() => {
+      spatialVisible = false;
+      clearTimeout(spatialTimer);
       irPending?.controller.abort();
+      imagePending?.controller.abort();
+      projectionPending?.controller.abort();
       panel = undefined;
       running = false;
       runEpoch++;
     });
     panel.webview.onDidReceiveMessage(async (message) => {
       try {
+        if (message.type === "view") {
+          spatialVisible = message.view === "spatial";
+          clearTimeout(spatialTimer);
+          return;
+        }
         if (message.type === "ready") {
           panel?.webview.postMessage({ type: "input", value: input });
           if (current) publish(current);
+        } else if (message.type === "inspect-projection") {
+          if (message.session !== current?.session) return;
+          try { await inspectProjection(); }
+          catch (error) {
+            panel?.webview.postMessage({ type: "projection-error", session: message.session, message: error.message });
+          }
+        } else if (message.type === "inspect-image") {
+          if (message.session !== current?.session) return;
+          try {
+            const image = await inspectImage();
+            panel?.webview.postMessage({ type: "image", session: message.session, image });
+          } catch (error) {
+            panel?.webview.postMessage({ type: "image-error", session: message.session, message: error.message });
+          }
         } else if (message.type === "inspect-ir") {
           if (message.session !== current?.session) return;
           try {
@@ -322,6 +357,8 @@ function activate(context) {
           input = String(message.value).slice(0, 1_000_000);
           await context.workspaceState.update("input", input);
           irPending?.controller.abort();
+          imagePending?.controller.abort();
+          projectionPending?.controller.abort();
           current = undefined;
           running = false;
           runEpoch++;
@@ -382,6 +419,46 @@ function activate(context) {
       }
     });
   }
+  async function inspectProjection() {
+    const session = current?.session;
+    if (!session) throw new Error("Build the project before viewing its execution space.");
+    if (current.projection_ready) return current;
+    if (projectionPending?.session === session) return projectionPending.promise;
+    const pending = { session, controller: new AbortController() };
+    pending.promise = vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: "PixelLang: Generating execution space", cancellable: true },
+      async (_, token) => {
+        const subscription = token.onCancellationRequested(() => pending.controller.abort());
+        try {
+          const result = await service().call("inspect-projection", { session }, { signal: pending.controller.signal });
+          if (current?.session !== session) throw new Error("Source changed while generating execution space; rebuild the project.");
+          publish(result);
+          return current;
+        } finally { subscription.dispose(); }
+      }).finally(() => { if (projectionPending === pending) projectionPending = undefined; });
+    projectionPending = pending;
+    return pending.promise;
+  }
+  async function inspectImage() {
+    const session = current?.session;
+    if (!session) throw new Error("Build the project before viewing its PNG.");
+    if (current.image) return current.image;
+    if (imagePending?.session === session) return imagePending.promise;
+    const pending = { session, controller: new AbortController() };
+    pending.promise = vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: "PixelLang: Generating PNG", cancellable: true },
+      async (_, token) => {
+        const subscription = token.onCancellationRequested(() => pending.controller.abort());
+        try {
+          const result = await service().call("inspect-image", { session }, { signal: pending.controller.signal });
+          if (current?.session !== session) throw new Error("Source changed while generating PNG; rebuild the project.");
+          current.image = result.image;
+          return result.image;
+        } finally { subscription.dispose(); }
+      }).finally(() => { if (imagePending === pending) imagePending = undefined; });
+    imagePending = pending;
+    return pending.promise;
+  }
   async function inspectIR() {
     const session = current?.session;
     if (!session) throw new Error("Build the project before inspecting IR.");
@@ -398,8 +475,8 @@ function activate(context) {
     return pending.promise;
   }
   function publish(result, proj) {
-    if (proj) project = proj;
-    if (result.source_project && project) Object.assign(project, result.source_project);
+    if (proj) project = { ...proj };
+    if (result.source_project && project) project = { ...project, ...result.source_project };
     current = { ...current, ...result };
     panel?.webview.postMessage({ type: "state", data: current });
     if (current.state?.error) {
@@ -409,9 +486,12 @@ function activate(context) {
     }
   }
   context.subscriptions.push(vscode.window.onDidChangeTextEditorSelection(event => {
-    if (!panel || event.textEditor.document.languageId !== "pixellang") return;
+    if (!panel || !spatialVisible || vscode.debug.activeDebugSession ||
+        ![vscode.TextEditorSelectionChangeKind.Keyboard, vscode.TextEditorSelectionChangeKind.Mouse].includes(event.kind) ||
+        event.textEditor.document.languageId !== "pixellang") return;
     clearTimeout(spatialTimer);
     spatialTimer = setTimeout(async () => {
+      if (!spatialVisible || vscode.debug.activeDebugSession) return;
       try {
         const doc = event.textEditor.document;
         const proj = await collect(doc.uri);
@@ -427,23 +507,43 @@ function activate(context) {
     }, 180);
   }));
   async function build(uri) {
+    clearTimeout(checkTimer);
+    editorWork.cancel();
     running = false;
     const epoch = ++runEpoch;
     irPending?.controller.abort();
+    imagePending?.controller.abort();
+    projectionPending?.controller.abort();
     buildAbort?.abort();
     const controller = new AbortController();
     buildAbort = controller;
     try {
-      const snapshot = await collect(uri);
+      let snapshot;
       const buildInput = input;
-      if (controller.signal.aborted || epoch !== runEpoch) throw new Error("Build cancelled or source changed.");
-      diagnostics.clear();
       const result = await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Notification, title: "PixelLang: Building", cancellable: true },
-        async (_, token) => {
+        async (progress, token) => {
           const subscription = token.onCancellationRequested(() => controller.abort());
-          try { return await service().call("build", { ...snapshot, input: buildInput }, { signal: controller.signal }); }
-          finally { subscription.dispose(); }
+          let timer;
+          try {
+            if (token.isCancellationRequested) controller.abort();
+            progress.report({ message: "Reading project files" });
+            const readStarted = performance.now();
+            snapshot = await collect(uri, {signal: controller.signal});
+            log.appendLine(`Build source collection: ${Math.round(performance.now() - readStarted)} ms, ${Object.keys(snapshot.files).length} files, entry ${snapshot.entry}`);
+            if (controller.signal.aborted || epoch !== runEpoch) throw new Error("Build cancelled or source changed.");
+            diagnostics.clear();
+            const started = performance.now();
+            const reportWait = () => progress.report({
+              message: `Waiting for compiler · ${Math.floor((performance.now() - started) / 1000)} s`,
+            });
+            reportWait();
+            timer = setInterval(reportWait, 1000);
+            return await service().call("build", { ...snapshot, input: buildInput }, { signal: controller.signal });
+          } finally {
+            clearInterval(timer);
+            subscription.dispose();
+          }
         });
       if (epoch !== runEpoch) throw new Error("Source changed during build; build again to use the latest edits.");
       project = snapshot;
@@ -475,16 +575,15 @@ function activate(context) {
     }
   }
   async function exportImage() {
-    if (!current?.image) await build();
+    if (!current?.session) await build();
     const uri = await vscode.window.showSaveDialog({
       defaultUri: vscode.Uri.file(path.join(project.root, "program.png")),
       filters: { "Executable PNG": ["png"] },
     });
-    if (uri)
-      await vscode.workspace.fs.writeFile(
-        uri,
-        Buffer.from(current.image, "base64"),
-      );
+    if (uri) {
+      const image = await inspectImage();
+      await vscode.workspace.fs.writeFile(uri, Buffer.from(image, "base64"));
+    }
   }
   async function recover() {
     const selected = await vscode.window.showOpenDialog({
@@ -555,7 +654,7 @@ function activate(context) {
     show();
     publish(result);
   }
-  async function projectCommand(operation, uri) {
+  async function projectCommand(operation, uri, options = {}) {
     const proj = await collect(uri);
     if (!proj.paths) throw new Error("Open a project containing pixel.toml first.");
     const relevant = new Set([...Object.values(proj.paths), ...(proj.manifests || [])]);
@@ -567,8 +666,9 @@ function activate(context) {
       }
     }
     const result = await service().call("project-" + operation, {
-      root: proj.root, max_steps: proj.max_steps,
+      root: proj.root, max_steps: proj.max_steps, ...options,
     });
+    if (options.list) return result;
     log.show(true);
     if (operation === "test") {
       for (const test of result.tests)
@@ -582,6 +682,20 @@ function activate(context) {
   }
   for (const [name, fn] of Object.entries({
     testProject: uri => projectCommand("test", uri),
+    runTest: async (uri, testName) => {
+      const listed = await projectCommand("test", uri, { list: true });
+      const choices = listed.tests.map(test => ({ label: test.name || test.entry,
+        description: test.entry + (test.input ? " · " + test.input : ""), id: test.id }));
+      if (typeof testName === "string" && choices.filter(test => test.label === testName).length > 1)
+        throw new Error("Multiple tests have this name; select the test from the picker.");
+      const selected = typeof testName === "string" ? choices.find(test => test.label === testName) : await vscode.window.showQuickPick(
+        choices,
+        { title: "PixelLang: Run a Test", placeHolder: "Select a test to run" },
+      );
+      if (typeof testName === "string" && !selected) throw new Error("Test not found: " + testName);
+      if (!selected) return;
+      return projectCommand("test", uri, { test_id: selected.id });
+    },
     buildProject: uri => projectCommand("build", uri),
     lockProject: uri => projectCommand("lock", uri),
     openTimeline,
@@ -593,9 +707,9 @@ function activate(context) {
     import: recover,
   }))
     context.subscriptions.push(
-      vscode.commands.registerCommand("pixellang." + name, async (uri) => {
+      vscode.commands.registerCommand("pixellang." + name, async (uri, ...args) => {
         try {
-          return await fn(uri);
+          return await fn(uri, ...args);
         } catch (error) {
           await report(error, project);
         }
@@ -606,11 +720,15 @@ function activate(context) {
   context.subscriptions.push(
     vscode.workspace.onDidChangeTextDocument((event) => {
       if (event.document.languageId !== "pixellang" || event.document.uri.scheme !== "file") return;
+      if (!event.contentChanges.length) return;
       const rev = ++revision;
       irPending?.controller.abort();
+      imagePending?.controller.abort();
+      projectionPending?.controller.abort();
       buildAbort?.abort();
       checkAbort?.abort();
-      checkAbort = new AbortController();
+      const checkTicket = editorWork.beginCheck();
+      checkAbort = checkTicket.controller;
       const signal = checkAbort.signal;
       clearTimeout(checkTimer);
       clearTimeout(spatialTimer);
@@ -630,43 +748,75 @@ function activate(context) {
             entry && root
               ? vscode.Uri.file(path.resolve(root, entry))
               : event.document.uri,
+            {signal},
           );
           if (signal.aborted || rev !== revision) return;
           await service().call("check", { ...proj, revision: rev }, { signal });
           if (rev === revision) diagnostics.clear();
         } catch (error) {
-          if (rev === revision) await report(error, proj, true);
+          if (rev === revision && !signal.aborted) await report(error, proj, true);
+        } finally {
+          editorWork.finishCheck(checkTicket);
         }
       }, 500);
     }),
   );
   context.subscriptions.push(
     vscode.languages.registerDocumentFormattingEditProvider("pixellang", {
-      async provideDocumentFormattingEdits(doc) {
+      async provideDocumentFormattingEdits(doc, options, token) {
         if (doc.uri.scheme !== "file") return [];
-        const proj = await collect(doc.uri);
-        const formatted = await service().call("format", proj);
-        return [
-          vscode.TextEdit.replace(
-            new vscode.Range(
-              doc.positionAt(0),
-              doc.positionAt(doc.getText().length),
+        const version = doc.version;
+        const text = doc.getText();
+        const entry = path.basename(doc.uri.fsPath);
+        const controller = new AbortController();
+        const cancellation = token.onCancellationRequested(() => controller.abort());
+        try {
+          if (token.isCancellationRequested) return [];
+          const formatted = await service().call("format", {
+            entry, files: { [entry]: text }, revision: version,
+          }, { signal: controller.signal });
+          if (token.isCancellationRequested || doc.version !== version) return [];
+          if (formatted.files[entry] === text) return [];
+          return [
+            vscode.TextEdit.replace(
+              new vscode.Range(doc.positionAt(0), doc.positionAt(text.length)),
+              formatted.files[entry],
             ),
-            formatted.files[proj.sourceName || proj.entry],
-          ),
-        ];
+          ];
+        } finally {
+          cancellation.dispose();
+        }
       },
     }),
   );
-  async function symbolLocations(method, doc, pos, includeDeclaration = true) {
-    const proj = await collect(doc.uri);
-    const result = await service().call(method, {
-      ...proj,
-      source: proj.sourceName || path.relative(proj.root, doc.uri.fsPath).split(path.sep).join("/"),
+  async function editorRequest(method, doc, fields, token) {
+    const version = doc.version;
+    const controller = new AbortController();
+    const untrack = editorWork.track(controller);
+    const subscription = token?.onCancellationRequested(() => controller.abort());
+    if (token?.isCancellationRequested) controller.abort();
+    try {
+      if (method === "document-symbols") await editorWork.beforeOutline(controller.signal);
+      const proj = await collect(doc.uri, {signal: controller.signal});
+      if (doc.version !== version) controller.abort();
+      const result = await service().call(method, {
+        ...proj,
+        source: proj.sourceName || path.relative(proj.root, doc.uri.fsPath).split(path.sep).join("/"),
+        ...fields,
+      }, {signal: controller.signal});
+      if (doc.version !== version || controller.signal.aborted) throw new vscode.CancellationError();
+      return {proj, result};
+    } catch (error) {
+      if (controller.signal.aborted || error.name === "AbortError") throw new vscode.CancellationError();
+      throw error;
+    } finally { untrack(); subscription?.dispose(); }
+  }
+  async function symbolLocations(method, doc, pos, includeDeclaration = true, token) {
+    const {proj, result} = await editorRequest(method, doc, {
       offset: Array.from(doc.getText().slice(0, doc.offsetAt(pos))).length,
       include_declaration: includeDeclaration,
       with_sources: true,
-    });
+    }, token);
     const navigationProject = { ...proj, files: result.files };
     const spans = Array.isArray(result.result) ? result.result : result.result ? [result.result] : [];
     return Promise.all(spans.map(async span => {
@@ -678,27 +828,24 @@ function activate(context) {
   }
   context.subscriptions.push(
     vscode.languages.registerDefinitionProvider("pixellang", {
-      provideDefinition(doc, pos) {
-        return symbolLocations("definition", doc, pos);
+      provideDefinition(doc, pos, token) {
+        return symbolLocations("definition", doc, pos, true, token);
       },
     }),
     vscode.languages.registerReferenceProvider("pixellang", {
-      provideReferences(doc, pos, options) {
-        return symbolLocations("references", doc, pos, options.includeDeclaration);
+      provideReferences(doc, pos, options, token) {
+        return symbolLocations("references", doc, pos, options.includeDeclaration, token);
       },
     }),
   );
   context.subscriptions.push(
     vscode.languages.registerRenameProvider("pixellang", {
-      async provideRenameEdits(doc, pos, newName) {
+      async provideRenameEdits(doc, pos, newName, token) {
         if (doc.uri.scheme !== "file") throw new Error("Snapshot source is read-only; rename from the workspace source.");
-        const proj = await collect(doc.uri);
-        const edits = await service().call("rename", {
-          ...proj,
-          source: proj.sourceName || path.relative(proj.root, doc.uri.fsPath).split(path.sep).join("/"),
+        const {proj, result: edits} = await editorRequest("rename", doc, {
           offset: Array.from(doc.getText().slice(0, doc.offsetAt(pos))).length,
           new_name: newName,
-        });
+        }, token);
         // Binding validation includes unchanged references, so all analyzed
         // documents must still match the snapshot, not only edited documents.
         for (const [filename, text] of Object.entries(proj.files)) {
@@ -725,14 +872,53 @@ function activate(context) {
     }),
   );
   context.subscriptions.push(
-    vscode.languages.registerCompletionItemProvider("pixellang", {
-      async provideCompletionItems(doc, pos) {
-        const proj = await collect(doc.uri);
-        const candidates = await service().call("completion", {
-          ...proj,
-          source: proj.sourceName || path.relative(proj.root, doc.uri.fsPath).split(path.sep).join("/"),
+    vscode.languages.registerSignatureHelpProvider("pixellang", {
+      async provideSignatureHelp(doc, pos, token) {
+        const version = doc.version;
+        const {result: result} = await editorRequest("signature-help", doc, {
           offset: Array.from(doc.getText().slice(0, doc.offsetAt(pos))).length,
-        });
+        }, token);
+        if (!result || doc.version !== version) return null;
+        const signature = new vscode.SignatureInformation(result.label);
+        signature.parameters = result.parameters.map(label => new vscode.ParameterInformation(label));
+        const help = new vscode.SignatureHelp();
+        help.signatures = [signature];
+        help.activeSignature = 0;
+        help.activeParameter = result.activeParameter;
+        return help;
+      },
+    }, "(", ","),
+    vscode.languages.registerHoverProvider("pixellang", {
+      async provideHover(doc, pos, token) {
+        const version = doc.version;
+        const {result: result} = await editorRequest("hover", doc, {
+          offset: Array.from(doc.getText().slice(0, doc.offsetAt(pos))).length,
+        }, token);
+        if (!result || doc.version !== version) return null;
+        const content = new vscode.MarkdownString();
+        content.appendCodeblock(result.label, "pixellang");
+        return new vscode.Hover(content, new vscode.Range(
+          position(doc, result.span.start), position(doc, result.span.end),
+        ));
+      },
+    }),
+    vscode.languages.registerDocumentSymbolProvider("pixellang", {
+      async provideDocumentSymbols(doc, token) {
+        const version = doc.version;
+        const {result: result} = await editorRequest("document-symbols", doc, {}, token);
+        if (doc.version !== version) return [];
+        return result.map(item => new vscode.DocumentSymbol(
+          item.name, "", vscode.SymbolKind[item.kind],
+          new vscode.Range(position(doc, item.span.start), position(doc, item.span.end)),
+          new vscode.Range(position(doc, item.selection.start), position(doc, item.selection.end)),
+        ));
+      },
+    }),
+    vscode.languages.registerCompletionItemProvider("pixellang", {
+      async provideCompletionItems(doc, pos, token) {
+        const {result: candidates} = await editorRequest("completion", doc, {
+          offset: Array.from(doc.getText().slice(0, doc.offsetAt(pos))).length,
+        }, token);
         return candidates.map(candidate => {
           const item = new vscode.CompletionItem(
             candidate.label, vscode.CompletionItemKind[candidate.kind],
@@ -755,13 +941,17 @@ function activate(context) {
   context.subscriptions.push(log, diagnostics, status, {
     dispose() {
       clearTimeout(checkTimer);
+      editorWork.cancel();
       irPending?.controller.abort();
+      imagePending?.controller.abort();
+      projectionPending?.controller.abort();
       buildAbort?.abort();
       checkAbort?.abort();
       panel?.dispose();
     },
   });
-  api = { service, collect, build, inspectIR, run, sourceDocument, refreshSpatial, applySpatial, getCurrent: () => current };
+  const nativeGraphs = require('./native-graphs').registerNativeGraphs(vscode, context, service, collect, fileUri);
+  api = { application, nativeGraphs, service, collect, build, inspectIR, inspectImage, inspectProjection, run, sourceDocument, refreshSpatial, applySpatial, getCurrent: () => current };
   return api;
 }
 module.exports = { activate, deactivate() {}, getAPI: () => api };

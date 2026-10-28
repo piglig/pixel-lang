@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 SCALARS = frozenset({"int", "float64", "bool", "str", "json", "unit"})
+SPATIAL_TYPES = frozenset({'Point3', 'Vec3', 'Transform3', 'Entity', 'Space', 'Link'})
 MAX_TYPE_DEPTH = 32
 MAX_TYPE_NODES = 256
 MAX_TYPE_TEXT = 4096
@@ -22,13 +23,19 @@ class Type:
     args: tuple["Type", ...] = ()
 
     def spelling(self):
+        if self.kind == "inout":
+            return "inout<" + self.args[0].spelling() + ">"
         if self.kind == "array":
             return self.args[0].spelling() + "[]"
         if self.kind == "map":
-            return self.args[0].spelling() + "{}"
+            if len(self.args) != 2:
+                raise ValueError("Map types require key and value types")
+            return "map<" + ",".join(a.spelling() for a in self.args) + ">"
         if self.kind == "function":
+            if self.name not in ("", "effect"):
+                raise ValueError("Unknown function effect contract")
             return (
-                "fn("
+                ("effect_fn(" if self.name == "effect" else "fn(")
                 + ",".join(a.spelling() for a in self.args[:-1])
                 + ")->("
                 + self.args[-1].spelling()
@@ -53,13 +60,19 @@ class Type:
         )
 
     def display(self, name_of=lambda name: name):
+        if self.kind == "inout":
+            return "inout " + self.args[0].display(name_of)
         if self.kind == "array":
             return "[" + self.args[0].display(name_of) + "]"
         if self.kind == "map":
-            return "map[" + self.args[0].display(name_of) + "]"
+            if len(self.args) != 2:
+                raise ValueError("Map types require key and value types")
+            return "map[" + ", ".join(a.display(name_of) for a in self.args) + "]"
         if self.kind == "function":
+            if self.name not in ("", "effect"):
+                raise ValueError("Unknown function effect contract")
             return (
-                "fn("
+                ("effect fn(" if self.name == "effect" else "fn(")
                 + ", ".join(a.display(name_of) for a in self.args[:-1])
                 + ")"
                 + (
@@ -106,12 +119,13 @@ class TypeParser:
         self.nodes += 1
         if depth > MAX_TYPE_DEPTH or self.nodes > MAX_TYPE_NODES:
             raise ValueError("Type complexity limit exceeded")
-        if self.take("fn("):
+        effect = self.take("effect_fn(")
+        if effect or self.take("fn("):
             params = self.sequence(")", depth)
             self.need("->(")
             result = self.type(depth + 1)
             self.need(")")
-            value = Type("function", args=params + (result,))
+            value = Type("function", name="effect" if effect else "", args=params + (result,))
         else:
             match = re.match(
                 r"@[0-9]{1,5}:[0-9]{1,5}|@[\w]+(?:\.[\w]+)?|\$[\w]+|[A-Za-z_][A-Za-z_0-9]*",
@@ -125,7 +139,19 @@ class TypeParser:
                 value = Type("parameter", name[1:])
             elif name in SCALARS:
                 value = Type("scalar", name)
-            elif name in ("Error", "Option") or name.startswith("@"):
+            elif name == "inout":
+                self.need("<")
+                args = self.sequence(">", depth)
+                if len(args) != 1:
+                    raise ValueError("Inout mode requires one value type")
+                value = Type("inout", args=args)
+            elif name == "map":
+                self.need("<")
+                args = self.sequence(">", depth)
+                if len(args) != 2:
+                    raise ValueError("Map type requires key and value types")
+                value = Type("map", args=args)
+            elif name in SPATIAL_TYPES or name in ("Error", "Option", "Result", "Flow") or name.startswith("@"):
                 if (
                     name.startswith("@")
                     and ":" in name
@@ -133,14 +159,12 @@ class TypeParser:
                 ):
                     raise ValueError("Nominal type identity exceeds pixel range")
                 args = self.sequence(">", depth) if self.take("<") else ()
-                value = Type("nominal", name, args)
+                value = Type("flow_handle" if name == "Flow" else "spatial" if name in SPATIAL_TYPES else "nominal", name, args)
             else:
                 raise ValueError("Unknown type name")
         while True:
             if self.take("[]"):
                 value = Type("array", args=(value,))
-            elif self.take("{}"):
-                value = Type("map", args=(value,))
             else:
                 break
             self.nodes += 1
@@ -165,14 +189,29 @@ def parse_type(text):
     return result
 
 
+def is_parameter_type(value, parameters=frozenset()):
+    if value.kind == "inout":
+        return len(value.args) == 1 and is_value_type(value.args[0], parameters)
+    return is_value_type(value, parameters)
+
+
 def is_value_type(value, parameters=frozenset()):
     """Structural validity; declaration arity/access are checked by the checker."""
+    if value.kind == "inout":
+        return False
     if value.kind == "scalar":
         return value.name != "unit"
     if value.kind == "parameter":
         return value.name in parameters
+    if value.kind == "map":
+        return len(value.args) == 2 and all(is_value_type(a, parameters) for a in value.args)
+    if value.kind == 'flow_handle':
+        return len(value.args) == 1 and value.args[0].kind == 'function' and is_value_type(value.args[0], parameters)
+    if value.kind == 'spatial':
+        arity = 1 if value.name in ('Point3', 'Vec3') else 3 if value.name in ('Space', 'Link') else 2
+        return len(value.args) == arity and all(is_value_type(a, parameters) for a in value.args)
     if value.kind == "function":
-        return all(is_value_type(a, parameters) for a in value.args[:-1]) and (
+        return value.name in ("", "effect") and bool(value.args) and all(is_parameter_type(a, parameters) for a in value.args[:-1]) and (
             value.args[-1] == Type("scalar", "unit")
             or is_value_type(value.args[-1], parameters)
         )
@@ -181,4 +220,52 @@ def is_value_type(value, parameters=frozenset()):
             return False
         if value.name == "Option" and len(value.args) != 1:
             return False
-    return all(is_value_type(a, parameters) for a in value.args)
+        if value.name == "Result" and len(value.args) != 2:
+            return False
+    return value.kind in ("array", "nominal") and (value.kind != "array" or len(value.args) == 1) and all(is_value_type(a, parameters) for a in value.args)
+
+
+@lru_cache(maxsize=4096)
+def array_item(spelling):
+    typ = parse_type(spelling)
+    return typ.args[0].spelling() if typ.kind == 'array' else None
+
+
+@lru_cache(maxsize=4096)
+def is_typed_map(spelling):
+    """Identify the outer map constructor, not an array containing maps."""
+    typ = parse_type(spelling)
+    return typ.kind == 'map' and len(typ.args) == 2
+
+
+@lru_cache(maxsize=4096)
+def map_parts(spelling):
+    """Return explicit key/value spellings, or None for a non-map type."""
+    typ = parse_type(spelling)
+    if typ.kind != 'map':
+        return None
+    return tuple(arg.spelling() for arg in typ.args)
+
+
+def is_assignable(expected: Type, actual: Type) -> bool:
+    """Whether a callable can satisfy a required signature without conversion.
+
+    Pure fn can satisfy effect_fn; the reverse is forbidden. Parameters are
+    contravariant and results covariant. All non-callable types remain invariant.
+    This relation assumes valid resolved types; body checking is separate.
+    """
+    if expected == actual:
+        return True
+    if expected.kind != "function" or actual.kind != "function":
+        return False
+    if (expected.name not in ("", "effect")
+            or actual.name not in ("", "effect")
+            or not expected.args or len(expected.args) != len(actual.args)):
+        return False
+    if expected.name != "effect" and actual.name == "effect":
+        return False
+    return (
+        all(is_assignable(given, required)
+            for required, given in zip(expected.args[:-1], actual.args[:-1]))
+        and is_assignable(expected.args[-1], actual.args[-1])
+    )

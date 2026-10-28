@@ -1,0 +1,36 @@
+import "model.pxl" as model
+
+// Stable syntax addresses shared by semantic queries and lowered instructions.
+export record Index { nodes: map[string, string], locations: map[string, model.NodeType] }
+export fn Key(module: int, node: int) -> string = string(module) + ":" + string(node)
+fn Visit(module: int, node: int, key: string, nodes: [model.Node], all: bool, wanted: map[string, bool], index: inout Index) {
+    index.nodes[Key(module, node)] = key
+    if all || wanted.has(key) { index.locations[key] = model.NodeType{module, node, typeId: -1} }
+    for position, child in nodes[node].children { Visit(module, child, key + "/" + string(position), nodes, all, wanted, &index) }
+}
+export fn Build(project: model.Project) -> Index {
+    return BuildMode(project, true, map[string, bool]{})
+}
+export fn ForInstructions(project: model.Project, previous: [string]) -> Index {
+    var wanted: map[string, bool] = map[string, bool]{}
+    for address in previous { wanted[address] = true }
+    return BuildMode(project, false, wanted)
+}
+// Reverse locations are needed only for identities retained by earlier queries.
+export fn ForLocations(project: model.Project, wanted: map[string, bool]) -> Index {
+    return BuildMode(project, false, wanted)
+}
+fn BuildMode(project: model.Project, all: bool, wanted: map[string, bool]) -> Index {
+    var index = Index{nodes: map[string, string]{}, locations: map[string, model.NodeType]{}}
+    for module, source in project.modules {
+        for declaration in source.declarations {
+            let key = jsonStringify(jsonFrom([source.path, declaration.kind, declaration.name]))
+            Visit(module, declaration.node, key, source.syntax.nodes, all, wanted, &index)
+        }
+        for item in source.imports {
+            let key = jsonStringify(jsonFrom([source.path, "import", item.alias]))
+            Visit(module, item.node, key, source.syntax.nodes, all, wanted, &index)
+        }
+    }
+    return index
+}

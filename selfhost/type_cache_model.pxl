@@ -1,0 +1,3 @@
+// Stable type descriptors shared by declaration and expression queries.
+export record CachedType { kind: string, name: string, origin: string, arguments: [int] }
+export record CachedValue { key: string, typeId: int }

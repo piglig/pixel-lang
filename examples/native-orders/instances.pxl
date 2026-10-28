@@ -1,0 +1,28 @@
+import "main.pxl" as orders
+import "model.pxl" as model
+import "std/time.pxl" as time
+
+effect fn main() {
+    match Demonstrate() {
+        .Ok(completed) => { print(completed.order.status == .Paid) },
+        .Err(error) => { print(error.message) }
+    }
+}
+
+effect fn Demonstrate() -> Result[model.Decision, Error] {
+    let first = orders.Order( model.Order{id: "A", status: .AwaitingPayment,
+                                                totalCents: 1299, expiresAt: time.Seconds(3)?})
+    let second = orders.Order( model.Order{id: "B", status: .AwaitingPayment,
+                                                 totalCents: 2499, expiresAt: time.Seconds(10)?})
+    let clock = time.At(0, time.Milliseconds(100)?)?
+    let paid = first.step(.Pay(1299), clock)
+    print(paid.order.id)
+    print(paid.order.totalCents)
+    print(paid.order.status == .Paid)
+    let rejected = second.step(.Pay(1299), clock)
+    print(rejected.order.id)
+    print(rejected.order.totalCents)
+    print(rejected.order.status == .AwaitingPayment)
+    let completed = second.step(.Pay(2499), clock)
+    return .Ok(completed)
+}

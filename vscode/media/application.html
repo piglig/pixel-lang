@@ -1,0 +1,10 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src {{csp}}; script-src 'nonce-{{nonce}}';">
+<link rel="stylesheet" href="{{css}}"><title>PixelLang Application</title></head><body>
+<header><strong>PixelLang <span>Application</span></strong><nav aria-label="Playback"><button id="play">Play</button><button id="pause">Pause</button><button id="step">Step →</button><button id="latest">Latest</button></nav></header>
+<div class="workspace"><main><div class="scene-tools"><label for="spaces">Space</label><select id="spaces"></select><button id="fit">Fit view</button></div><canvas id="scene" tabindex="0" aria-label="Three-dimensional application output. Drag to orbit, scroll to zoom."></canvas><div id="empty">Step to inspect the initial output.</div><div class="caption">X / Y / Z · spatial coordinates<span>Drag to orbit · Scroll to zoom</span></div></main>
+<aside><h2>Send event</h2><label for="variant">Variant</label><select id="variant"></select><label for="payload">Fields</label><textarea id="payload" rows="4" spellcheck="false">{}</textarea><details><summary>Event types</summary><pre id="schema"></pre></details><button id="send">Queue event</button><h2>Pending inputs</h2><div id="pending"></div><h2>Output</h2><pre id="output"></pre><details><summary>Flow state</summary><pre id="state"></pre></details></aside></div>
+<section class="timeline"><label for="time">Event</label><input id="time" type="range" min="0" max="0" value="0"><output id="position">0 / 0</output></section>
+<footer><span id="status" role="status">Loading…</span><div><label for="speed">Playback</label><select id="speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select><button id="debug">Debug event</button><button id="save">Save recording</button><button id="load">Load recording</button></div></footer><pre id="error" role="alert" hidden></pre>
+<script nonce="{{nonce}}" src="{{renderer}}"></script><script nonce="{{nonce}}" src="{{script}}"></script></body></html>

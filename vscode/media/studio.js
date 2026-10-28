@@ -4,17 +4,39 @@ const vscode = acquireVsCodeApi(),
   ctx = canvas.getContext("2d");
 let data,
   irRequestedSession,
+  imageRequestedSession,
+  projectionRequestedSession,
   angle = -0.65,
   pitch = 0.45,
   zoom = 1,
   drag,
   last,
   projected = [],
-  mode = "time",
+  mode = "debug",
   replaying = false,
   timer,
   waiting = false;
 const send = (type, extra = {}) => vscode.postMessage({ type, ...extra });
+function requestProjection() {
+  if (mode !== "time" || !data?.session || data.projection_ready || projectionRequestedSession === data.session) return;
+  projectionRequestedSession = data.session;
+  $("empty").hidden = false;
+  $("empty").textContent = "Generating execution space…";
+  send("inspect-projection", { session: data.session });
+}
+function showDebugSummary() {
+  $("empty").hidden = mode !== "debug";
+  if (mode === "debug") $("empty").textContent = !data ? "Build a program to debug it." :
+    (data.location ? `${data.location.source}:${data.location.start.line} · ${data.state.halted ? "Halted" : "Paused"}` :
+      (data.state.halted ? "Program finished." : "Ready to run or step."));
+}
+function requestImage() {
+  if (mode !== "image" || !data?.session || data.image || imageRequestedSession === data.session) return;
+  imageRequestedSession = data.session;
+  $("image").removeAttribute("src");
+  $("image").alt = "Generating executable PNG…";
+  send("inspect-image", { session: data.session });
+}
 function requestIR() {
   if (!$("ir-panel").open || !data?.session || data.inspection?.ir || irRequestedSession === data.session) return;
   irRequestedSession = data.session;
@@ -67,6 +89,26 @@ function seek(z) {
   waiting = true;
   send("seek", { z });
 }
+function requestProjection() {
+  if (mode !== "time" || !data?.session || data.projection_ready || projectionRequestedSession === data.session) return;
+  projectionRequestedSession = data.session;
+  $("empty").hidden = false;
+  $("empty").textContent = "Generating execution space…";
+  send("inspect-projection", { session: data.session });
+}
+function showDebugSummary() {
+  $("empty").hidden = mode !== "debug";
+  if (mode === "debug") $("empty").textContent = !data ? "Build a program to debug it." :
+    (data.location ? `${data.location.source}:${data.location.start.line} · ${data.state.halted ? "Halted" : "Paused"}` :
+      (data.state.halted ? "Program finished." : "Ready to run or step."));
+}
+function requestImage() {
+  if (mode !== "image" || !data?.session || data.image || imageRequestedSession === data.session) return;
+  imageRequestedSession = data.session;
+  $("image").removeAttribute("src");
+  $("image").alt = "Generating executable PNG…";
+  send("inspect-image", { session: data.session });
+}
 function requestIR() {
   if (!$("ir-panel").open || !data?.session || data.inspection?.ir || irRequestedSession === data.session) return;
   irRequestedSession = data.session;
@@ -77,18 +119,23 @@ $("ir-panel").ontoggle = () => {
   if (!$("ir-panel").open) irRequestedSession = undefined;
   else requestIR();
 };
-for (const id of ["time", "image", "spatial"])
+for (const id of ["debug", "time", "image", "spatial"])
   $(id + "-view").onclick = () => {
     mode = id;
+    send("view", { view: id });
     canvas.hidden = id !== "time";
     $("image").hidden = id !== "image";
     $("spatial-editor").hidden = id !== "spatial";
     canvas.parentElement.hidden = id === "spatial";
     $("axes").hidden = id !== "time";
+    $("debug-view").setAttribute("aria-pressed", id === "debug");
     $("time-view").setAttribute("aria-pressed", id === "time");
     $("image-view").setAttribute("aria-pressed", id === "image");
     $("spatial-view").setAttribute("aria-pressed", id === "spatial");
+    showDebugSummary();
+    if (id === "time") { projectionRequestedSession = undefined; requestProjection(); }
     if (id === "spatial") send("spatial-open");
+    if (id === "image") { imageRequestedSession = undefined; requestImage(); }
     draw();
   };
 window.addEventListener("message", (event) => {
@@ -111,10 +158,27 @@ window.addEventListener("message", (event) => {
     else if (irRequestedSession !== data.session) $("ir").textContent = "Open to inspect compiler IR.";
     requestIR();
     if (data.image) $("image").src = "data:image/png;base64," + data.image;
+    requestImage();
+    showDebugSummary();
+    requestProjection();
     $("status").textContent =
       `${data.state.halted ? "Halted" : "Paused"} · ${data.event?.op || "Initial state"} · ${data.volume.voxels.length} voxels in time window`;
     draw();
     play();
+  }
+  if (message.type === "projection-error" && message.session === data?.session) {
+    $("empty").hidden = false;
+    $("empty").textContent = message.message + " Select 3D · Time again to retry.";
+  }
+  if (message.type === "image" && message.session === data?.session) {
+    data.image = message.image;
+    $("image").src = "data:image/png;base64," + message.image;
+    $("image").alt = "Executable PNG";
+  }
+  if (message.type === "image-error" && message.session === data?.session) {
+    $("image").alt = message.message + " Select PNG again to retry.";
+    $("error").hidden = false;
+    $("error").textContent = message.message;
   }
   if (message.type === "ir" && message.session === data?.session) {
     data.inspection = { ...data.inspection, ir: message.ir };
@@ -133,6 +197,9 @@ window.addEventListener("message", (event) => {
   if (message.type === "stale") {
     data = undefined;
     irRequestedSession = undefined;
+    imageRequestedSession = undefined;
+    projectionRequestedSession = undefined;
+    $("image").removeAttribute("src");
     $("ir").textContent = "Rebuild to inspect the updated program.";
     replaying = false;
     clearTimeout(timer);

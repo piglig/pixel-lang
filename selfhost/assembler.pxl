@@ -1,56 +1,63 @@
 import "model.pxl" as model
 import "ir_state.pxl" as state
 
-export record Executable { magic: string, vm_version: string, language_version: string, compiler_version: string, records: map[map[string]], enums: map[map[map[string]]], constants: [json], entry: [string], functions: map[state.Function] }
+export record Executable { magic: string, vm_version: string, language_version: string, compiler_version: string, coordinateFrames: map[string, string], effectFunctions: [string], flows: map[string, state.FlowDefinition], records: map[string, map[string, string]], enums: map[string, map[string, map[string, string]]], constants: [json], entry: [string], functions: map[string, state.Function] }
 export record Output { bytecode: Executable, diagnostics: [model.Diagnostic] }
-fn Report(output: Output, instruction: state.Instruction, message: string) {
+fn Report(instruction: state.Instruction, message: string, diagnostics: inout [model.Diagnostic]) {
     let span = instruction.span
-    append(output.diagnostics, model.Diagnostic{source: span.source, phase: "assemble", message, start: span.start.offset, end: span.end.offset, line: span.start.line, column: span.start.column})
+    diagnostics.append(model.Diagnostic{source: span.source, phase: "assemble", message, start: span.start.offset, end: span.end.offset, line: span.start.line, column: span.start.column})
+}
+fn ConstantKey(value: json) -> Result[string, Error] {
+    let kind = jsonAsString(jsonGet(value, "type")?)?
+    return .Ok(kind + ":" + jsonStringify(jsonGet(value, "value")?))
 }
 export fn Assemble(lowered: state.Output) -> Output {
     let ir = lowered.ir
-    let executable = Executable{magic: "PIXELVM", vm_version: ir.version, language_version: ir.version, compiler_version: "0.8.0", records: ir.records, enums: ir.enums, constants: [], entry: slice(ir.entry, 0, len(ir.entry)), functions: map[state.Function]{}}
-    let output = Output{bytecode: executable, diagnostics: slice(lowered.diagnostics, 0, len(lowered.diagnostics))}
-    if len(output.diagnostics) > 0 { executable.entry = []; return output }
-    let constants = map[int]{}
+    var executable: Executable = Executable{magic: "PIXELVM", vm_version: ir.version, language_version: ir.version, compiler_version: "0.9.0", coordinateFrames: ir.coordinateFrames, effectFunctions: ir.effectFunctions, flows: ir.flows, records: ir.records, enums: ir.enums, constants: [], entry: slice(ir.entry, 0, len(ir.entry)), functions: map[string, state.Function]{}}
+    var diagnostics = lowered.diagnostics
+    if len(diagnostics) > 0 { executable.entry = []; return Output{bytecode: executable, diagnostics} }
+    var constants: map[string, int] = map[string, int]{}
     for name, function in ir.functions {
-        let labels = map[int]{}
+        var labels: map[string, int] = map[string, int]{}
         var pc = 0
         for instruction in function.instructions {
             if instruction.op == "LABEL" {
                 let key = jsonStringify(instruction.arg)
-                if has(labels, key) { Report(output, instruction, "Duplicate label") }
+                if labels.has(key) { Report(instruction, "Duplicate label", &diagnostics) }
                 else { labels[key] = pc }
             } else { pc += 1 }
         }
-        let code: [state.Instruction] = []
+        var code: [state.Instruction] = []
         for instruction in function.instructions {
             if instruction.op == "LABEL" { continue }
             var op = instruction.op
             var arg = instruction.arg
             if op == "CONST" {
-                let kind = jsonAsString(jsonGet(arg, "type"))
-                let key = kind + ":" + jsonStringify(jsonGet(arg, "value"))
+                var key = ""
+                match ConstantKey(arg) {
+                    .Ok(value) => { key = value },
+                    .Err(error) => { Report(instruction, error.message, &diagnostics); continue }
+                }
                 var constant = -1
-                if has(constants, key) { constant = constants[key] }
+                if constants.has(key) { constant = constants[key] }
                 else {
                     constant = len(executable.constants)
                     constants[key] = constant
-                    append(executable.constants, arg)
+                    executable.constants.append(arg)
                 }
                 op = "PUSH"
                 arg = jsonFrom(constant)
-            } else if op == "JUMP" || op == "JUMP_IF_FALSE" || op == "JUMP_IF_TRUE" || op == "TRY" {
+            } else if op == "JUMP" || op == "JUMP_IF_FALSE" || op == "JUMP_IF_TRUE" {
                 let key = jsonStringify(arg)
-                if !has(labels, key) { Report(output, instruction, "Unknown label"); continue }
+                if !labels.has(key) { Report(instruction, "Unknown label", &diagnostics); continue }
                 let target = labels[key]
-                if target >= pc { Report(output, instruction, "Label points past function body"); continue }
+                if target >= pc { Report(instruction, "Label points past function body", &diagnostics); continue }
                 arg = jsonFrom(target)
             }
-            append(code, state.Instruction{op, arg, module: instruction.module, node: instruction.node, span: instruction.span})
+            code.append(state.Instruction{op, arg, module: instruction.module, node: instruction.node, span: instruction.span})
         }
         executable.functions[name] = state.Function{params: function.params, captures: function.captures, locals: function.locals, result: function.result, instructions: code}
     }
-    if len(output.diagnostics) > 0 { executable.functions = map[state.Function]{}; executable.entry = [] }
-    return output
+    if len(diagnostics) > 0 { executable.functions = map[string, state.Function]{}; executable.entry = [] }
+    return Output{bytecode: executable, diagnostics}
 }

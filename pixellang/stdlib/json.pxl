@@ -1,13 +1,14 @@
-// Immutable, tagged JSON values. Numeric text is preserved without float rounding.
-export fn Parse(text: string) -> json = jsonParse(text)
+// Tagged JSON values. Numeric text is preserved without float rounding.
+// Parsing and shape checks expose expected data failures as values.
+export fn Parse(text: string) -> Result[json, Error] = jsonParse(text)
 export fn Stringify(value: json) -> string = jsonStringify(value)
 export fn Kind(value: json) -> string = jsonKind(value)
-export fn Get(value: json, key: string) -> json = jsonGet(value, key)
-export fn At(value: json, index: int) -> json = jsonAt(value, index)
-export fn Keys(value: json) -> [string] = jsonKeys(value)
-export fn Int(value: json) -> int = jsonAsInt(value)
-export fn String(value: json) -> string = jsonAsString(value)
-export fn Bool(value: json) -> bool = jsonAsBool(value)
+export fn Get(value: json, key: string) -> Result[json, Error] = jsonGet(value, key)
+export fn At(value: json, index: int) -> Result[json, Error] = jsonAt(value, index)
+export fn Keys(value: json) -> Result[[string], Error] = jsonKeys(value)
+export fn Int(value: json) -> Result[int, Error] = jsonAsInt(value)
+export fn String(value: json) -> Result[string, Error] = jsonAsString(value)
+export fn Bool(value: json) -> Result[bool, Error] = jsonAsBool(value)
 export fn Null() -> json = jsonNull()
-export fn Object(values: map[json]) -> json = jsonFrom(values)
+export fn Object(values: map[string, json]) -> json = jsonFrom(values)
 export fn Array(values: [json]) -> json = jsonFrom(values)

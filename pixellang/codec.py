@@ -21,8 +21,6 @@ KEYWORDS = [
     "import",
     "export",
     "do",
-    "try",
-    "catch",
     "for",
     "in",
     "record",
@@ -32,19 +30,23 @@ KEYWORDS = [
     "continue",
 ]
 KEYWORDS += ["enum", "variant", "match", "case", "otherwise", "lambda", "lambda_body"]
+KEYWORDS += ["effect_fn", "frame", "flow", "instance", "state", "next", "output", "effect_body", "with", "step", "value_block", "value_body", "block_result"]
 PUNCT = ["(", ")", ",", ":", "=", "->", ".", "[", "]", "{", "}", "@"]
 PUNCT += ["+=", "-=", "*=", "/=", "%="]
-PUNCT += ["=>"]
+PUNCT += ["=>", "&", "?", "::"]
 TYPES = ["int", "bool", "str", "unit", "map", "record", "json", "Error"]
 TYPES += ["float64"]
 TYPES += ["parameter"]
 TYPES += ["Option", "function"]
+TYPES += ["frame", "Point3", "Vec3", "Transform3", "Entity", "Space", "Flow", "Link", "effect_function", "Equatable", "Ordered", "Numeric", "Hashable"]
+TYPES += ["inout", "Result"]
+NATIVE_BUILTINS = ['Space']
 TABLES = {
     48: ("op", OPS),
     64: ("keyword", KEYWORDS),
     80: ("punct", PUNCT),
     96: ("type", TYPES),
-    128: ("builtin", BUILTINS),
+    128: ("builtin", BUILTINS + NATIVE_BUILTINS),
 }
 MAX_PIXELS = 1_000_000
 
@@ -140,7 +142,7 @@ def validate(doc, source="<source>"):
         raise PixelError("format", "Metadata must be an object")
     if "bundle" in doc and (
         not isinstance(doc["bundle"], dict)
-        or doc["bundle"].get("version") != "0.8"
+        or doc["bundle"].get("version") != "0.9"
         or not isinstance(doc["bundle"].get("modules", {}), dict)
     ):
         raise PixelError("format", "Invalid bundled modules")

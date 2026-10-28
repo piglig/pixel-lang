@@ -1,28 +1,113 @@
 import "model.pxl" as model
 import "project.pxl" as project
-export record Info { imports: [string], interface: string }
+export record TestFunction { name: string, valid: bool }
+export record Info { imports: [string], interface: string, tests: [TestFunction], hasMain: bool }
 fn Shape(nodes: [model.Node], index: int) -> string {
     let node = nodes[index]
-    let values = [jsonStringify(jsonFrom(node.kind)), jsonStringify(jsonFrom(node.text))]
+    var values: [string] = [jsonStringify(jsonFrom(node.kind)), jsonStringify(jsonFrom(node.text))]
     for offset, child in node.children {
         // Top-level function signatures are explicit; bodies are implementation.
-        if node.kind == "fn" && offset == len(node.children) - 1 { continue }
-        append(values, Shape(nodes, child))
+        if model.NamedCallable(node.kind) && offset == len(node.children) - 1 {
+            // Effect inference is part of the callable interface. Pure arithmetic
+            // body edits keep their cache identity, while changed call/alias
+            // dependencies invalidate callers before incremental checking.
+            values.append(EffectSurface(nodes, child))
+            if BorrowSignature(nodes, index) { values.append(BorrowSurface(nodes, child)) }
+            continue
+        }
+        values.append(Shape(nodes, child))
     }
     return "[" + join(values, ",") + "]"
 }
 export fn Describe(parsed: model.Parsed, path: string) -> Info {
-    let imports: [string] = []
-    let shapes: [string] = []
+    var imports: [string] = []
+    var shapes: [string] = []
+    var tests: [TestFunction] = []
+    var hasMain = false
     for root in parsed.roots {
         let node = parsed.nodes[root]
         if node.kind == "import" {
-            match project.Resolve(path, node.text) { Some(target) => { append(imports, target) }, None => {} }
+            match project.Resolve(path, node.text) { .Some(target) => { imports.append(target) }, .None => {} }
         }
         // Include private declarations conservatively: exported records may refer
         // to private types. Transitive import invalidation covers external types.
-        append(shapes, Shape(parsed.nodes, root))
+        shapes.append(Shape(parsed.nodes, root))
+        var declaration = node
+        if declaration.kind == "export" { declaration = parsed.nodes[declaration.children[0]] }
+        if declaration.kind == "fn" {
+            if declaration.text == "main" { hasMain = true }
+            if len(declaration.text) >= 5 && slice(declaration.text, 0, 5) == "test_" {
+                var valid = true
+                for child in declaration.children {
+                    let part = parsed.nodes[child]
+                    if part.kind == "parameter" || part.kind == "type_parameter" { valid = false }
+                    if part.kind == "result" {
+                        let result = parsed.nodes[part.children[0]]
+                        if result.kind != "type" || result.text != "unit" || len(result.children) != 0 { valid = false }
+                    }
+                }
+                tests.append(TestFunction{name: declaration.text, valid})
+            }
+        }
     }
-    return Info{imports, interface: "[" + join(shapes, ",") + "]"}
+    return Info{imports: imports, interface: "[" + join(shapes, ",") + "]", tests: tests, hasMain}
 
+}
+
+fn PureBuiltin(name: string) -> bool {
+    for builtin in ["len", "slice", "string", "parseInt", "assert", "split", "join", "trim", "replace", "keys", "has", "jsonDecode", "jsonParse", "jsonStringify", "jsonKind", "jsonGet", "jsonAt", "jsonAsInt", "jsonAsString", "jsonAsBool", "jsonFrom", "jsonNull", "jsonKeys", "float64", "int", "parseFloat64", "jsonAsFloat64", "unicodeCategory", "utf8Encode", "utf8Decode", "float64Bytes", "float64FromBytes", "crc32", "zlibCompress", "zlibDecompress", "arrayRepeat", "Error"] {
+        if name == builtin { return true }
+    }
+    return false
+}
+fn EffectSurface(nodes: [model.Node], body: int) -> string {
+    var pending: [int] = [body]
+    var parts: [string] = []
+    while true {
+        match pending.pop() {
+            .Some(index) => {
+                let node = nodes[index]
+                if node.kind == "call" {
+                    let callee = nodes[node.children[0]]
+                    if callee.kind != "name" || !PureBuiltin(callee.text) { parts.append(Shape(nodes, node.children[0])) }
+                }
+                if node.kind == "let" || node.kind == "var" || node.kind == "assign" {
+                    let value = node.children[len(node.children) - 1]
+                    let kind = nodes[value].kind
+                    if kind == "name" || kind == "field" || kind == "specialize" || kind == "lambda" || kind == "annotate" {
+                        parts.append(jsonStringify(jsonFrom(node.text)))
+                        parts.append(Shape(nodes, value))
+                    }
+                }
+                for child in node.children { pending.append(child) }
+            }, .None => { break }
+        }
+    }
+    return "[" + join(parts, ",") + "]"
+}
+
+// Heap-bearing signatures expose alias/mutation behavior as an inferred contract.
+// Keep its body shape in dependency hashes, abstracting scalar literal values.
+fn BorrowSignature(nodes: [model.Node], index: int) -> bool {
+    let node = nodes[index]
+    var pending = slice(node.children, 0, len(node.children) - 1)
+    while true {
+        match pending.pop() {
+            .Some(index) => {
+                let item = nodes[index]
+                if item.kind == "type_array" || item.kind == "type_fn" || item.kind == "type_parameter" { return true }
+                if item.kind == "type" && item.text != "int" && item.text != "float64" && item.text != "bool" && item.text != "string" && item.text != "unit" && item.text != "json" { return true }
+                for child in item.children { pending.append(child) }
+            }, .None => { break }
+        }
+    }
+    return false
+}
+fn BorrowSurface(nodes: [model.Node], index: int) -> string {
+    let node = nodes[index]
+    var text = node.text
+    if node.kind == "literal_int" || node.kind == "literal_float64" || node.kind == "literal_str" || node.kind == "literal_keyword" { text = "" }
+    var parts: [string] = [jsonStringify(jsonFrom(node.kind)), jsonStringify(jsonFrom(text))]
+    for child in node.children { parts.append(BorrowSurface(nodes, child)) }
+    return "[" + join(parts, ",") + "]"
 }

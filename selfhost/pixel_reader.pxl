@@ -3,28 +3,45 @@ import "pixel_decode.pxl" as decoder
 
 // Offsets here are traversal-token indices. Pixel origins remain on tokens;
 // the project adapter must preserve them when assigning lexical AST intervals.
-export record Reader { source: string, module: int, tokens: [decoder.Token], index: int, nodes: [model.Node], diagnostics: [decoder.Diagnostic], depth: int }
+export record Reader { source: string, module: int, tokens: [decoder.Token], regionTokens: [decoder.Token], regionStart: int, index: int, nodes: [model.Node], diagnostics: [decoder.Diagnostic], depth: int }
 export fn New(source: string, module: int, tokens: [decoder.Token]) -> Reader {
-    return Reader{source, module, tokens, index: 0, nodes: [], diagnostics: [], depth: 0}
+    return Reader{source, module, tokens: tokens, regionTokens: tokens, regionStart: 0, index: 0, nodes: [], diagnostics: [], depth: 0}
 }
 export fn At(r: Reader, kind: string, value: string) -> bool {
-    return r.index < len(r.tokens) && r.tokens[r.index].kind == kind && jsonKind(r.tokens[r.index].value) == "string" && jsonAsString(r.tokens[r.index].value) == value
+    if r.index >= len(r.tokens) || r.tokens[r.index].kind != kind { return false }
+    match jsonAsString(r.tokens[r.index].value) {
+        .Ok(text) => { return text == value },
+        .Err(error) => { return false }
+    }
 }
-export fn Take(r: Reader, kind: string, value: string) -> bool {
+export fn Take(kind: string, value: string, r: inout Reader) -> bool {
     if !At(r, kind, value) { return false }
     r.index += 1; return true
 }
-export fn Problem(r: Reader, message: string) {
+export fn Problem(message: string, r: inout Reader) {
     if len(r.diagnostics) > 0 { return }
     var position: [int] = []
     if r.index < len(r.tokens) { position = r.tokens[r.index].position }
     else if len(r.tokens) > 0 { position = r.tokens[len(r.tokens) - 1].position }
-    append(r.diagnostics, decoder.Diagnostic{source: r.source, phase: "parse", message, position: slice(position, 0, len(position))})
+    r.diagnostics.append(decoder.Diagnostic{source: r.source, phase: "parse", message, position: slice(position, 0, len(position))})
 }
-export fn Need(r: Reader, kind: string, value: string) { if !Take(r, kind, value) { Problem(r, "Expected " + kind + " " + value) } }
-export fn Identity(r: Reader) -> int {
-    if r.index >= len(r.tokens) || r.tokens[r.index].kind != "id" { Problem(r, "Expected identifier pixel"); return -1 }
-    let value = jsonAsInt(r.tokens[r.index].value)
+export fn Need(kind: string, value: string, r: inout Reader) { if !Take(kind, value, &r) { Problem("Expected " + kind + " " + value, &r) } }
+export fn String(value: json, r: inout Reader) -> string {
+    match jsonAsString(value) {
+        .Ok(text) => { return text },
+        .Err(error) => { Problem(error.message, &r); return "" }
+    }
+}
+export fn Integer(value: json, r: inout Reader) -> int {
+    match jsonAsInt(value) {
+        .Ok(number) => { return number },
+        .Err(error) => { Problem(error.message, &r); return 0 }
+    }
+}
+export fn Identity(r: inout Reader) -> int {
+    if r.index >= len(r.tokens) || r.tokens[r.index].kind != "id" { Problem("Expected identifier pixel", &r); return -1 }
+    let value = Integer(r.tokens[r.index].value, &r)
+    if value < 0 || value > 65535 { Problem("Identifier must be from 0 to 65535", &r); return -1 }
     r.index += 1; return value
 }
 export fn Name(id: int) -> string = "_pixel_" + string(id)
@@ -32,8 +49,26 @@ export fn Qualified(r: Reader, module: int, id: int) -> string {
     if module == r.module { return Name(id) }
     return "_module_" + string(module) + "." + Name(id)
 }
-export fn Add(r: Reader, kind: string, text: string, children: [int], start: int) -> int {
+export fn Add(kind: string, text: string, children: [int], start: int, r: inout Reader) -> int {
     let index = len(r.nodes)
-    append(r.nodes, model.Node{kind, text, children, start, end: r.index})
+    r.nodes.append(model.Node{kind, text, children, start, end: r.index})
     return index
+}
+
+export fn SetKind(index: int, kind: string, r: inout Reader) {
+    let node = r.nodes[index]
+    r.nodes[index] = model.Node{kind, text: node.text, children: node.children, start: node.start, end: node.end}
+}
+export fn Attach(index: int, child: int, text: string, r: inout Reader) {
+    let node = r.nodes[index]
+    var children = node.children
+    children.append(child)
+    r.nodes[index] = model.Node{kind: node.kind, text, children: children, start: node.start, end: r.index}
+}
+
+// Literal decoding reads the immutable current region, avoiding a full-token
+// snapshot for every literal. Expose traversal offsets to the AST reader.
+export fn Literal(r: Reader) -> decoder.Literal {
+    let value = decoder.ReadLiteral(r.regionTokens, r.index - r.regionStart, r.source)
+    return decoder.Literal{kind: value.kind, value: value.value, next: value.next + r.regionStart, diagnostics: value.diagnostics}
 }

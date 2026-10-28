@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -11,6 +12,26 @@ from pixellang.workspace import Workspace
 
 
 class OnboardingTests(unittest.TestCase):
+    def test_published_first_programs_compile_and_run(self):
+        from pixellang.compiler_client import CompilerClient
+        from pixellang.vm import VM
+        root = Path(__file__).resolve().parents[1]
+        documents = {
+            'README.md': [[[1, 3]]],
+            'README.en.md': [[[1, 3]]],
+            'docs/zh-CN/learn/getting-started.md': [['Hello, PixelLang!'], [2, 7, 9]],
+            'docs/en/learn/getting-started.md': [['Hello, PixelLang!'], [2, 7, 9]],
+        }
+        with CompilerClient() as compiler:
+            for name, expected in documents.items():
+                blocks = re.findall(r'```pixellang\n(.*?)```', (root/name).read_text(), re.S)
+                self.assertEqual(len(blocks), len(expected), name)
+                for source, output in zip(blocks, expected):
+                    with self.subTest(document=name, output=output):
+                        response = compiler.request('compile', files={'main.pxl': source})
+                        self.assertEqual(response['status'], 'ok', response)
+                        self.assertEqual(VM(response['result']['bytecode']).run(), output)
+
     def test_created_project_runs_and_tests(self):
         with TemporaryDirectory() as folder:
             result = create_project(Path(folder) / "hello-pixels")

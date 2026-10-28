@@ -2,8 +2,7 @@ import json
 import unittest
 from pathlib import Path
 
-from pixellang.model import PixelError
-from pixellang.project import compile_project
+from tests.native_compiler import compile_native_sources
 from pixellang.vm import VM
 
 
@@ -11,15 +10,29 @@ class PictureLayoutTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         root = Path(__file__).resolve().parents[1]
-        cls.code = compile_project({
+        cls.code = compile_native_sources({
             'main.pxl': '''import "picture_layout.pxl" as layout
 record Request { dimensions: [[int]], scale: int, rows: int }
-fn main() { let r = jsonDecode[Request](input()); print(layout.Plan(r.dimensions, r.scale, r.rows)) }''',
+effect fn main() {
+ match jsonDecode::[Request](input()) {
+  .Ok(r) => { match layout.Plan(r.dimensions, r.scale, r.rows) {
+   .Ok(value) => {print(true); print(value)},
+   .Err(error) => {print(false); print(error)}
+  } },
+  .Err(error) => {print(false); print(error)}
+ }
+}''',
+            'failures.pxl': (root / 'selfhost/failures.pxl').read_text(),
             'picture_layout.pxl': (root / 'selfhost/picture_layout.pxl').read_text(),
-        })[1].bytecode
+        })
+
+    def result(self, dimensions, scale=4, rows=2):
+        return VM(self.code, input_text=json.dumps(dict(dimensions=dimensions, scale=scale, rows=rows)), max_steps=1000000).run()
 
     def plan(self, dimensions, scale=4, rows=2):
-        return VM(self.code, input_text=json.dumps(dict(dimensions=dimensions, scale=scale, rows=rows)), max_steps=1000000).run()[0]
+        success, result = self.result(dimensions, scale, rows)
+        self.assertTrue(success, result)
+        return result
 
     def test_wide_and_narrow_modules_fit_without_overlap(self):
         dimensions = [[2000, 1]] + [[10, 100]] * 63
@@ -48,5 +61,9 @@ fn main() { let r = jsonDecode[Request](input()); print(layout.Plan(r.dimensions
                                          ([[1001, 1000]], 4, 2), ([[1, 1]], 3, 2),
                                          ([[1, 1]], 4, 0), ([[1000, 1000]], 24, 2),
                                          ([[9223372036854775807, 1]], 4, 2)):
-            with self.subTest(dimensions=dimensions[:2]), self.assertRaises(PixelError):
-                self.plan(dimensions, scale, rows)
+            with self.subTest(dimensions=dimensions[:2]):
+                success, error = self.result(dimensions, scale, rows)
+                self.assertFalse(success)
+                self.assertEqual(error['kind'], 'compiler')
+                self.assertEqual(error['code'], 'compiler.invalid_data')
+                self.assertTrue(error['message'])

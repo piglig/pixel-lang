@@ -1,47 +1,62 @@
-# 空间语义（0.8）
+# 空间与源码布局
 
-[中文](spatial.md) · [English](../../../en/reference/language/spatial.md) · [文档首页](../../README.md)
+[简体中文](spatial.md) · [English](../../../en/reference/language/spatial.md) · [文档首页](../../README.md)
 
-当前坐标为非负整数 `(X,Y)`。内部点模型可表达任意维数，物理加载只接受二维。
-源码坐标不带时间含义；Studio 的第三显示轴单独表示执行时间。
+区分程序计算的空间、逻辑时间、像素源码结构和编辑器布局，是使用空间语义的前提。
 
-## 默认区域检测
+## 规则与接口
 
-没有显式 region 标记时：
+PixelLang 区分以下四种坐标与关系，不在它们之间隐式转换：
 
-1. 所有非透明像素解码为语义 token，不可达代码中的非法颜色也报错。
-2. 按精确 Y 分组，每行是候选语句区域，不做任意连通块填充。
-3. 没有 next 时按 X 递增，相邻 token 水平距离只能为 1、2、3；更大距离报断开错误。斜向或竖向邻接不连接表达式。
-4. 某行存在 next 时，必须形成覆盖该行全部 token 的有向、无环、无分支单链。链决定顺序，可以反向或跨大距离；
-   跨行、分支、环、遗漏、重复边和悬空端点报错。
-5. 缩进取区域最小物理 X，与链方向无关。按 Y 递增处理，把缩进大于等于当前区域的栈顶弹出；
-   剩余栈顶为默认父区域，空栈为模块级。整体水平平移合法。
-6. child 边覆盖目标的默认父区域，端点可为各自行中任意 token。父 Y 必须小于子 Y，每个子区域最多一个显式父；
-   其他行仍独立计算默认父区域。
-7. 只有 if、else、while、for、try、catch、函数区域允许子语句，语法进一步检查头、类型、操作数与作用域。
-   空块合法，同级按 Y 递增。
+| 模型 | 是否影响程序行为 | 含义 |
+| --- | --- | --- |
+| 原生空间 XYZ | 是 | `frame`、`Point3`、`Vec3`、实体与类型化连接参与计算；见[原生空间模型](../../internals/spatial-model.md)。 |
+| 逻辑时间 T | 是 | 事件与固定步长推进 flow 状态，独立于 XYZ；见[事件应用](../../guides/state-machines.md)。 |
+| 语义像素源码布局 | 是 | PNG 的二维像素编码 token 顺序与语法结构，规则见下文。 |
+| 编辑视图布局 | 否 | 组件图节点位置、相机、缩放与历史展示不改变程序。 |
 
-## 空间关系
+下面的非负整数 `(X,Y)` 专指 PNG 源码像素坐标，不限制程序计算的三维空间。
+时间轴可以作为历史视图的一个显示轴，但不能因此把原生空间的 Z 坐标解释为时间。
 
-| 关系 | 含义 |
+## 原生空间接口
+
+接收者接口定义如下。
+坐标系和负载类型来自接收者，调用时无需再次指定。
+
+| 操作 | 行为 |
 | --- | --- |
-| 邻接 | 同行 token 水平距离为一 |
-| 方向 | 默认 X 递增，可被 next 链覆盖 |
-| 距离 | 默认允许最多两个空格单元 |
-| 连通 | 隐式行片段或完整显式 next 链 |
-| 包含 | 缩进推导或显式父区域 |
-| 边界 | 行区分语句，退缩进区分作用域 |
-| 连接 | 验证后的 next、child 边 |
-| 顺序 | token 顺序及确定性的 Y 递增语句序列 |
+| `Space::[F, T, L](identity)` | 创建空快照；名称在一次运行中必须唯一 |
+| `space.insert(position, payload)` | 保留负载值快照，分配递增身份，返回新快照 |
+| `space.get(id)` | 返回该快照中的实体，不存在时产生执行故障 |
+| `space.move(entity, position)` | 按身份移动实体，返回新快照 |
+| `space.remove(entity)` | 删除实体，不复用其身份 |
+| `space.neighbors(entity, radius)` | 含边界、排除自身的欧氏距离查询 |
+| `space.ahead(origin, candidate, direction, tolerance)` | 判断候选实体是否在指定方向前方；容差使用空间长度单位 |
+| `space.size()` | 返回实体数量 |
+| `space.connect(source, target, payload)` | 创建有稳定身份的有向连接，保留负载值快照，返回新快照 |
+| `space.getLink(id)` | 读取连接；已删除身份不能复用 |
+| `space.disconnect(link)` | 删除指定连接，返回新快照 |
+| `space.setLinkPayload(link, payload)` | 替换连接负载，保留连接身份与端点 |
+| `space.outgoing(entity)` / `space.incoming(entity)` | 返回按身份排序的出边／入边 |
+| `space.linkCount()` | 返回连接数量 |
+| `space.source(link)` / `space.target(link)` | 在指定快照中按身份解析端点，取得该时刻的位置 |
+| `link.id` / `link.payload` | 读取身份或负载；负载为声明类型的独立值 |
+| `entity.id` / `entity.position` / `entity.payload` | 读取实体值；负载为声明类型的独立值 |
+| `point.distance(other)` / `vector.dot(other)` | 同坐标系的位置距离与位移点积 |
+| `transform.point(point)` / `transform.vector(vector)` | 显式转换位置或方向 |
+| `first.then(after)` | 先应用 first，再应用 after |
 
-包围盒只服务诊断，不是独立作用域边界；精确像素集合和父图会保留，不能认为矩形内每个像素都属于该区域。
-透明行只影响布局，当前没有专用边界颜色 token。
-颜色、操作数位置或缩进可能改变语义；整体平移和距离限制内的间距变化保持语义。
-图例和 UI 单元大小不改变源码字节。
+`ahead` 将方向归一化，再比较位移的方向投影是否严格大于 `tolerance`；该参数不是查询半径。
+删除实体前须断开所有关联连接。空间方法返回值，不原地修改接收者；例如
+`let disconnected = scene.disconnect(link)` 不会改变 `scene`。
+
+属性内部也不可通过赋值、容器修改或 `inout` 写入。`var data = link.payload` 创建可独立修改的本地值；
+修改后调用 `scene.setLinkPayload(link, data)` 得到新快照。实体属性读取该实体值保存的位置与负载；
+空间查询和移动则在接收者快照中按身份解析实体。
 
 ## 显式紧凑区域
 
-region 自环标记区域头，只要存在一个标记，整个源码使用显式区域模式：
+region 自环标记区域头。每个语义 token 必须属于一个显式标记的区域；没有标记的非空源码被拒绝：
 
 1. 标记唯一，区域按头的 `(Y,X)` 排序，同一物理行可有多个语句。
 2. 没有 next 的行按 X 递增且相邻距离最多三；新标记开启新区。
@@ -52,4 +67,23 @@ region 自环标记区域头，只要存在一个标记，整个源码使用显�
 
 发射器将完整区域装入横向分层布局，保留 token 顺序与父关系，相邻 token 不需要冗余 next 边。
 标记和父边是结构源码，不在图片注释中保存 AST、完整文本或字节码。像素和尺寸限制仍有效。
-未标记源码继续使用默认行规则。
+物理缩进不决定作用域。移动区域时必须同步移动连接端点。
+
+## 宿主调度
+
+main 创建 flow 后，由宿主配置应用调度，不将 XYZ 解释为时间。见[原生事件应用](../../guides/state-machines.md)。
+
+## 坐标与几何约束
+
+坐标采用右手系，Y 向上，分量为有限 float64。支持 meters、centimeters、millimeters；同单位不同 frame 仍是不同类型。
+Point3 表示位置，Vec3 表示位移：点减点得到位移，点加位移得到点，点加点不合法。
+半径邻域包含边界、排除自身，按稳定实体身份排序；半径须非负有限。
+
+`Transform3[From, To]` 的 `rotation` 是 3×3 正交旋转矩阵，`translation` 是 `Vec3[To]`。
+变换不允许改变左右手性或隐式缩放，单位换算由 frame 单位确定；`first.then(after)` 先应用 first。
+并行边和自环合法。身份删除后不复用，外来实体或不存在的身份导致执行故障。
+
+## 继续阅读
+
+- [完整文档目录](../../README.md)
+- [语言总览](overview.md)

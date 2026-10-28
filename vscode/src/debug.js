@@ -16,6 +16,8 @@ class PixelDebug {
     this.outputCount = 0;
     this.variablePaths = new Map();
     this.nextVariableReference = 100000;
+    this.graphRevision = 0;
+    this.graphPaused = false;
   }
   send(message) {
     this.emitter.fire({ seq: this.seq++, ...message });
@@ -46,22 +48,31 @@ class PixelDebug {
           this.event("initialized");
           break;
         case "launch": {
+          this.invalidateGraph();
           const epoch = ++this.epoch;
           this.started = false;
           this.result = undefined;
           this.launchAbort?.abort();
           const controller = new AbortController();
           this.launchAbort = controller;
-          const project = await this.host.collect(
+          let project, result;
+          if (a.applicationSession) {
+            result = await this.host.service().call('application-debug', {session:a.applicationSession,index:a.eventIndex}, {signal:controller.signal});
+            project = {...result.source_project,root:path.dirname(a.program),paths:{},snapshotOnly:true};
+          } else {
+          project = await this.host.collect(
             this.vscode.Uri.file(a.program),
           );
-          const result = await this.host.service().call("build", { ...project, input: a.input || "" }, { signal: controller.signal });
+          result = await this.host.service().call("build", { ...project, input: a.input || "", arguments: a.args || [] }, { signal: controller.signal });
           const latest = await this.host.collect(this.vscode.Uri.file(a.program));
           if (epoch !== this.epoch || controller.signal.aborted || latest.entry !== project.entry ||
               Object.keys(latest.files).length !== Object.keys(project.files).length ||
               Object.entries(project.files).some(([name, text]) => latest.files[name] !== text))
             throw new Error("Source changed or debug launch was cancelled.");
-          this.project = project;
+          }
+          if (epoch !== this.epoch || controller.signal.aborted) throw new Error('Debug launch cancelled.');
+          this.authoringProject = project;
+          this.project = { ...project, ...result.source_project };
           this.result = result;
           this.launchAbort = undefined;
           this.host.show();
@@ -123,9 +134,16 @@ class PixelDebug {
             totalFrames: this.result?.frames?.length || 0,
           });
           break;
-        case "scopes":
+        case "scopes": {
+          const flow = this.result?.flow_scopes?.find(scope => scope.frame === a.frameId);
+          let flowReference = 0;
+          if (flow) {
+            flowReference = this.nextVariableReference++;
+            this.variablePaths.set(flowReference, flow.path);
+          }
           this.respond(request, {
             scopes: [
+              ...(flow ? [{ name: `Flow: ${flow.name}`, variablesReference: flowReference, expensive: false }] : []),
               {
                 name: "Locals",
                 variablesReference: 100 + a.frameId,
@@ -140,6 +158,7 @@ class PixelDebug {
             ],
           });
           break;
+        }
         case "variables": {
           let variablePath;
           if (a.variablesReference >= 100000) {
@@ -169,6 +188,33 @@ class PixelDebug {
           this.respond(request, { variables: values });
           break;
         }
+        case "pixelFlowFrames": {
+          this.requireGraphPause();
+          const revision = this.graphRevision, z = this.result.cursor, session = this.result.session;
+          const result = await this.host.service().call('flow-frames', { session, z });
+          this.requireGraphPause();
+          if (revision !== this.graphRevision || session !== this.result.session ||
+              z !== this.result.cursor || result.z !== z) throw Error('Graph debug snapshot expired.');
+          this.respond(request, { revision, z, project: this.authoringProject || this.project,
+            frames: result.frames });
+          break;
+        }
+        case "pixelFlowGraph":
+        case "pixelFlowSpace":
+        case "pixelFlowChildren": {
+          this.requireGraphPause();
+          const revision = this.graphRevision, z = this.result.cursor;
+          if (a.revision !== revision) throw Error('Graph debug snapshot expired.');
+          if (!this.result.flow_scopes?.some(scope => scope.path[1] === a.frame)) throw Error('Unknown native graph frame.');
+          if (request.command !== 'pixelFlowGraph' && (!Array.isArray(a.path) || a.path[0] !== 'flow' || a.path[1] !== a.frame)) throw Error('Invalid graph value path.');
+          const method = request.command === 'pixelFlowGraph' ? 'flow-graph' : request.command === 'pixelFlowSpace' ? 'native-space-view' : 'variables';
+          const result = await this.host.service().call(method, { session: this.result.session, z,
+            frame: a.frame, path: a.path, neighbors: a.neighbors, start: a.start ?? 0, count: a.count ?? 100 });
+          this.requireGraphPause();
+          if (revision !== this.graphRevision || z !== this.result.cursor) throw Error('Graph debug snapshot expired.');
+          this.respond(request, { revision, ...result });
+          break;
+        }
         case "continue":
           this.respond(request, { allThreadsContinued: true });
           this.resume();
@@ -180,6 +226,7 @@ class PixelDebug {
           this.move(request.command);
           break;
         case "stepBack":
+          this.invalidateGraph();
           this.respond(request);
           this.running = false;
           this.epoch++;
@@ -200,6 +247,7 @@ class PixelDebug {
           break;
         case "disconnect":
         case "terminate":
+          this.invalidateGraph();
           this.launchAbort?.abort();
           this.running = false;
           this.epoch++;
@@ -257,7 +305,17 @@ class PixelDebug {
     if (this.stopOnEntry) this.stopped("entry");
     else this.resume();
   }
+  invalidateGraph() {
+    this.graphPaused = false;
+    this.graphRevision++;
+    this.event('pixelGraphInvalidated');
+  }
+  requireGraphPause() {
+    if (!this.graphPaused || !this.result || !this.project || this.project.snapshotOnly) throw Error('Pause a source debug session to inspect its native graph.');
+  }
   stopped(reason) {
+    this.graphPaused = true;
+    this.graphRevision++;
     this.variablePaths.clear();
     this.host.publish(this.result, this.project);
     this.host.reveal(this.result.location, this.project);
@@ -274,6 +332,7 @@ class PixelDebug {
     this.outputCount = this.result.output.length;
   }
   async move(kind) {
+    this.invalidateGraph();
     try {
       this.running = false;
       const epoch = ++this.epoch,
@@ -304,6 +363,7 @@ class PixelDebug {
     }
   }
   async resume() {
+    this.invalidateGraph();
     this.running = true;
     const epoch = ++this.epoch;
     try {
@@ -336,6 +396,8 @@ class PixelDebug {
     }
   }
   dispose() {
+    this.graphPaused = false;
+    this.graphRevision++;
     this.launchAbort?.abort();
     this.running = false;
     this.epoch++;

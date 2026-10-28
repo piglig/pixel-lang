@@ -2,66 +2,76 @@ import "model.pxl" as model
 import "pixel_decode.pxl" as decoder
 
 export record Output { syntax: model.Parsed, entries: [int], diagnostics: [decoder.Diagnostic] }
-record Context { source: string, raw: model.Parsed, nodes: [model.Node], tokens: [model.Token], bodies: map[int], used: map[bool], mapping: map[int], diagnostics: [decoder.Diagnostic] }
-fn Report(c: Context, index: int, message: string) {
+record Context { source: string, raw: model.Parsed, nodes: [model.Node], tokens: [model.Token], bodies: map[string, int], used: map[string, bool], mapping: map[string, int], diagnostics: [decoder.Diagnostic] }
+fn Report(index: int, message: string, c: inout Context) {
     if len(c.diagnostics) > 0 { return }
     let node = c.raw.nodes[index]
     var point: [int] = []
     if node.start < len(c.raw.tokens) { let token = c.raw.tokens[node.start]; point = [token.column - 1, token.line - 1] }
-    append(c.diagnostics, decoder.Diagnostic{source: c.source, phase: "parse", message, position: point})
+    c.diagnostics.append(decoder.Diagnostic{source: c.source, phase: "parse", message, position: point})
 }
-fn Copy(c: Context, index: int, depth: int, fallback: int) -> int {
-    if depth > 128 { Report(c, index, "AST nesting exceeds 128"); return -1 }
+fn Detached(kind: string) -> bool = kind == "lambda_body" || kind == "effect_body" || kind == "value_body"
+fn Copy(index: int, depth: int, fallback: int, c: inout Context) -> int {
+    if depth > 128 { Report(index, "AST nesting exceeds 128", &c); return -1 }
     if len(c.diagnostics) > 0 { return -1 }
     let node = c.raw.nodes[index]
     var kind = node.kind
     var text = node.text
     var children = node.children
-    if kind == "lambda_body" { Report(c, index, "Lambda body must be a separate root region"); return -1 }
+    if Detached(kind) { Report(index, "Detached body must be a separate root region", &c); return -1 }
+    if kind == "value_ref" {
+        if !c.bodies.has(text) { Report(index, "Missing value block body", &c); return -1 }
+        if c.used.has(text) { Report(index, "Reused or cyclic value block body", &c); return -1 }
+        let body = c.raw.nodes[c.bodies[text]]
+        if body.kind != "value_body" { Report(index, "Value block reference requires a value body", &c); return -1 }
+        c.used[text] = true; children = body.children; kind = "value_block"; text = ""
+    }
     if kind == "lambda_ref" {
-        if !has(c.bodies, text) { Report(c, index, "Missing lambda body"); return -1 }
-        if has(c.used, text) { Report(c, index, "Reused or cyclic lambda body"); return -1 }
+        if !c.bodies.has(text) { Report(index, "Missing lambda body", &c); return -1 }
+        if c.used.has(text) { Report(index, "Reused or cyclic lambda body", &c); return -1 }
+        if c.raw.nodes[c.bodies[text]].kind == "value_body" { Report(index, "Lambda reference requires a callable body", &c); return -1 }
         c.used[text] = true
         children = c.raw.nodes[c.bodies[text]].children
         kind = "lambda"; text = ""
+        if c.raw.nodes[c.bodies[node.text]].kind == "effect_body" { text = "effect" }
     }
     var origin = fallback
     if node.start < len(c.raw.tokens) && node.end > node.start { origin = node.start }
     let token = c.raw.tokens[origin]
-    let points: [[int]] = []
+    var points: [[int]] = []
     var cursor = origin
     while cursor < node.end && cursor < len(c.raw.tokens) && c.raw.tokens[cursor].line == token.line {
         let item = c.raw.tokens[cursor]
-        append(points, [item.column - 1, item.line - 1]); cursor += 1
+        points.append([item.column - 1, item.line - 1]); cursor += 1
     }
-    if len(points) == 0 { append(points, [token.column - 1, token.line - 1]) }
+    if len(points) == 0 { points.append([token.column - 1, token.line - 1]) }
     // Logical preorder intervals are separate from immutable physical origins.
     let start = len(c.tokens)
-    append(c.tokens, model.Token{kind: "pixel", text: "", value: jsonStringify(jsonFrom(points)), start, end: start + 1, line: token.line, column: token.column})
-    let copied: [int] = []
-    for child in children { append(copied, Copy(c, child, depth + 1, origin)) }
+    c.tokens.append(model.Token{kind: "pixel", text: "", value: jsonStringify(jsonFrom(points)), start, end: start + 1, line: token.line, column: token.column})
+    var copied: [int] = []
+    for child in children { copied.append(Copy(child, depth + 1, origin, &c)) }
     let result = len(c.nodes)
-    append(c.nodes, model.Node{kind, text, children: copied, start, end: len(c.tokens)})
+    c.nodes.append(model.Node{kind, text, children: copied, start, end: len(c.tokens)})
     c.mapping[string(index)] = result
     return result
 }
 export fn Build(syntax: model.Parsed, entries: [int], source: string) -> Output {
-    let c = Context{source, raw: syntax, nodes: [], tokens: [], bodies: map[int]{}, used: map[bool]{}, mapping: map[int]{}, diagnostics: []}
+    var c: Context = Context{source, raw: syntax, nodes: [], tokens: [], bodies: map[string, int]{}, used: map[string, bool]{}, mapping: map[string, int]{}, diagnostics: []}
     for root in syntax.roots {
         let node = syntax.nodes[root]
-        if node.kind == "lambda_body" {
-            if has(c.bodies, node.text) { Report(c, root, "Duplicate lambda body") }
+        if Detached(node.kind) {
+            if c.bodies.has(node.text) { Report(root, "Duplicate detached body", &c) }
             else { c.bodies[node.text] = root }
         }
     }
-    let roots: [int] = []
+    var roots: [int] = []
     for root in syntax.roots {
-        if syntax.nodes[root].kind != "lambda_body" { append(roots, Copy(c, root, 0, 0)) }
+        if !Detached(syntax.nodes[root].kind) { roots.append(Copy(root, 0, 0, &c)) }
     }
-    for name, node in c.bodies { if !has(c.used, name) { Report(c, node, "Unreferenced lambda body") } }
+    for name, node in c.bodies { if !c.used.has(name) { Report(node, "Unreferenced detached body", &c) } }
     var mapped: [int] = []
-    for entry in entries { if has(c.mapping, string(entry)) { append(mapped, c.mapping[string(entry)]) } }
-    let result = model.Parsed{tokens: c.tokens, nodes: c.nodes, roots, diagnostics: []}
-    if len(c.diagnostics) > 0 { result.roots = []; mapped = [] }
+    for entry in entries { if c.mapping.has(string(entry)) { mapped.append(c.mapping[string(entry)]) } }
+    if len(c.diagnostics) > 0 { roots = []; mapped = [] }
+    let result = model.Parsed{tokens: c.tokens, nodes: c.nodes, roots: roots, diagnostics: []}
     return Output{syntax: result, entries: mapped, diagnostics: c.diagnostics}
 }

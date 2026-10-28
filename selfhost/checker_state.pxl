@@ -1,43 +1,50 @@
 import "model.pxl" as model
 import "types.pxl" as types
 
-export record State { calls: [model.CallResolution], resolved: model.ResolvedTypes, references: map[int], declarations: map[int], annotations: map[int], signatures: map[int], expressions: [model.NodeType], diagnostics: [model.Diagnostic] }
+export record State { loopDepth: int, valueDepth: int, returnTypes: [int], activeValues: [int], functionOwners: [int], calls: [model.CallResolution], references: map[string, int], declarations: map[string, int], annotations: map[string, int], signatures: map[string, int], expressions: [model.NodeType], diagnostics: [model.Diagnostic] }
 export fn Key(module: int, node: int) -> string = string(module) + ":" + string(node)
-export fn Report(c: State, module: int, index: int, message: string) {
-    let source = c.resolved.bound.project.modules[module]
+export fn Report(module: int, index: int, message: string, resolved: model.ResolvedTypes, c: inout State) {
+    let source = resolved.bound.project.modules[module]
     let node = source.syntax.nodes[index]
     var line = 1
     var column = 1
     for token in source.syntax.tokens { if token.start >= node.start { line = token.line; column = token.column; break } }
-    append(c.diagnostics, model.Diagnostic{source: source.path, phase: "check", message, start: node.start, end: node.end, line, column})
+    c.diagnostics.append(model.Diagnostic{source: source.path, phase: "check", message, start: node.start, end: node.end, line, column})
 }
-export fn Scalar(c: State, name: string) -> int = types.Scalar(c.resolved, name)
-export fn Match(c: State, module: int, index: int, expected: int, actual: int) {
-    if expected >= 0 && actual >= 0 && expected != actual { Report(c, module, index, "Type mismatch") }
+export fn Scalar(name: string, resolved: inout model.ResolvedTypes) -> int = types.Scalar(name, &resolved)
+export fn Match(module: int, index: int, expected: int, actual: int, resolved: model.ResolvedTypes, c: inout State) {
+    if expected >= 0 && actual >= 0 && !types.Assignable(expected, actual, resolved) {
+        Report(module, index, "Type mismatch: Expected " + types.Display(module, expected, resolved) + ", got " + types.Display(module, actual, resolved), resolved, &c)
+    }
 }
 export fn Reference(c: State, module: int, index: int) -> int {
     let key = Key(module, index)
-    if has(c.references, key) { return c.references[key] }
+    if c.references.has(key) { return c.references[key] }
     return -1
 }
 export fn Declared(c: State, module: int, index: int) -> int {
     let key = Key(module, index)
-    if has(c.declarations, key) { return c.declarations[key] }
+    if c.declarations.has(key) { return c.declarations[key] }
     return -1
 }
 export fn Annotation(c: State, module: int, index: int) -> int {
     let key = Key(module, index)
-    if has(c.annotations, key) { return c.annotations[key] }
+    if c.annotations.has(key) { return c.annotations[key] }
     return -1
 }
-export fn Save(c: State, module: int, index: int, typeId: int) -> int {
-    append(c.expressions, model.NodeType{module, node: index, typeId})
+export fn Save(module: int, index: int, typeId: int, c: inout State) -> int {
+    c.expressions.append(model.NodeType{module, node: index, typeId})
     return typeId
 }
-export fn ParameterTypes(c: State, symbol: int) -> [int] {
+export fn ParameterTypes(c: State, symbol: int, resolved: model.ResolvedTypes) -> [int] {
     if symbol < 0 { return [] }
-    let target = c.resolved.bound.symbols[symbol]
+    let target = resolved.bound.symbols[symbol]
     let key = Key(target.module, target.node)
-    if has(c.signatures, key) { return c.resolved.signatures[c.signatures[key]].parameters }
+    if c.signatures.has(key) { return resolved.signatures[c.signatures[key]].parameters }
     return []
+}
+
+export fn AssignSymbol(index: int, typeId: int, resolved: inout model.ResolvedTypes) {
+    let symbol = resolved.bound.symbols[index]
+    resolved.bound.symbols[index] = model.Symbol{name: symbol.name, kind: symbol.kind, module: symbol.module, node: symbol.node, scope: symbol.scope, typeId, mutable: symbol.mutable, exported: symbol.exported}
 }

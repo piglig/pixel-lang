@@ -1,7 +1,13 @@
 import "model.pxl" as model
 
-record Resolver { annotationIds: map[int], symbolIds: map[int], bound: model.BoundProject, types: [model.TypeInfo], interned: map[int], signatures: [model.FunctionSignature], annotations: [model.NodeType], definitions: [model.NodeType], diagnostics: [model.Diagnostic] }
-fn Report(r: Resolver, module: int, index: int, message: string) {
+// Public type spellings exposed to native editor clients, including type-only
+// constructors that deliberately are not ordinary expression bindings.
+export fn BuiltinNames() -> [string] = ["int", "float64", "string", "bool", "json", "unit", "map", "Option", "Result", "Error", "Flow", "Point3", "Vec3", "Transform3", "Entity", "Space", "Link"]
+
+// Pass-local lookup data is separate from the authoritative type arena.
+export record ResolutionIndex { symbolIds: map[string, int] }
+export record DeclarationAnalysis { resolved: model.ResolvedTypes, lookup: ResolutionIndex }
+fn Report(module: int, index: int, message: string, r: inout model.ResolvedTypes) {
     let source = r.bound.project.modules[module]
     let node = source.syntax.nodes[index]
     var line = 1
@@ -9,44 +15,85 @@ fn Report(r: Resolver, module: int, index: int, message: string) {
     for token in source.syntax.tokens {
         if token.start >= node.start { line = token.line; column = token.column; break }
     }
-    append(r.diagnostics, model.Diagnostic{source: source.path, phase: "type", message, start: node.start, end: node.end, line, column})
+    r.diagnostics.append(model.Diagnostic{source: source.path, phase: "type", message, start: node.start, end: node.end, line, column})
 }
-fn Intern(r: Resolver, kind: string, name: string, module: int, declaration: int, arguments: [int]) -> int {
+fn Intern(kind: string, name: string, module: int, declaration: int, arguments: [int], r: inout model.ResolvedTypes) -> int {
     let key = kind + ":" + string(module) + ":" + string(declaration) + ":" + name + ":" + join(MapIds(arguments), ",")
-    if has(r.interned, key) { return r.interned[key] }
+    if r.interned.has(key) { return r.interned[key] }
     let index = len(r.types)
-    append(r.types, model.TypeInfo{kind, name, module, declaration, arguments, fields: [], variants: []})
+    r.types.append(model.TypeInfo{kind, name, module, declaration, arguments, fields: [], variants: []})
     r.interned[key] = index
     return index
 }
+fn SetFields(typeId: int, fields: [model.TypeField], arena: inout [model.TypeInfo]) {
+    let typ = arena[typeId]
+    arena[typeId] = model.TypeInfo{kind: typ.kind, name: typ.name, module: typ.module, declaration: typ.declaration, arguments: typ.arguments, fields, variants: typ.variants}
+}
 fn MapIds(values: [int]) -> [string] {
-    let result: [string] = []
-    for value in values { append(result, string(value)) }
+    var result: [string] = []
+    for value in values { result.append(string(value)) }
     return result
 }
-fn Primitive(r: Resolver, name: string) -> int = Intern(r, "primitive", name, -1, -1, [])
+fn Primitive(name: string, r: inout model.ResolvedTypes) -> int = Intern("primitive", name, -1, -1, [], &r)
 fn ParameterCount(nodes: [model.Node], index: int) -> int {
     var count = 0
     for child in nodes[index].children { if nodes[child].kind == "type_parameter" { count += 1 } }
     return count
 }
-fn Named(r: Resolver, module: int, index: int, name: string, arguments: [int], parameters: map[int]) -> int {
-    if has(parameters, name) {
-        if len(arguments) > 0 { Report(r, module, index, "Type parameter cannot take arguments: " + name); return -1 }
+fn Named(module: int, index: int, name: string, arguments: [int], parameters: map[string, int], r: inout model.ResolvedTypes) -> int {
+    if parameters.has(name) {
+        if len(arguments) > 0 { Report(module, index, "Type parameter cannot take arguments: " + name, &r); return -1 }
         return parameters[name]
     }
     if name == "int" || name == "float64" || name == "string" || name == "bool" || name == "json" || name == "unit" {
-        if len(arguments) > 0 { Report(r, module, index, "Primitive type cannot take arguments: " + name); return -1 }
-        return Primitive(r, name)
+        if len(arguments) > 0 { Report(module, index, "Primitive type cannot take arguments: " + name, &r); return -1 }
+        return Primitive(name, &r)
     }
-    if name == "map" || name == "Option" || name == "Error" {
+    for argument in arguments {
+        if r.types[argument].name == "unit" {
+            Report(module, index, "Type arguments require a value type; unit is only a function result", &r)
+            return -1
+        }
+    }
+    if name == "Flow" {
+        if len(arguments) != 1 { Report(module, index, "Flow requires one function signature", &r); return -1 }
+        if r.types[arguments[0]].kind != "function" { Report(module, index, "Flow requires a function signature", &r); return -1 }
+        return Intern("flow_handle", "Flow", -1, -1, arguments, &r)
+    }
+    if name == "map" || name == "Option" || name == "Result" || name == "Error" {
         var arity = 1
         if name == "Error" { arity = 0 }
-        if len(arguments) != arity { Report(r, module, index, "Wrong type argument count: " + name); return -1 }
+        if name == "map" || name == "Result" { arity = 2 }
+        if len(arguments) != arity { Report(module, index, "Wrong type argument count: " + name, &r); return -1 }
         var kind = "enum"
         if name == "map" { kind = "map" }
         if name == "Error" { kind = "record" }
-        return Intern(r, kind, name, -1, -1, arguments)
+        return Intern(kind, name, -1, -1, arguments, &r)
+    }
+    if name == "Point3" || name == "Vec3" || name == "Transform3" || name == "Entity" || name == "Space" || name == "Link" {
+        var arity = 1
+        if name == "Transform3" || name == "Entity" || name == "Space" { arity = 2 }
+        if name == "Space" || name == "Link" { arity = 3 }
+        if len(arguments) != arity { Report(module, index, "Wrong spatial type argument count: " + name, &r); return -1 }
+        var frames = 1
+        if name == "Transform3" { frames = 2 }
+        var cursor = 0
+        while cursor < frames {
+            if r.types[arguments[cursor]].kind != "frame" {
+                Report(module, index, "Spatial type requires a declared coordinate frame: " + name, &r)
+                return -1
+            }
+            cursor += 1
+        }
+        if name == "Entity" || name == "Space" || name == "Link" {
+            for payload in slice(arguments, 1, len(arguments)) {
+                if r.types[payload].kind == "frame" || r.types[payload].name == "unit" {
+                    Report(module, index, "Spatial payload requires a value type", &r)
+                    return -1
+                }
+            }
+        }
+        return Intern("spatial", name, -1, -1, arguments, &r)
     }
     let parts = split(name, ".")
     var target = module
@@ -54,235 +101,436 @@ fn Named(r: Resolver, module: int, index: int, name: string, arguments: [int], p
     if len(parts) == 2 {
         target = -1
         local = parts[1]
-        for imported in r.bound.project.modules[module].imports {
-            if imported.alias == parts[0] {
-                for i, item in r.bound.project.modules { if item.path == imported.target { target = i; break } }
-                break
-            }
-        }
-        if target < 0 { Report(r, module, index, "Unknown type module: " + parts[0]); return -1 }
-    } else if len(parts) != 1 { Report(r, module, index, "Invalid qualified type: " + name); return -1 }
-    for declaration in r.bound.project.modules[target].declarations {
-        if declaration.name != local { continue }
-        if declaration.kind != "record" && declaration.kind != "enum" { Report(r, module, index, "Name is not a type: " + name); return -1 }
-        if target != module && !declaration.exported { Report(r, module, index, "Type is private: " + name); return -1 }
+        let alias = string(module) + ":" + parts[0]
+        if r.importModules.has(alias) { target = r.importModules[alias] }
+        if target < 0 { Report(module, index, "Unknown type module: " + parts[0], &r); return -1 }
+    } else if len(parts) != 1 { Report(module, index, "Invalid qualified type: " + name, &r); return -1 }
+    let key = string(target) + ":" + local
+    if r.declarationIds.has(key) {
+        let declaration = r.bound.project.modules[target].declarations[r.declarationIds[key]]
+        if declaration.kind != "record" && declaration.kind != "enum" && declaration.kind != "frame" { Report(module, index, "Name is not a type: " + name, &r); return -1 }
+        if target != module && !declaration.exported { Report(module, index, "Type is private: " + name, &r); return -1 }
         let expected = ParameterCount(r.bound.project.modules[target].syntax.nodes, declaration.node)
-        if len(arguments) != expected { Report(r, module, index, "Wrong type argument count: " + name); return -1 }
-        return Intern(r, declaration.kind, local, target, declaration.node, arguments)
+        if len(arguments) != expected { Report(module, index, "Wrong type argument count: " + name, &r); return -1 }
+        return Intern(declaration.kind, local, target, declaration.node, arguments, &r)
     }
-    Report(r, module, index, "Unknown type: " + name)
+    Report(module, index, "Unknown type: " + name, &r)
     return -1
 }
-fn Resolve(r: Resolver, module: int, index: int, parameters: map[int]) -> int {
+fn Resolve(module: int, index: int, parameters: map[string, int], lookup: ResolutionIndex, r: inout model.ResolvedTypes) -> int {
     let node = r.bound.project.modules[module].syntax.nodes[index]
-    let arguments: [int] = []
-    for child in node.children { append(arguments, Resolve(r, module, child, parameters)) }
+    var arguments: [int] = []
+    for child in node.children { arguments.append(Resolve(module, child, parameters, lookup, &r)) }
     var result = -1
     var valid = true
     for argument in arguments { if argument < 0 { valid = false } }
-    if valid {
-        if node.kind == "type_array" { result = Intern(r, "array", "", -1, -1, arguments) }
-        else if node.kind == "type_fn" { result = Intern(r, "function", "", -1, -1, arguments) }
-        else { result = Named(r, module, index, node.text, arguments, parameters) }
+    if valid && (node.kind == "type_array" || node.kind == "type_inout" || node.kind == "type_fn") {
+        for position, argument in arguments {
+            if r.types[argument].name == "unit" && !(node.kind == "type_fn" && position == len(arguments) - 1) {
+                Report(module, index, "Value type required; unit is only a function result", &r)
+                valid = false
+            }
+        }
     }
-    r.annotationIds[NodeKey(module, index)] = result
-    append(r.annotations, model.NodeType{module, node: index, typeId: result})
+    if valid {
+        if node.kind == "type_inout" {
+            if len(arguments) != 1 {
+                Report(module, index, "inout requires an ordinary value type", &r)
+            } else { result = Intern("inout", "", -1, -1, arguments, &r) }
+        }
+        else if node.kind == "type_array" { result = Intern("array", "", -1, -1, arguments, &r) }
+        else if node.kind == "type_fn" { result = Intern("function", node.text, -1, -1, arguments, &r) }
+        else { result = Named(module, index, node.text, arguments, parameters, &r) }
+    }
+    r.annotationTypes[NodeKey(module, index)] = result
+    r.annotations.append(model.NodeType{module, node: index, typeId: result})
     return result
 }
-fn Environment(r: Resolver, module: int, index: int, outer: map[int]) -> map[int] {
-    let result = map[int]{}
+fn Environment(module: int, index: int, outer: map[string, int], r: inout model.ResolvedTypes) -> map[string, int] {
+    var result: map[string, int] = map[string, int]{}
     for name in outer { result[name] = outer[name] }
     let nodes = r.bound.project.modules[module].syntax.nodes
-    let seen = map[bool]{}
+    var seen: map[string, bool] = map[string, bool]{}
     for child in nodes[index].children {
         let node = nodes[child]
         if node.kind == "type_parameter" {
-            if has(seen, node.text) { Report(r, module, child, "Duplicate type parameter: " + node.text) }
+            for constraint in node.children {
+                let capability = nodes[constraint].text
+                if capability != "Equatable" && capability != "Ordered" && capability != "Numeric" && capability != "Hashable" { Report(module, constraint, "Unknown generic capability: " + capability, &r) }
+            }
+            if seen.has(node.text) { Report(module, child, "Duplicate type parameter: " + node.text, &r) }
             seen[node.text] = true
-            result[node.text] = Intern(r, "type_parameter", node.text, module, index, [])
+            result[node.text] = Intern("type_parameter", node.text, module, index, [], &r)
         }
     }
     return result
 }
-fn Fields(r: Resolver, module: int, children: [int], parameters: map[int]) -> [model.TypeField] {
+fn Fields(module: int, children: [int], parameters: map[string, int], lookup: ResolutionIndex, r: inout model.ResolvedTypes) -> [model.TypeField] {
     let nodes = r.bound.project.modules[module].syntax.nodes
-    let fields: [model.TypeField] = []
-    let names = map[bool]{}
+    var fields: [model.TypeField] = []
+    var names: map[string, bool] = map[string, bool]{}
     for child in children {
         let node = nodes[child]
         if node.kind != "field_decl" && node.kind != "parameter" { continue }
-        if has(names, node.text) { Report(r, module, child, "Duplicate field: " + node.text) }
+        if names.has(node.text) { Report(module, child, "Duplicate field: " + node.text, &r) }
         names[node.text] = true
-        let typeId = Resolve(r, module, node.children[0], parameters)
-        append(fields, model.TypeField{name: node.text, typeId})
+        let typeId = Resolve(module, node.children[0], parameters, lookup, &r)
+        if typeId >= 0 && r.types[typeId].name == "unit" {
+            Report(module, child, "Field requires a value type; unit is only a function result", &r)
+        }
+        fields.append(model.TypeField{name: node.text, typeId})
     }
     return fields
 }
 fn NodeKey(module: int, node: int) -> string = string(module) + ":" + string(node)
-fn Annotation(r: Resolver, module: int, node: int) -> int {
+fn Annotation(r: model.ResolvedTypes, module: int, node: int) -> int {
     let key = NodeKey(module, node)
-    if has(r.annotationIds, key) { return r.annotationIds[key] }
+    if r.annotationTypes.has(key) { return r.annotationTypes[key] }
     return -1
 }
-fn AssignSymbol(r: Resolver, module: int, node: int, typeId: int) {
+fn AssignSymbol(lookup: ResolutionIndex, module: int, node: int, typeId: int, r: inout model.ResolvedTypes) {
     let key = NodeKey(module, node)
-    if has(r.symbolIds, key) { r.bound.symbols[r.symbolIds[key]].typeId = typeId }
+    if lookup.symbolIds.has(key) {
+        let index = lookup.symbolIds[key]
+        let symbol = r.bound.symbols[index]
+        r.bound.symbols[index] = model.Symbol{name: symbol.name, kind: symbol.kind, module: symbol.module, node: symbol.node, scope: symbol.scope, typeId, mutable: symbol.mutable, exported: symbol.exported}
+    }
 }
-fn Signature(r: Resolver, module: int, index: int, environment: map[int]) {
+fn Signature(lookup: ResolutionIndex, module: int, index: int, environment: map[string, int], r: inout model.ResolvedTypes) {
     let nodes = r.bound.project.modules[module].syntax.nodes
     let node = nodes[index]
-    let arguments: [int] = []
-    let parameters: [int] = []
+    var arguments: [int] = []
+    var parameters: [int] = []
     var result = -1
-    if node.kind == "fn" { result = Primitive(r, "unit") }
+    if model.NamedCallable(node.kind) { result = Primitive("unit", &r) }
     var valid = true
     for child in node.children {
         let item = nodes[child]
-        if item.kind == "type_parameter" { append(parameters, environment[item.text]) }
+        if item.kind == "type_parameter" { parameters.append(environment[item.text]) }
         if item.kind == "parameter" {
             var typeId = -1
             if len(item.children) > 0 { typeId = Annotation(r, module, item.children[0]) }
-            append(arguments, typeId)
-            AssignSymbol(r, module, child, typeId)
+            if typeId >= 0 && r.types[typeId].name == "unit" {
+                Report(module, child, "Parameter requires a value type; unit is only a function result", &r)
+                valid = false
+            }
+            arguments.append(typeId)
+            var valueType = typeId
+            if typeId >= 0 && r.types[typeId].kind == "inout" { valueType = r.types[typeId].arguments[0] }
+            AssignSymbol(lookup, module, child, valueType, &r)
             if typeId < 0 { valid = false }
         }
         if item.kind == "result" { result = Annotation(r, module, item.children[0]) }
     }
-    append(arguments, result)
+    arguments.append(result)
     var typeId = -1
-    if valid && result >= 0 { typeId = Intern(r, "function", "", -1, -1, arguments) }
-    append(r.signatures, model.FunctionSignature{module, node: index, parameters, typeId})
-    AssignSymbol(r, module, index, typeId)
+    var contract = ""
+    if model.Effectful(nodes, index) { contract = "effect" }
+    if valid && result >= 0 { typeId = Intern("function", contract, -1, -1, arguments, &r) }
+    r.signatures.append(model.FunctionSignature{module, node: index, parameters: parameters, typeId})
+    AssignSymbol(lookup, module, index, typeId, &r)
 }
-fn Walk(r: Resolver, module: int, index: int, parameters: map[int]) {
+fn Walk(module: int, index: int, parameters: map[string, int], lookup: ResolutionIndex, r: inout model.ResolvedTypes) {
     let nodes = r.bound.project.modules[module].syntax.nodes
     let node = nodes[index]
-    if node.kind == "type" || node.kind == "type_array" || node.kind == "type_fn" { Resolve(r, module, index, parameters); return }
+    if node.kind == "frame" {
+        let unit = nodes[node.children[0]]
+        if unit.text != "meters" && unit.text != "centimeters" && unit.text != "millimeters" {
+            Report(module, node.children[0], "Unknown coordinate frame unit: " + unit.text, &r)
+            return
+        }
+        let typeId = Intern("frame", node.text, module, index, [], &r)
+        r.definitions.append(model.NodeType{module, node: index, typeId})
+        r.definitionTypes[NodeKey(module, index)] = typeId
+        AssignSymbol(lookup, module, index, typeId, &r)
+        return
+    }
+    if node.kind == "initial_parameter" {
+        let typ = Resolve(module, node.children[0], parameters, lookup, &r)
+        AssignSymbol(lookup, module, index, typ, &r)
+        return
+    }
+    if node.kind == "type" || node.kind == "type_array" || node.kind == "type_fn" || node.kind == "type_inout" { Resolve(module, index, parameters, lookup, &r); return }
     if node.kind == "arm" {
         var cursor = 1
-        while cursor < len(node.children) { Walk(r, module, node.children[cursor], parameters); cursor += 1 }
+        while cursor < len(node.children) { Walk(module, node.children[cursor], parameters, lookup, &r); cursor += 1 }
         return
     }
     if node.kind == "record" || node.kind == "enum" {
-        let environment = Environment(r, module, index, parameters)
-        let arguments: [int] = []
-        for child in node.children { if nodes[child].kind == "type_parameter" { append(arguments, environment[nodes[child].text]) } }
-        let typeId = Intern(r, node.kind, node.text, module, index, arguments)
-        append(r.definitions, model.NodeType{module, node: index, typeId})
-        AssignSymbol(r, module, index, typeId)
-        if node.kind == "record" { r.types[typeId].fields = Fields(r, module, node.children, environment) }
+        let environment = Environment(module, index, parameters, &r)
+        var arguments: [int] = []
+        for child in node.children { if nodes[child].kind == "type_parameter" { arguments.append(environment[nodes[child].text]) } }
+        let typeId = Intern(node.kind, node.text, module, index, arguments, &r)
+        r.definitions.append(model.NodeType{module, node: index, typeId})
+        r.definitionTypes[NodeKey(module, index)] = typeId
+        AssignSymbol(lookup, module, index, typeId, &r)
+        if node.kind == "record" { SetFields(typeId, Fields(module, node.children, environment, lookup, &r), &r.types) }
         else {
-            let variants: [model.TypeVariant] = []
-            let names = map[bool]{}
+            var variants: [model.TypeVariant] = []
+            var names: map[string, bool] = map[string, bool]{}
             for child in node.children {
                 let variant = nodes[child]
                 if variant.kind != "variant_decl" { continue }
-                if has(names, variant.text) { Report(r, module, child, "Duplicate variant: " + variant.text) }
+                if names.has(variant.text) { Report(module, child, "Duplicate variant: " + variant.text, &r) }
                 names[variant.text] = true
-                append(variants, model.TypeVariant{name: variant.text, fields: Fields(r, module, variant.children, environment)})
+                variants.append(model.TypeVariant{name: variant.text, fields: Fields(module, variant.children, environment, lookup, &r)})
             }
-            r.types[typeId].variants = variants
+            let typ = r.types[typeId]
+            r.types[typeId] = model.TypeInfo{kind: typ.kind, name: typ.name, module: typ.module, declaration: typ.declaration, arguments: typ.arguments, fields: typ.fields, variants: variants}
         }
         return
     }
-    if node.kind == "fn" || node.kind == "lambda" {
-        let environment = Environment(r, module, index, parameters)
-        for child in node.children { Walk(r, module, child, environment) }
-        Signature(r, module, index, environment)
+    if model.NamedCallable(node.kind) || node.kind == "flow" || node.kind == "lambda" {
+        let environment = Environment(module, index, parameters, &r)
+        for child in node.children { Walk(module, child, environment, lookup, &r) }
+        Signature(lookup, module, index, environment, &r)
         return
     }
-    for child in node.children { Walk(r, module, child, parameters) }
-    if node.kind == "let" || node.kind == "var" {
+    for child in node.children { Walk(module, child, parameters, lookup, &r) }
+    if node.kind == "specialize" {
+        for child in slice(node.children, 1, len(node.children)) {
+            let typeId = Annotation(r, module, child)
+            if typeId >= 0 && r.types[typeId].name == "unit" {
+                Report(module, child, "Type arguments require a value type; unit is only a function result", &r)
+            }
+        }
+    }
+    if node.kind == "let" || node.kind == "var" || node.kind == "flow_value" || node.kind == "flow_state" {
         for child in node.children {
-            if nodes[child].kind == "annotation" { AssignSymbol(r, module, index, Annotation(r, module, nodes[child].children[0])) }
+            if nodes[child].kind == "annotation" { AssignSymbol(lookup, module, index, Annotation(r, module, nodes[child].children[0]), &r) }
         }
     }
 }
-export fn Analyze(bound: model.BoundProject) -> model.ResolvedTypes {
-    let r = Resolver{annotationIds: map[int]{}, symbolIds: map[int]{}, bound, types: [], interned: map[int]{}, signatures: [], annotations: [], definitions: [], diagnostics: []}
-    if len(bound.diagnostics) > 0 { return model.ResolvedTypes{bound, interned: r.interned, types: [], signatures: [], annotations: [], definitions: [], diagnostics: bound.diagnostics} }
-    for index, symbol in bound.symbols { if symbol.module >= 0 { r.symbolIds[NodeKey(symbol.module, symbol.node)] = index } }
-    for name in ["unit", "int", "float64", "bool", "string", "json"] { Primitive(r, name) }
-    for module, item in bound.project.modules {
-        for declaration in item.declarations { Walk(r, module, declaration.node, map[int]{}) }
+// Name lookup is independent of annotation traversal and type interning.
+// Build it once for the current project; ResolveUse shares the same environment.
+fn IndexNames(r: inout model.ResolvedTypes) {
+    var modules: map[string, int] = map[string, int]{}
+    for module, source in r.bound.project.modules { modules[source.path] = module }
+    for module, source in r.bound.project.modules {
+        for index, declaration in source.declarations {
+            let key = string(module) + ":" + declaration.name
+            if !r.declarationIds.has(key) { r.declarationIds[key] = index }
+        }
+        for imported in source.imports {
+            let key = string(module) + ":" + imported.alias
+            if !r.importModules.has(key) {
+                var target = -1
+                if modules.has(imported.target) { target = modules[imported.target] }
+                r.importModules[key] = target
+            }
+        }
     }
-    return model.ResolvedTypes{bound, interned: r.interned, types: r.types, signatures: r.signatures, annotations: r.annotations, definitions: r.definitions, diagnostics: r.diagnostics}
+}
+export fn Prepare(bound: model.BoundProject) -> DeclarationAnalysis {
+    var lookup = ResolutionIndex{symbolIds: map[string, int]{}}
+    var r: model.ResolvedTypes = model.ResolvedTypes{declarationIds: map[string, int]{}, importModules: map[string, int]{}, annotationTypes: map[string, int]{}, definitionTypes: map[string, int]{}, bound: bound, types: [], interned: map[string, int]{}, signatures: [], annotations: [], definitions: [], diagnostics: []}
+    if len(bound.diagnostics) > 0 { r.diagnostics = bound.diagnostics; return DeclarationAnalysis{resolved: r, lookup} }
+    IndexNames(&r)
+    for index, symbol in bound.symbols { if symbol.module >= 0 { lookup.symbolIds[NodeKey(symbol.module, symbol.node)] = index } }
+    for name in ["unit", "int", "float64", "bool", "string", "json"] { Primitive(name, &r) }
+    return DeclarationAnalysis{resolved: r, lookup}
 }
 
-fn Resume(resolved: model.ResolvedTypes) -> Resolver = Resolver{annotationIds: map[int]{}, symbolIds: map[int]{}, bound: resolved.bound, types: resolved.types, interned: resolved.interned, signatures: resolved.signatures, annotations: resolved.annotations, definitions: resolved.definitions, diagnostics: resolved.diagnostics}
-fn SubstituteInner(r: Resolver, typeId: int, parameters: [int], arguments: [int]) -> int {
+// A declaration query owns its annotations, signatures and explicit bindings.
+// No cross-declaration capability validation runs until all schemas exist.
+export fn ResolveDeclaration(module: int, node: int, analysis: inout DeclarationAnalysis) {
+    if len(analysis.resolved.bound.diagnostics) > 0 { return }
+    Walk(module, node, map[string, int]{}, analysis.lookup, &analysis.resolved)
+}
+
+export fn Finish(analysis: DeclarationAnalysis) -> model.ResolvedTypes {
+    var r = analysis.resolved
+    // Check nominal uses after all declarations have their field schemas. This
+    // includes annotations in unused declarations and constrained outer types.
+    for annotation in r.annotations {
+        if annotation.typeId < 0 { continue }
+        let typ = r.types[annotation.typeId]
+        if typ.kind == "map" && !Hashable(typ.arguments[0], &r) {
+            Report(annotation.module, annotation.node, "Map key type requires Hashable", &r)
+        }
+        if typ.kind != "record" && typ.kind != "enum" { continue }
+        let definition = Definition(annotation.typeId, r)
+        if definition < 0 { continue }
+        let parameters = r.types[definition].arguments
+        for position, parameter in parameters {
+            if !Satisfies(parameter, typ.arguments[position], &r) {
+                Report(annotation.module, annotation.node, "Type argument does not satisfy generic capability: " + Constraint(parameter, r), &r)
+            }
+        }
+    }
+    return r
+}
+
+export fn Analyze(bound: model.BoundProject) -> model.ResolvedTypes {
+    var analysis = Prepare(bound)
+    for module, source in bound.project.modules {
+        for declaration in source.declarations { ResolveDeclaration(module, declaration.node, &analysis) }
+    }
+    return Finish(analysis)
+}
+
+fn SubstituteInner(typeId: int, parameters: [int], arguments: [int], r: inout model.ResolvedTypes) -> int {
     if typeId < 0 { return -1 }
     for index, parameter in parameters { if typeId == parameter { return arguments[index] } }
     let original = r.types[typeId]
     if len(original.arguments) == 0 { return typeId }
-    let replaced: [int] = []
+    var replaced: [int] = []
     var changed = false
     for argument in original.arguments {
-        let value = SubstituteInner(r, argument, parameters, arguments)
-        append(replaced, value)
+        let value = SubstituteInner(argument, parameters, arguments, &r)
+        replaced.append(value)
         if value != argument { changed = true }
     }
     if !changed { return typeId }
-    return Intern(r, original.kind, original.name, original.module, original.declaration, replaced)
+    return Intern(original.kind, original.name, original.module, original.declaration, replaced, &r)
 }
-export fn Substitute(resolved: model.ResolvedTypes, typeId: int, parameters: [int], arguments: [int]) -> int {
+export fn Substitute(typeId: int, parameters: [int], arguments: [int], resolved: inout model.ResolvedTypes) -> int {
     assert(len(parameters) == len(arguments))
-    return SubstituteInner(Resume(resolved), typeId, parameters, arguments)
+    return SubstituteInner(typeId, parameters, arguments, &resolved)
 }
-fn Definition(resolved: model.ResolvedTypes, typeId: int) -> int {
+fn Definition(typeId: int, resolved: model.ResolvedTypes) -> int {
     let typ = resolved.types[typeId]
-    for definition in resolved.definitions {
-        if definition.module == typ.module && definition.node == typ.declaration { return definition.typeId }
-    }
-    return -1
+    return match resolved.definitionTypes.get(NodeKey(typ.module, typ.declaration)) { .Some(id) => id, .None => -1 }
 }
-fn ReplaceFields(resolved: model.ResolvedTypes, fields: [model.TypeField], parameters: [int], arguments: [int]) -> [model.TypeField] {
-    let result: [model.TypeField] = []
-    for field in fields { append(result, model.TypeField{name: field.name, typeId: Substitute(resolved, field.typeId, parameters, arguments)}) }
+fn ReplaceFields(fields: [model.TypeField], parameters: [int], arguments: [int], resolved: inout model.ResolvedTypes) -> [model.TypeField] {
+    var result: [model.TypeField] = []
+    for field in fields { result.append(model.TypeField{name: field.name, typeId: Substitute(field.typeId, parameters, arguments, &resolved)}) }
     return result
 }
-export fn FieldTypes(resolved: model.ResolvedTypes, typeId: int) -> [model.TypeField] {
+// Ordinary collection reads preserve their declared element type.
+export fn ElementType(receiver: int, resolved: model.ResolvedTypes) -> int {
+    if receiver < 0 { return -1 }
+    let typ = resolved.types[receiver]
+    if typ.kind == "array" { return typ.arguments[0] }
+    if typ.kind == "map" { return typ.arguments[1] }
+    return -1
+}
+export fn Known(typeId: int, resolved: model.ResolvedTypes) -> bool {
+    if typeId < 0 { return false }
+    for argument in resolved.types[typeId].arguments {
+        if !Known(argument, resolved) { return false }
+    }
+    return true
+}
+// Render diagnostics from type arguments, never by expanding nominal fields.
+// The depth bound limits presentation only; it does not alter type checking.
+export fn Display(module: int, typeId: int, resolved: model.ResolvedTypes) -> string {
+    return DisplayInner(module, typeId, 0, resolved)
+}
+fn DisplayInner(module: int, typeId: int, depth: int, resolved: model.ResolvedTypes) -> string {
+    if typeId < 0 { return "?" }
+    if depth >= 32 { return "…" }
     let typ = resolved.types[typeId]
+    var arguments: [string] = []
+    for argument in typ.arguments { arguments.append(DisplayInner(module, argument, depth + 1, resolved)) }
+    if typ.kind == "inout" { return "inout " + arguments[0] }
+    if typ.kind == "array" { return "[" + arguments[0] + "]" }
+    if typ.kind == "map" { return "map[" + join(arguments, ", ") + "]" }
+    if typ.kind == "function" {
+        var label = "fn"
+        if typ.name == "effect" { label = "effect fn" }
+        if len(arguments) == 0 { return label + "(?)" }
+        return label + "(" + join(slice(arguments, 0, len(arguments) - 1), ", ") + ") -> " + arguments[len(arguments) - 1]
+    }
+    var name = typ.name
+    if name == "" { name = typ.kind }
+    if typ.module >= 0 && module >= 0 && typ.module != module && typ.kind != "type_parameter" {
+        let target = resolved.bound.project.modules[typ.module].path
+        var qualifier = target
+        for imported in resolved.bound.project.modules[module].imports {
+            if imported.target == target { qualifier = imported.alias; break }
+        }
+        name = qualifier + "." + name
+    }
+    if len(arguments) > 0 { return name + "[" + join(arguments, ", ") + "]" }
+    return name
+}
+export fn FieldTypes(typeId: int, resolved: inout model.ResolvedTypes) -> [model.TypeField] {
+    if typeId < 0 { return [] }
+    let typ = resolved.types[typeId]
+    if typ.kind == "spatial" && typ.name == "Entity" {
+        return [model.TypeField{name: "id", typeId: Scalar("int", &resolved)},
+                model.TypeField{name: "position", typeId: Spatial("Point3", [typ.arguments[0]], &resolved)},
+                model.TypeField{name: "payload", typeId: typ.arguments[1]}]
+    }
+    if typ.kind == "spatial" && typ.name == "Link" {
+        return [model.TypeField{name: "id", typeId: Scalar("int", &resolved)},
+                model.TypeField{name: "payload", typeId: typ.arguments[2]}]
+    }
+    if typ.kind == "spatial" && typ.name == "Transform3" {
+        let scalar = Scalar("float64", &resolved)
+        let row = Structural("array", [scalar], &resolved)
+        return [model.TypeField{name: "rotation", typeId: Structural("array", [row], &resolved)},
+                model.TypeField{name: "translation", typeId: Spatial("Vec3", [typ.arguments[1]], &resolved)}]
+    }
+    if typ.kind == "spatial" && (typ.name == "Point3" || typ.name == "Vec3") {
+        let scalar = Scalar("float64", &resolved)
+        return [model.TypeField{name: "x", typeId: scalar}, model.TypeField{name: "y", typeId: scalar}, model.TypeField{name: "z", typeId: scalar}]
+    }
     if typ.module == -1 && typ.name == "Error" {
-        let fields: [model.TypeField] = []
-        let stringType = Primitive(Resume(resolved), "string")
-        for name in ["kind", "code", "message", "path", "operation", "expected", "actual"] { append(fields, model.TypeField{name, typeId: stringType}) }
+        var fields: [model.TypeField] = []
+        let stringType = Primitive("string", &resolved)
+        for name in ["kind", "code", "message", "path", "operation", "expected", "actual"] { fields.append(model.TypeField{name, typeId: stringType}) }
         return fields
     }
-    let definition = Definition(resolved, typeId)
+    let definition = Definition(typeId, resolved)
     if definition < 0 { return [] }
     let original = resolved.types[definition]
     if typeId == definition { return original.fields }
     if len(typ.fields) > 0 { return typ.fields }
-    typ.fields = ReplaceFields(resolved, original.fields, original.arguments, typ.arguments)
-    return typ.fields
+    var fields = ReplaceFields(original.fields, original.arguments, typ.arguments, &resolved)
+    SetFields(typeId, fields, &resolved.types)
+    return fields
 }
-export fn VariantTypes(resolved: model.ResolvedTypes, typeId: int) -> [model.TypeVariant] {
+export fn VariantTypes(typeId: int, resolved: inout model.ResolvedTypes) -> [model.TypeVariant] {
+    if typeId < 0 { return [] }
     let typ = resolved.types[typeId]
     if typ.module == -1 && typ.name == "Option" {
         return [model.TypeVariant{name: "Some", fields: [model.TypeField{name: "value", typeId: typ.arguments[0]}]}, model.TypeVariant{name: "None", fields: []}]
     }
-    let definition = Definition(resolved, typeId)
+    if typ.module == -1 && typ.name == "Result" {
+        return [model.TypeVariant{name: "Ok", fields: [model.TypeField{name: "value", typeId: typ.arguments[0]}]}, model.TypeVariant{name: "Err", fields: [model.TypeField{name: "error", typeId: typ.arguments[1]}]}]
+    }
+    let definition = Definition(typeId, resolved)
     if definition < 0 { return [] }
     let original = resolved.types[definition]
-    let result: [model.TypeVariant] = []
+    var result: [model.TypeVariant] = []
     for variant in original.variants {
-        append(result, model.TypeVariant{name: variant.name, fields: ReplaceFields(resolved, variant.fields, original.arguments, typ.arguments)})
+        result.append(model.TypeVariant{name: variant.name, fields: ReplaceFields(variant.fields, original.arguments, typ.arguments, &resolved)})
     }
     return result
 }
-export fn Scalar(resolved: model.ResolvedTypes, name: string) -> int = Primitive(Resume(resolved), name)
-export fn Structural(resolved: model.ResolvedTypes, kind: string, arguments: [int]) -> int {
+export fn Scalar(name: string, resolved: inout model.ResolvedTypes) -> int = Primitive(name, &resolved)
+// Type parameters owned by intrinsic method contracts have no source declaration.
+export fn IntrinsicParameter(name: string, resolved: inout model.ResolvedTypes) -> int = Intern("type_parameter", name, -1, -1, [], &resolved)
+export fn Spatial(name: string, arguments: [int], resolved: inout model.ResolvedTypes) -> int = Intern("spatial", name, -1, -1, arguments, &resolved)
+export fn Callable(contract: string, arguments: [int], resolved: inout model.ResolvedTypes) -> int = Intern("function", contract, -1, -1, arguments, &resolved)
+export fn Assignable(expected: int, actual: int, resolved: model.ResolvedTypes) -> bool {
+    if expected == actual { return true }
+    if expected < 0 || actual < 0 { return false }
+    let a = resolved.types[expected]
+    let b = resolved.types[actual]
+    if a.kind != "function" || b.kind != "function" || len(a.arguments) != len(b.arguments) { return false }
+    if a.name != "effect" && b.name == "effect" { return false }
+    let last = len(a.arguments) - 1
+    for index, parameter in a.arguments {
+        if index == last { return Assignable(parameter, b.arguments[index], resolved) }
+        if !Assignable(b.arguments[index], parameter, resolved) { return false }
+    }
+    return false
+}
+export fn Structural(kind: string, arguments: [int], resolved: inout model.ResolvedTypes) -> int {
     var name = ""
     if kind == "map" { name = "map" }
-    return Intern(Resume(resolved), kind, name, -1, -1, arguments)
+    return Intern(kind, name, -1, -1, arguments, &resolved)
 }
-export fn ErrorType(resolved: model.ResolvedTypes) -> int = Intern(Resume(resolved), "record", "Error", -1, -1, [])
-export fn OptionType(resolved: model.ResolvedTypes, element: int) -> int = Intern(Resume(resolved), "enum", "Option", -1, -1, [element])
-export fn ResolveUse(resolved: model.ResolvedTypes, module: int, index: int) -> int {
+export fn ErrorType(resolved: inout model.ResolvedTypes) -> int = Intern("record", "Error", -1, -1, [], &resolved)
+export fn ResultType(value: int, error: int, resolved: inout model.ResolvedTypes) -> int = Intern("enum", "Result", -1, -1, [value, error], &resolved)
+export fn OptionType(element: int, resolved: inout model.ResolvedTypes) -> int = Intern("enum", "Option", -1, -1, [element], &resolved)
+export fn ResolveUse(module: int, index: int, resolved: inout model.ResolvedTypes) -> int {
     let nodes = resolved.bound.project.modules[module].syntax.nodes
     let use = nodes[index]
-    let parameters = map[int]{}
+    var parameters: map[string, int] = map[string, int]{}
     for signature in resolved.signatures {
         if signature.module != module { continue }
         let owner = nodes[signature.node]
@@ -290,19 +538,178 @@ export fn ResolveUse(resolved: model.ResolvedTypes, module: int, index: int) -> 
         for parameter in signature.parameters {
             let typ = resolved.types[parameter]
             var nearer = true
-            if has(parameters, typ.name) {
+            if parameters.has(typ.name) {
                 let previous = nodes[resolved.types[parameters[typ.name]].declaration]
                 nearer = owner.end - owner.start < previous.end - previous.start
             }
             if nearer { parameters[typ.name] = parameter }
         }
     }
-    return Resolve(Resume(resolved), module, index, parameters)
+    var lookup = ResolutionIndex{symbolIds: map[string, int]{}}
+    return Resolve(module, index, parameters, lookup, &resolved)
 }
-export fn Concrete(resolved: model.ResolvedTypes, typeId: int, depth: int) -> bool {
+export fn Concrete(typeId: int, depth: int, resolved: model.ResolvedTypes) -> bool {
     if typeId < 0 || depth > 32 { return false }
     let typ = resolved.types[typeId]
     if typ.kind == "type_parameter" { return false }
-    for argument in typ.arguments { if !Concrete(resolved, argument, depth + 1) { return false } }
+    for argument in typ.arguments { if !Concrete(argument, depth + 1, resolved) { return false } }
     return true
 }
+
+export fn FlowType(signature: int, resolved: inout model.ResolvedTypes) -> int = Intern("flow_handle", "Flow", -1, -1, [signature], &resolved)
+
+export fn Constraint(parameter: int, resolved: model.ResolvedTypes) -> string {
+    if parameter < 0 { return "" }
+    let typ = resolved.types[parameter]
+    if typ.kind != "type_parameter" || typ.module < 0 { return "" }
+    let nodes = resolved.bound.project.modules[typ.module].syntax.nodes
+    for child in nodes[typ.declaration].children {
+        let node = nodes[child]
+        if node.kind == "type_parameter" && node.text == typ.name && len(node.children) > 0 {
+            return nodes[node.children[0]].text
+        }
+    }
+    return ""
+}
+export fn Satisfies(parameter: int, argument: int, resolved: inout model.ResolvedTypes) -> bool {
+    let constraint = Constraint(parameter, resolved)
+    if constraint == "" { return true }
+    if constraint == "Equatable" { return Equatable(argument, &resolved) }
+    if constraint == "Ordered" { return Ordered(argument, resolved) }
+    if constraint == "Numeric" { return Numeric(argument, resolved) }
+    if constraint == "Hashable" { return Hashable(argument, &resolved) }
+    return false
+}
+export fn Numeric(typeId: int, resolved: model.ResolvedTypes) -> bool {
+    if typeId < 0 { return false }
+    let typ = resolved.types[typeId]
+    if typ.kind == "type_parameter" { return Constraint(typeId, resolved) == "Numeric" }
+    return typ.kind == "primitive" && (typ.name == "int" || typ.name == "float64")
+}
+export fn Ordered(typeId: int, resolved: model.ResolvedTypes) -> bool {
+    if Numeric(typeId, resolved) { return true }
+    if typeId < 0 { return false }
+    let typ = resolved.types[typeId]
+    if typ.kind == "type_parameter" { return Constraint(typeId, resolved) == "Ordered" }
+    return typ.kind == "primitive" && typ.name == "string"
+}
+fn CapabilityShape(typeId: int, depth: int, resolved: model.ResolvedTypes) -> bool {
+    if typeId < 0 || depth > 32 { return false }
+    for argument in resolved.types[typeId].arguments {
+        if !CapabilityShape(argument, depth + 1, resolved) { return false }
+    }
+    return true
+}
+
+// Equality is a capability of the entire type, including inactive variants and
+// empty containers. Nominal recursion is allowed; expanding generic recursion
+// remains subject to the ordinary concrete-type complexity limit.
+export fn Equatable(typeId: int, resolved: inout model.ResolvedTypes) -> bool {
+    var pending: [int] = [typeId]
+    var seen: map[string, bool] = map[string, bool]{}
+    while len(pending) > 0 {
+        let current = pending[len(pending) - 1]
+        pending.pop()
+        if !CapabilityShape(current, 0, resolved) { return false }
+        let key = string(current)
+        if seen.has(key) { continue }
+        seen[key] = true
+        let typ = resolved.types[current]
+        if typ.kind == "type_parameter" {
+            let capability = Constraint(current, resolved)
+            if capability != "Equatable" && capability != "Ordered" && capability != "Numeric" && capability != "Hashable" { return false }
+        } else if typ.kind == "primitive" {
+            if typ.name != "int" && typ.name != "float64" && typ.name != "bool" && typ.name != "string" { return false }
+        } else if typ.kind == "spatial" && (typ.name == "Point3" || typ.name == "Vec3") {
+            continue
+        } else if typ.kind == "array" || typ.kind == "map" {
+            for argument in typ.arguments { pending.append(argument) }
+        } else if typ.kind == "record" {
+            for field in FieldTypes(current, &resolved) { pending.append(field.typeId) }
+        } else if typ.kind == "enum" {
+            for variant in VariantTypes(current, &resolved) {
+                for field in variant.fields { pending.append(field.typeId) }
+            }
+        } else { return false }
+    }
+    return true
+}
+
+
+// Hash keys must not expose mutable fields or containers. Enum payloads and
+// native positions/vectors are immutable language values; recurse through every
+// variant, including ones not selected by the current value.
+export fn Hashable(typeId: int, resolved: inout model.ResolvedTypes) -> bool {
+    var pending: [int] = [typeId]
+    var seen: map[string, bool] = map[string, bool]{}
+    while len(pending) > 0 {
+        let current = pending[len(pending) - 1]
+        pending.pop()
+        if !CapabilityShape(current, 0, resolved) { return false }
+        let key = string(current)
+        if seen.has(key) { continue }
+        seen[key] = true
+        let typ = resolved.types[current]
+        if typ.kind == "type_parameter" {
+            let capability = Constraint(current, resolved)
+            if capability != "Hashable" && capability != "Ordered" && capability != "Numeric" { return false }
+        } else if typ.kind == "primitive" {
+            if typ.name != "int" && typ.name != "float64" && typ.name != "bool" && typ.name != "string" { return false }
+        } else if typ.kind == "spatial" && (typ.name == "Point3" || typ.name == "Vec3") {
+            continue
+        } else if typ.kind == "enum" {
+            for variant in VariantTypes(current, &resolved) {
+                for field in variant.fields { pending.append(field.typeId) }
+            }
+        } else { return false }
+    }
+    return true
+}
+
+// Constructor inputs belong to creation, never to the per-step callable type.
+export fn InitialInputs(module: int, declaration: int, resolved: model.ResolvedTypes) -> [model.TypeField] {
+    let nodes = resolved.bound.project.modules[module].syntax.nodes
+    var result: [model.TypeField] = []
+    for child in nodes[declaration].children {
+        if nodes[child].kind != "initial_parameter" { continue }
+        let typeId = Annotation(resolved, module, nodes[child].children[0])
+        result.append(model.TypeField{name: nodes[child].text, typeId})
+    }
+    return result
+}
+
+// Adjacent optional values have the same JSON null representation. Traverse
+// instantiated fields too; a visited set keeps recursive records finite.
+export fn AmbiguousJsonOption(typeId: int, resolved: inout model.ResolvedTypes) -> bool {
+    var pending: [int] = [typeId]
+    var seen: map[string, bool] = map[string, bool]{}
+    while len(pending) > 0 {
+        let last = pending[len(pending) - 1]
+        pending.pop()
+        let current = last
+        if current < 0 { continue }
+        let key = string(current)
+        if seen.has(key) { continue }
+        if len(seen) >= 4096 { return true }
+        seen[key] = true
+        let typ = resolved.types[current]
+        if typ.kind == "type_parameter" { continue }
+        if typ.kind == "enum" && typ.name == "Option" && typ.module < 0 && len(typ.arguments) == 1 {
+            let inner = resolved.types[typ.arguments[0]]
+            if inner.kind == "enum" && inner.name == "Option" && inner.module < 0 { return true }
+        }
+        if typ.kind == "record" {
+            for field in FieldTypes(current, &resolved) { pending.append(field.typeId) }
+        } else if typ.kind == "enum" {
+            for variant in VariantTypes(current, &resolved) {
+                for field in variant.fields { pending.append(field.typeId) }
+            }
+        }
+        for argument in typ.arguments { pending.append(argument) }
+    }
+    return false
+}
+
+// Recreate a cached structural type in the current arena. Nominal definitions
+// are resolved first, so existing schemas remain authoritative.
+export fn Reintern(kind: string, name: string, module: int, declaration: int, arguments: [int], resolved: inout model.ResolvedTypes) -> int = Intern(kind, name, module, declaration, arguments, &resolved)

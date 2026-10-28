@@ -3,9 +3,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.native_compiler import compile_native_sources
 from pixellang.codec import new_source, rgba, validate
 from pixellang.spatial import analyze
-from pixellang.project import compile_project
 from pixellang.vm import VM
 from pixellang.bootstrap import compile_with
 
@@ -22,19 +22,34 @@ def link(kind, a, b):
 
 
 class PixelRegionTests(unittest.TestCase):
+    def test_explicit_markers_separate_regions_on_one_row(self):
+        source = document([[(0, 'keyword', 'fn'), (4, 'keyword', 'print'), (5, 'int', 7)]],
+                          [link('region', (0, 0), (0, 0)), link('region', (4, 0), (4, 0)),
+                           link('child', (0, 0), (4, 0))])
+        result = self.run_source(source)
+        self.assertEqual(result['diagnostics'], [])
+        self.assertEqual([r['parent'] for r in result['regions']], [-1, 0])
+        self.assertEqual([len(r['tokens']) for r in result['regions']], [1, 2])
+        source['spatial']['links'].append(link('region', (4, 0), (4, 0)))
+        invalid = self.run_source(source)
+        self.assertTrue(invalid['diagnostics'])
+        self.assertEqual(invalid['regions'], [])
+
     @classmethod
     def setUpClass(cls):
         root = Path(__file__).resolve().parents[1]
-        files = {p.name: p.read_text() for p in (root / 'selfhost').glob('*.pxl')}
+        files = {name: (root / 'selfhost' / name).read_text() for name in ('spatial_layout.pxl', 'pixel_tokens.pxl', 'pixel_decode.pxl', 'pixel_regions.pxl', 'failures.pxl')}
         files['main.pxl'] = '''import "pixel_decode.pxl" as decoder
 import "pixel_regions.pxl" as regions
 import "spatial_layout.pxl" as layout
-fn main() {
- let source = jsonDecode[layout.Source](input())
- print(jsonFrom(regions.Analyze(decoder.Decode(source, "fixture.pixel"), source.spatial.links, "fixture.pixel")))
+effect fn main() {
+ match jsonDecode::[layout.Source](input()) {
+  .Ok(source) => print(jsonFrom(regions.Analyze(decoder.Decode(source, "fixture.pixel"), source.spatial.links, "fixture.pixel"))),
+  .Err(error) => print(jsonFrom(error))
+ }
 }'''
         cls.files = files
-        cls.compiler = compile_project(files)[1].bytecode
+        cls.compiler = compile_native_sources(files)
 
     def run_source(self, source):
         with patch('pixellang.spatial.analyze', side_effect=AssertionError('host spatial analysis')):
@@ -44,14 +59,17 @@ fn main() {
         expected = analyze(validate(source), source['spatial']['links'])
         output = self.run_source(source)
         self.assertEqual(output['diagnostics'], [])
-        self.assertEqual(output['regions'], [dict(id=r.id, indent=r.indent,
-            parent=-1 if r.parent is None else r.parent, explicitParent=r.explicit_parent,
+        self.assertEqual(output['regions'], [dict(id=r.id, parent=-1 if r.parent is None else r.parent,
             tokens=[dict(kind=t.kind, value=t.value, position=list(t.position)) for t in r.tokens]) for r in expected])
 
-    def test_indentation_unsorted_pixels_and_empty_source(self):
+    def test_explicit_nesting_unsorted_pixels_and_empty_source(self):
         source = document([[(0, 'keyword', 'entry'), (2, 'keyword', 'fn')],
                            [(2, 'keyword', 'if')], [(4, 'keyword', 'print')],
-                           [(2, 'keyword', 'return')]])
+                           [(2, 'keyword', 'return')]],
+                          [link('region', (0, 0), (0, 0)), link('region', (2, 1), (2, 1)),
+                           link('region', (4, 2), (4, 2)), link('region', (2, 3), (2, 3)),
+                           link('child', (0, 0), (2, 1)), link('child', (2, 1), (4, 2)),
+                           link('child', (0, 0), (2, 3))])
         source['pixels'].reverse()
         self.assert_oracle(source)
         self.assert_oracle(document([]))
@@ -59,19 +77,28 @@ fn main() {
     def test_reversed_explicit_chain_and_non_nearest_parent(self):
         source = document([[(0, 'keyword', 'fn')], [(0, 'keyword', 'fn')],
                            [(2, 'int', 7), (12, 'keyword', 'print')]],
-                          [link('next', (12, 2), (2, 2)), link('child', (0, 0), (12, 2))])
+                          [link('region', (0, 0), (0, 0)), link('region', (0, 1), (0, 1)), link('region', (12, 2), (12, 2)), link('next', (12, 2), (2, 2)), link('child', (0, 0), (12, 2))])
         self.assert_oracle(source)
 
     def test_regions_compile_with_pixellang(self):
         root = Path(__file__).resolve().parents[1]
-        seed = compile_project({p.name: p.read_text() for p in (root / 'selfhost').glob('*.pxl')})[1].bytecode
+        seed = compile_native_sources({p.name: p.read_text() for p in (root / 'selfhost').glob('*.pxl')})
         generated, _ = compile_with(seed, self.files)
         source = document([[(0, 'keyword', 'fn')],
                            [(2, 'int', 7), (12, 'keyword', 'print')]],
-                          [link('next', (12, 1), (2, 1)), link('child', (0, 0), (12, 1))])
+                          [link('region', (0, 0), (0, 0)), link('region', (12, 1), (12, 1)), link('next', (12, 1), (2, 1)), link('child', (0, 0), (12, 1))])
         with patch('pixellang.spatial.analyze', side_effect=AssertionError('host spatial analysis')):
             actual = json.loads(VM(generated, input_text=json.dumps(source), max_steps=10_000_000).run()[0])
         self.assertEqual(actual, self.run_source(source))
+
+    def test_unmarked_pixels_do_not_form_implicit_regions(self):
+        source = document([[(0, 'keyword', 'fn')], [(2, 'keyword', 'print')]])
+        result = self.run_source(source)
+        self.assertEqual(result['regions'], [])
+        self.assertIn('cover every semantic pixel', result['diagnostics'][0]['message'])
+        from pixellang.model import PixelError
+        with self.assertRaises(PixelError):
+            analyze(validate(source), [])
 
     def test_rejects_invalid_connections_and_parents(self):
         cases = [
@@ -84,9 +111,17 @@ fn main() {
             document([[(0, 'keyword', 'fn')], [(2, 'keyword', 'print')]], [link('next', (0, 0), (2, 1))]),
             document([[(0, 'keyword', 'fn')], [(2, 'keyword', 'print')]], [link('child', (2, 1), (0, 0))]),
             document([[(0, 'keyword', 'fn')], [(2, 'keyword', 'print')]], [link('child', (0, 0), (2, 1))] * 2),
-            document([[(0, 'keyword', 'print')], [(2, 'keyword', 'print')]]),
+            document([[(0, 'keyword', 'print')], [(2, 'keyword', 'print')]], [link('child', (0, 0), (2, 1))]),
         ]
         for source in cases:
+            # Supply valid region boundaries so malformed links still exercise
+            # their own diagnostics instead of failing only for missing markers.
+            rows = {}
+            for pixel in source['pixels']:
+                rows.setdefault(pixel['position'][1], []).append(pixel['position'])
+            for positions in rows.values():
+                head = min(positions)
+                source['spatial']['links'].append(link('region', head, head))
             with self.subTest(source=source):
                 result = self.run_source(source)
                 self.assertTrue(result['diagnostics'])

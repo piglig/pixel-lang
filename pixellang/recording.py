@@ -4,6 +4,7 @@ import struct
 import sys
 from collections.abc import Sequence
 from copy import deepcopy
+from dataclasses import fields, is_dataclass
 
 from .model import PixelError
 
@@ -19,6 +20,8 @@ def footprint(value, seen=None):
         size += sum(footprint(k, seen) + footprint(v, seen) for k, v in value.items())
     elif isinstance(value, (list, tuple, set)):
         size += sum(footprint(v, seen) for v in value)
+    elif is_dataclass(value) and not isinstance(value, type):
+        size += sum(footprint(getattr(value, field.name), seen) for field in fields(value))
     elif hasattr(value, "__dict__"):
         size += footprint(vars(value), seen)
     return size

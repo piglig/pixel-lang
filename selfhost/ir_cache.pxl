@@ -1,68 +1,96 @@
 import "model.pxl" as model
+import "frame_cache.pxl" as frameCache
 import "ir_state.pxl" as state
+import "semantic_cache.pxl" as semantic
+import "source_identity.pxl" as sourceIdentity
 
-// Cache identities are separate from executable arena indices. The host owns
-// source/interface digests; PixelLang owns identity and instruction relocation.
-export record Snapshot { environment: string, stamps: map[string], modules: [string], nominal: map[string], targets: map[string], functions: map[state.Function], fileNames: map[string], fileSizes: map[int] }
-export record Reuse { previous: Snapshot, current: Snapshot, oldFunctions: map[string], newFunctions: map[string], newNominal: map[string], newModules: map[int], hits: int, relocated: int, valid: bool, sameLayout: bool, changed: bool }
-export record DiskSnapshot { environment: string, stamps: map[string], modules: [string], nominal: map[string], targets: map[string], functions: map[string], hits: int, relocated: int }
+// Owned native snapshots. Source contracts and relocation are compiler responsibilities.
+export record Stamp { tokens: [model.Token], contracts: map[string, [string]] }
+export record Query { body: [string], dependencies: [string], frame: [string] }
+export record FlowBundle { tokens: [model.Token], graph: state.FlowDefinition, functions: map[string, state.Function], nodes: map[string, string] }
+export record Snapshot { contracts: map[string, [string]], frames: frameCache.Snapshot, flows: map[string, FlowBundle], environment: string, stamps: map[string, Stamp], modules: [string], nominal: map[string, string], targets: map[string, string], functions: map[string, state.Function], queries: map[string, Query], locations: map[string, [string]] }
+export record Reuse { frameHits: int, plannedFrames: int, semantic: semantic.Snapshot, project: model.Project, index: sourceIdentity.Index, spans: map[string, state.Span], unchanged: map[string, bool], previous: Snapshot, current: Snapshot, matches: map[string, bool], oldFunctions: map[string, string], newFunctions: map[string, string], newNominal: map[string, string], newModules: map[string, int], hits: int, relocated: int, valid: bool, sameLayout: bool, changed: bool }
 
-export fn Empty(environment: string, stamps: map[string]) -> Snapshot {
-    return Snapshot{environment, stamps, modules: [], nominal: map[string]{}, targets: map[string]{}, functions: map[state.Function]{}, fileNames: map[string]{}, fileSizes: map[int]{}}
+export fn Empty(environment: string, stamps: map[string, Stamp]) -> Snapshot {
+    return Snapshot{contracts: map[string, [string]]{}, frames: frameCache.Empty(), flows: map[string, FlowBundle]{}, environment, stamps, modules: [], nominal: map[string, string]{}, targets: map[string, string]{}, functions: map[string, state.Function]{}, queries: map[string, Query]{}, locations: map[string, [string]]{}}
 }
-export fn Begin(previous: Snapshot, environment: string, stamps: map[string]) -> Reuse {
-    return Reuse{previous, current: Empty(environment, stamps), oldFunctions: map[string]{}, newFunctions: map[string]{}, newNominal: map[string]{}, newModules: map[int]{}, hits: 0, relocated: 0, valid: true, sameLayout: false, changed: false}
+export fn Begin(previous: Snapshot, environment: string, stamps: map[string, Stamp]) -> Reuse {
+    return Reuse{frameHits: 0, plannedFrames: 0, semantic: semantic.Empty(), project: model.Project{modules: [], diagnostics: [], entryName: ""}, index: sourceIdentity.Index{nodes: map[string, string]{}, locations: map[string, model.NodeType]{}}, spans: map[string, state.Span]{}, unchanged: map[string, bool]{}, previous, current: Empty(environment, stamps), matches: map[string, bool]{}, oldFunctions: map[string, string]{}, newFunctions: map[string, string]{}, newNominal: map[string, string]{}, newModules: map[string, int]{}, hits: 0, relocated: 0, valid: true, sameLayout: false, changed: false}
 }
-fn TypeKey(resolved: model.ResolvedTypes, id: int) -> string {
+fn TypeKey(id: int, resolved: model.ResolvedTypes) -> string {
     let typ = resolved.types[id]
     var name = typ.name
     if typ.module >= 0 { name = jsonStringify(jsonFrom([resolved.bound.project.modules[typ.module].path, typ.name])) }
-    let parts = [typ.kind, name]
-    for argument in typ.arguments { append(parts, TypeKey(resolved, argument)) }
+    var parts: [string] = [typ.kind, name]
+    for argument in typ.arguments { parts.append(TypeKey(argument, resolved)) }
     return jsonStringify(jsonFrom(parts))
 }
-fn FunctionKey(planned: model.ClosurePlan, frame: model.FunctionFrame) -> string {
+fn FunctionKey(frame: model.FunctionFrame, planned: model.ClosurePlan, index: sourceIdentity.Index) -> string {
     let resolved = planned.named.checked.resolved
     let instance = planned.named.instances[frame.owner]
     let symbol = resolved.bound.symbols[instance.symbol]
-    let path = resolved.bound.project.modules[symbol.module].path
-    // Top-level declarations keep their identity when preceding bodies change
-    // node counts. Nested declarations are reused only with unchanged source.
-    var scope = "top"
-    if resolved.bound.scopes[symbol.scope].owner >= 0 { scope = string(symbol.node) }
-    let parts = [path, symbol.name, scope]
-    for argument in instance.arguments { append(parts, TypeKey(resolved, argument)) }
-    if frame.closure >= 0 { append(parts, "closure"); append(parts, string(frame.node)) }
+    var parts: [string] = [index.nodes[sourceIdentity.Key(symbol.module, symbol.node)]]
+    for argument in instance.arguments { parts.append(TypeKey(argument, resolved)) }
+    if frame.closure >= 0 { parts.append("closure"); parts.append(index.nodes[sourceIdentity.Key(frame.module, frame.node)]) }
     return jsonStringify(jsonFrom(parts))
 }
-export fn Prepare(reuse: Reuse, planned: model.ClosurePlan, layout: model.FramePlan) {
+fn QueryFor(frame: model.FunctionFrame, planned: model.ClosurePlan, reuse: Reuse) -> Option[Query] {
     let resolved = planned.named.checked.resolved
+    let symbol = resolved.bound.symbols[planned.named.instances[frame.owner].symbol]
+    let root = reuse.index.nodes[sourceIdentity.Key(symbol.module, symbol.node)]
+    if !reuse.semantic.entries.has(root) { return .None }
+    let entry = reuse.semantic.entries[root]
+    for dependency in entry.dependencies { if !reuse.semantic.contracts.has(dependency) { return .None } }
+    var slots: [string] = [TypeKey(frame.typeId, resolved)]
+    for slot in frame.slots {
+        let binding = resolved.bound.symbols[slot.symbol]
+        slots.append(reuse.index.nodes[sourceIdentity.Key(binding.module, binding.node)])
+        slots.append(slot.kind); slots.append(string(slot.mutable)); slots.append(TypeKey(slot.typeId, resolved))
+    }
+    return .Some(Query{body: entry.fingerprint, dependencies: entry.dependencies, frame: slots})
+}
+export fn Prepare(layout: model.FramePlan, planned: model.ClosurePlan, reuse: inout Reuse) {
+    let resolved = planned.named.checked.resolved
+    reuse.current.contracts = reuse.semantic.contracts
+    reuse.project = resolved.bound.project
+    for path, stamp in reuse.current.stamps {
+        reuse.unchanged[path] = reuse.previous.stamps.has(path) && stamp.tokens == reuse.previous.stamps[path].tokens
+    }
+    var wanted: [string] = []
+    for id, function in reuse.previous.functions {
+        if len(function.instructions) == 0 || !reuse.previous.locations.has(id) { continue }
+        let path = function.instructions[0].span.source
+        if reuse.unchanged.has(path) && !reuse.unchanged[path] { wanted.extend(reuse.previous.locations[id]) }
+    }
+    for key, bundle in reuse.previous.flows { for old, address in bundle.nodes { wanted.append(address) } }
+    reuse.index = sourceIdentity.ForInstructions(reuse.project, wanted)
     for index, module in resolved.bound.project.modules {
-        append(reuse.current.modules, module.path); reuse.newModules[module.path] = index
+        reuse.current.modules.append(module.path); reuse.newModules[module.path] = index
     }
     for typ in resolved.types {
-        if typ.module < 0 || (typ.kind != "record" && typ.kind != "enum") { continue }
+        if typ.module < 0 || (typ.kind != "record" && typ.kind != "enum" && typ.kind != "frame") { continue }
         let spelling = "@" + string(typ.module) + ":" + string(typ.declaration)
         let identity = jsonStringify(jsonFrom([resolved.bound.project.modules[typ.module].path, typ.name]))
         reuse.current.nominal[spelling] = identity
         reuse.newNominal[identity] = spelling
     }
     for id, frame in layout.functions {
-        let key = FunctionKey(planned, frame)
+        let key = FunctionKey(frame, planned, reuse.index)
         reuse.current.targets[string(id)] = key
         reuse.newFunctions[key] = string(id)
+        match QueryFor(frame, planned, reuse) { .Some(query) => { reuse.current.queries[key] = query }, .None => {} }
     }
     for id, key in reuse.previous.targets { reuse.oldFunctions[key] = id }
-    reuse.sameLayout = jsonStringify(jsonFrom(reuse.previous.modules)) == jsonStringify(jsonFrom(reuse.current.modules)) && jsonStringify(jsonFrom(reuse.previous.nominal)) == jsonStringify(jsonFrom(reuse.current.nominal)) && jsonStringify(jsonFrom(reuse.previous.targets)) == jsonStringify(jsonFrom(reuse.current.targets))
+    reuse.sameLayout = reuse.previous.modules == reuse.current.modules && reuse.previous.nominal == reuse.current.nominal && reuse.previous.targets == reuse.current.targets
 }
 fn Digit(char: string) -> bool = char >= "0" && char <= "9"
-fn Type(reuse: Reuse, spelling: string) -> string {
-    let parts: [string] = []
+fn Type(spelling: string, reuse: inout Reuse) -> string {
+    var parts: [string] = []
     var cursor = 0
     var start = 0
     while cursor < len(spelling) {
         if spelling[cursor] != "@" { cursor += 1; continue }
-        append(parts, slice(spelling, start, cursor))
+        parts.append(slice(spelling, start, cursor))
         let first = cursor
         cursor += 1
         while cursor < len(spelling) && Digit(spelling[cursor]) { cursor += 1 }
@@ -70,104 +98,301 @@ fn Type(reuse: Reuse, spelling: string) -> string {
         cursor += 1
         while cursor < len(spelling) && Digit(spelling[cursor]) { cursor += 1 }
         let old = slice(spelling, first, cursor)
-        if !has(reuse.previous.nominal, old) { reuse.valid = false; return spelling }
+        if !reuse.previous.nominal.has(old) { reuse.valid = false; return spelling }
         let key = reuse.previous.nominal[old]
-        if !has(reuse.newNominal, key) { reuse.valid = false; return spelling }
+        if !reuse.newNominal.has(key) { reuse.valid = false; return spelling }
         if reuse.newNominal[key] != old { reuse.changed = true }
-        append(parts, reuse.newNominal[key])
+        parts.append(reuse.newNominal[key])
         start = cursor
     }
-    append(parts, slice(spelling, start, len(spelling)))
+    parts.append(slice(spelling, start, len(spelling)))
     return join(parts, "")
 }
-fn Target(reuse: Reuse, old: string) -> string {
-    if !has(reuse.previous.targets, old) { reuse.valid = false; return old }
+fn Target(old: string, reuse: inout Reuse) -> string {
+    if !reuse.previous.targets.has(old) { reuse.valid = false; return old }
     let key = reuse.previous.targets[old]
-    if !has(reuse.newFunctions, key) { reuse.valid = false; return old }
+    if !reuse.newFunctions.has(key) { reuse.valid = false; return old }
     if reuse.newFunctions[key] != old { reuse.changed = true }
     return reuse.newFunctions[key]
 }
-fn Argument(reuse: Reuse, instruction: state.Instruction) -> json {
+fn Argument(instruction: state.Instruction, reuse: inout Reuse) -> Result[json, Error] {
     let op = instruction.op
     let arg = instruction.arg
-    if op == "CALL" || op == "FUNCTION" || op == "CLOSURE" { return jsonFrom(Target(reuse, jsonAsString(arg))) }
-    if op == "INVOKE" || op == "JSON_DECODE" { return jsonFrom(Type(reuse, jsonAsString(arg))) }
-    if op == "ARRAY" || op == "MAP" || op == "RECORD" || op == "ENUM" || op == "ENUM_IS" || op == "ENUM_GET" {
-        let fields = map[json]{}
-        for key in jsonKeys(arg) { fields[key] = jsonGet(arg, key) }
-        fields["type"] = jsonFrom(Type(reuse, jsonAsString(fields["type"])))
-        return jsonFrom(fields)
+    if op == "CALL" || op == "FUNCTION" || op == "CLOSURE" || op == "FLOW_NEW" { return .Ok(jsonFrom(Target(jsonAsString(arg)?, &reuse))) }
+    if op == "INVOKE" || op == "SPACE_NEW" || op == "FLOW_STEP" { return .Ok(jsonFrom(Type(jsonAsString(arg)?, &reuse))) }
+    if op == "ACCESS" || op == "CAPTURE_VALUE" || op == "ARRAY" || op == "MAP" || op == "RECORD" || op == "ENUM" || op == "ENUM_IS" || op == "ENUM_GET" || op == "SPATIAL_VALUE" || op == "SPATIAL_TRANSFORM" {
+        var fields: map[string, json] = map[string, json]{}
+        for key in jsonKeys(arg)? { fields[key] = jsonGet(arg, key)? }
+        fields["type"] = jsonFrom(Type(jsonAsString(jsonGet(arg, "type")?)?, &reuse))
+        return .Ok(jsonFrom(fields))
+    }
+    if op == "PROPAGATE" {
+        var fields: map[string, json] = map[string, json]{}
+        for key in jsonKeys(arg)? { fields[key] = jsonFrom(Type(jsonAsString(jsonGet(arg, key)?)?, &reuse)) }
+        return .Ok(jsonFrom(fields))
+    }
+    if op == "VALUE_COLLECTION" || op == "RESULT_BUILTIN" || op == "RESULT_DECODE" {
+        var fields: map[string, json] = map[string, json]{}
+        for key in jsonKeys(arg)? { fields[key] = jsonGet(arg, key)? }
+        fields["result"] = jsonFrom(Type(jsonAsString(jsonGet(arg, "result")?)?, &reuse))
+        return .Ok(jsonFrom(fields))
     }
     // CONST strings and every other non-type payload are deliberately opaque.
-    return arg
+    return .Ok(arg)
 }
-export fn Take(reuse: Reuse, id: int, path: string) -> Option[state.Function] {
-    try { return Load(reuse, id, path) } catch error { return None }
+export fn Take(id: int, path: string, reuse: inout Reuse) -> Option[state.Function] {
+    match Load(id, path, &reuse) {
+        .Ok(value) => { return value },
+        .Err(error) => { return .None }
+    }
 }
-fn Preserve(reuse: Reuse, id: int, old: string, size: int) {
-    reuse.current.fileNames[string(id)] = reuse.previous.fileNames[old]
-    reuse.current.fileSizes[string(id)] = size
+fn QueryMatches(key: string, reuse: Reuse) -> bool {
+    if !reuse.previous.queries.has(key) || !reuse.current.queries.has(key) { return false }
+    let previous = reuse.previous.queries[key]
+    let current = reuse.current.queries[key]
+    if previous != current { return false }
+    for dependency in current.dependencies {
+        if !reuse.previous.contracts.has(dependency) || !reuse.current.contracts.has(dependency) { return false }
+        if reuse.previous.contracts[dependency] != reuse.current.contracts[dependency] { return false }
+    }
+    return true
 }
-fn Load(reuse: Reuse, id: int, path: string) -> Option[state.Function] {
-    if reuse.previous.environment != reuse.current.environment { return None }
-    if !has(reuse.previous.stamps, path) || !has(reuse.current.stamps, path) { return None }
-    if reuse.previous.stamps[path] != reuse.current.stamps[path] { return None }
+fn Load(id: int, path: string, reuse: inout Reuse) -> Result[Option[state.Function], Error] {
+    if reuse.previous.environment != reuse.current.environment { return .Ok(.None) }
+    if !reuse.previous.stamps.has(path) || !reuse.current.stamps.has(path) { return .Ok(.None) }
     let key = reuse.current.targets[string(id)]
-    if !has(reuse.oldFunctions, key) { return None }
+    let query = reuse.current.queries.has(key)
+    if query {
+        if !QueryMatches(key, reuse) { return .Ok(.None) }
+    } else {
+        // Uncached semantic queries and flow plans retain conservative module reuse.
+        if !reuse.matches.has(path) { reuse.matches[path] = reuse.previous.stamps[path] == reuse.current.stamps[path] }
+        if !reuse.matches[path] { return .Ok(.None) }
+    }
+    if !reuse.oldFunctions.has(key) { return .Ok(.None) }
     let old = reuse.oldFunctions[key]
-    if !has(reuse.previous.fileNames, old) { return None }
-    let text = readText(reuse.previous.fileNames[old])
-    let function = jsonDecode[state.Function](text)
-    let size = len(text) * 4
-    if reuse.sameLayout { Preserve(reuse, id, old, size); reuse.hits += 1; return Some(function) }
+    if !reuse.previous.functions.has(old) { return .Ok(.None) }
+    let function = reuse.previous.functions[old]
+    if reuse.sameLayout {
+        if !reuse.unchanged.has(path) { reuse.unchanged[path] = reuse.previous.stamps[path].tokens == reuse.current.stamps[path].tokens }
+        if reuse.unchanged[path] { reuse.hits += 1; return .Ok(.Some(function)) }
+    }
     reuse.valid = true
     reuse.changed = false
-    let params: [string] = []
-    let captures: [string] = []
-    for typ in function.params { append(params, Type(reuse, typ)) }
-    for typ in function.captures { append(captures, Type(reuse, typ)) }
-    let result = Type(reuse, function.result)
-    let instructions: [state.Instruction] = []
-    for instruction in function.instructions {
-        if !has(reuse.newModules, instruction.span.source) { return None }
+    var params: [string] = []
+    var captures: [string] = []
+    for typ in function.params { params.append(Type(typ, &reuse)) }
+    for typ in function.captures { captures.append(Type(typ, &reuse)) }
+    let result = Type(function.result, &reuse)
+    var instructions: [state.Instruction] = []
+    for position, instruction in function.instructions {
+        if !reuse.newModules.has(instruction.span.source) { return .Ok(.None) }
         if reuse.newModules[instruction.span.source] != instruction.module { reuse.changed = true }
-        append(instructions, state.Instruction{op: instruction.op, arg: Argument(reuse, instruction), module: reuse.newModules[instruction.span.source], node: instruction.node, span: instruction.span})
-    }
-    if !reuse.valid { return None }
-    if !reuse.changed { Preserve(reuse, id, old, size) }
-    reuse.hits += 1; reuse.relocated += 1
-    return Some(state.Function{params, captures, locals: function.locals, result, instructions})
-}
-export fn Store(reuse: Reuse, id: int, function: state.Function) {
-    reuse.current.functions[string(id)] = function
-}
-export fn Read(path: string) -> Snapshot {
-    let index = jsonDecode[DiskSnapshot](readText(path))
-    return Snapshot{environment: index.environment, stamps: index.stamps, modules: index.modules, nominal: index.nominal, targets: index.targets, functions: map[state.Function]{}, fileNames: index.functions, fileSizes: map[int]{}}
-}
-export fn Write(reuse: Reuse, path: string, byteLimit: int) {
-    let snapshot = reuse.current
-    let files = map[string]{}
-    var remaining = byteLimit - 1000000
-    for id, function in snapshot.functions {
-        if has(snapshot.fileNames, id) {
-            if snapshot.fileSizes[id] <= remaining {
-                files[id] = snapshot.fileNames[id]; remaining -= snapshot.fileSizes[id]
-            }
-            continue
+        var node = instruction.node
+        var span = instruction.span
+        if query && !reuse.unchanged[path] {
+            if !reuse.previous.locations.has(old) || position >= len(reuse.previous.locations[old]) { return .Ok(.None) }
+            let address = reuse.previous.locations[old][position]
+            if !reuse.index.locations.has(address) || span.kind != "text" { return .Ok(.None) }
+            let location = reuse.index.locations[address]
+            if !reuse.spans.has(address) { reuse.spans[address] = state.TextSpan(reuse.project.modules[location.module], location.node) }
+            node = location.node; span = reuse.spans[address]
         }
-        // Each function is independently bounded by the JSON limits. An
-        // oversized function remains compilable and is simply not retained.
-        try {
-            let text = jsonStringify(jsonFrom(function))
-            // UTF-8 uses at most four bytes per scalar. Reserve index space and
-            // avoid constructing an additional byte buffer just to count it.
-            if len(text) * 4 > remaining { continue }
-            let file = "ir-function-" + id + ".json"
-            writeText(file, text)
-            files[id] = file
-            remaining -= len(text) * 4
-        } catch error {}
+        instructions.append(state.Instruction{op: instruction.op, arg: Argument(instruction, &reuse)?, module: reuse.newModules[instruction.span.source], node, span})
     }
-    writeText(path, jsonStringify(jsonFrom(DiskSnapshot{environment: snapshot.environment, stamps: snapshot.stamps, modules: snapshot.modules, nominal: snapshot.nominal, targets: snapshot.targets, functions: files, hits: reuse.hits, relocated: reuse.relocated})))
+    if !reuse.valid { return .Ok(.None) }
+    reuse.hits += 1; reuse.relocated += 1
+    return .Ok(.Some(state.Function{params: params, captures: captures, locals: function.locals, result, instructions: instructions}))
+}
+export fn Store(id: int, function: state.Function, reuse: inout Reuse) {
+    reuse.current.functions[string(id)] = function
+    var addresses: [string] = []
+    for instruction in function.instructions {
+        let key = sourceIdentity.Key(instruction.module, instruction.node)
+        addresses.append(match reuse.index.nodes.get(key) { .Some(value) => value, .None => "" })
+    }
+    reuse.current.locations[string(id)] = addresses
+}
+
+fn Header(node: int, nodes: [model.Node], function: bool, parts: inout [string]) {
+    let item = nodes[node]
+    if function && (item.kind == "block" || item.kind == "expression_body") { return }
+    parts.append(jsonStringify(jsonFrom([item.kind, item.text, string(len(item.children))])))
+    for child in item.children { Header(child, nodes, function, &parts) }
+}
+// Module bodies retain exact token locations for debug-map correctness. Imported
+// contracts exclude ordinary function bodies; flow declarations stay conservative.
+export fn Stamps(project: model.Project) -> map[string, Stamp] {
+    var headers: map[string, [string]] = map[string, [string]]{}
+    var modules: map[string, int] = map[string, int]{}
+    for index, module in project.modules {
+        modules[module.path] = index
+        var parts: [string] = []
+        for declaration in module.declarations {
+            parts.append(string(declaration.exported))
+            Header(declaration.node, module.syntax.nodes, declaration.kind == "fn", &parts)
+        }
+        for item in module.imports { parts.append(jsonStringify(jsonFrom([item.alias, item.target]))) }
+        headers[module.path] = parts
+    }
+    var stamps: map[string, Stamp] = map[string, Stamp]{}
+    for module in project.modules {
+        var contracts: map[string, [string]] = map[string, [string]]{}
+        var pending: [string] = [module.path]
+        var seen: map[string, bool] = map[string, bool]{}
+        var cursor = 0
+        while cursor < len(pending) {
+            let path = pending[cursor]; cursor += 1
+            if seen.has(path) { continue }
+            seen[path] = true
+            if !modules.has(path) { continue }
+            contracts[path] = headers[path]
+            for item in project.modules[modules[path]].imports { pending.append(item.target) }
+        }
+        stamps[module.path] = Stamp{tokens: module.syntax.tokens, contracts}
+    }
+    return stamps
+}
+export fn Size(snapshot: Snapshot) -> int {
+    var size = len(snapshot.contracts) + frameCache.Size(snapshot.frames) + len(snapshot.stamps) + len(snapshot.targets) + len(snapshot.nominal) + len(snapshot.locations)
+    for key, contract in snapshot.contracts { size += len(contract) }
+    for id, addresses in snapshot.locations { size += len(addresses) }
+    for key, query in snapshot.queries { size += len(query.body) + len(query.dependencies) + len(query.frame) + 1 }
+    var contracts: map[string, bool] = map[string, bool]{}
+    for path, stamp in snapshot.stamps {
+        size += len(stamp.tokens) + len(stamp.contracts)
+        for dependency, contract in stamp.contracts {
+            if !contracts.has(dependency) { size += len(contract); contracts[dependency] = true }
+        }
+    }
+    for id, function in snapshot.functions {
+        size += len(function.instructions) + len(function.params) + len(function.captures) + 1
+    }
+    for key, bundle in snapshot.flows {
+        let graph = bundle.graph
+        size += len(bundle.tokens) + len(bundle.nodes) + len(graph.inputs) + len(graph.initialInputs) + len(graph.states) + len(graph.updates) + len(graph.children) + len(graph.values) + len(graph.dependencies) + len(graph.order) + 2
+        for child in graph.children { size += len(child.initializers) }
+        for name, function in bundle.functions { size += len(function.instructions) + len(function.params) + len(function.captures) + 1 }
+    }
+    return size
+}
+
+
+fn FlowTokens(module: int, node: int, project: model.Project) -> [model.Token] {
+    let syntax = project.modules[module].syntax
+    let declaration = syntax.nodes[node]
+    var low = 0
+    var high = len(syntax.tokens)
+    while low < high {
+        let middle = (low + high) / 2
+        if syntax.tokens[middle].start < declaration.start { low = middle + 1 } else { high = middle }
+    }
+    let start = low
+    while low < len(syntax.tokens) && syntax.tokens[low].start < declaration.end { low += 1 }
+    return slice(syntax.tokens, start, low)
+}
+fn FlowNodes(module: int, node: int, reuse: Reuse, nodes: inout map[string, string]) {
+    nodes[string(node)] = reuse.index.nodes[sourceIdentity.Key(module, node)]
+    for child in reuse.project.modules[module].syntax.nodes[node].children { FlowNodes(module, child, reuse, &nodes) }
+}
+export fn StoreFlow(id: int, graph: state.FlowDefinition, functions: map[string, state.Function], reuse: inout Reuse) {
+    var owned = map[string, state.Function]{}
+    owned[string(id)] = functions[string(id)]
+    for cell in graph.states { owned[cell.initializer] = functions[cell.initializer] }
+    for child in graph.children { for name in child.initializers { owned[name] = functions[name] } }
+    var nodes = map[string, string]{}
+    FlowNodes(graph.module, graph.node, reuse, &nodes)
+    reuse.current.flows[reuse.current.targets[string(id)]] = FlowBundle{tokens: FlowTokens(graph.module, graph.node, reuse.project), graph, functions: owned, nodes}
+}
+fn FlowNode(old: int, nodes: map[string, int]) -> int { if old < 0 { return old }; return nodes[string(old)] }
+fn FlowFunction(function: state.Function, module: int, nodes: map[string, int], reuse: inout Reuse) -> Result[state.Function, Error] {
+    var params: [string] = []
+    var captures: [string] = []
+    for typ in function.params { params.append(Type(typ, &reuse)) }
+    for typ in function.captures { captures.append(Type(typ, &reuse)) }
+    let result = Type(function.result, &reuse)
+    var instructions: [state.Instruction] = []
+    for instruction in function.instructions {
+        let node = FlowNode(instruction.node, nodes)
+        let address = reuse.index.nodes[sourceIdentity.Key(module, node)]
+        if !reuse.spans.has(address) { reuse.spans[address] = state.TextSpan(reuse.project.modules[module], node) }
+        var arg = Argument(instruction, &reuse)?
+        if instruction.op == "FLOW_READ" || instruction.op == "FLOW_STAGE" { arg = jsonFrom(FlowNode(jsonAsInt(instruction.arg)?, nodes)) }
+        if instruction.op == "FLOW_CHILD_STEP" {
+            let child = jsonDecode::[state.ChildStep](instruction.arg)?
+            arg = jsonFrom(state.ChildStep{node: FlowNode(child.node, nodes), reference: FlowNode(child.reference, nodes)})
+        }
+        instructions.append(instruction with { module, node, arg, span: reuse.spans[address] })
+    }
+    return .Ok(function with { params, captures, result, instructions })
+}
+fn FlowInput(input: state.FlowInput, nodes: map[string, int], reuse: inout Reuse) -> state.FlowInput {
+    return input with { node: FlowNode(input.node, nodes), type: Type(input.type, &reuse) }
+}
+export fn TakeFlow(id: int, module: int, reuse: inout Reuse) -> Option[FlowBundle] {
+    match LoadFlow(id, module, &reuse) { .Ok(value) => { return value }, .Err(error) => { return .None } }
+}
+fn LoadFlow(id: int, module: int, reuse: inout Reuse) -> Result[Option[FlowBundle], Error] {
+    if reuse.previous.environment != reuse.current.environment { return .Ok(.None) }
+    let key = reuse.current.targets[string(id)]
+    if !reuse.previous.flows.has(key) || !reuse.current.queries.has(key) || !reuse.previous.queries.has(key) { return .Ok(.None) }
+    if !QueryMatches(key, reuse) { return .Ok(.None) }
+    let bundle = reuse.previous.flows[key]
+    let root = bundle.nodes[string(bundle.graph.node)]
+    if !reuse.index.locations.has(root) { return .Ok(.None) }
+    if reuse.sameLayout && reuse.index.locations[root].node == bundle.graph.node && bundle.tokens == FlowTokens(module, bundle.graph.node, reuse.project) {
+        reuse.current.flows[key] = bundle
+        reuse.hits += 1
+        return .Ok(.Some(bundle))
+    }
+    var nodes = map[string, int]{}
+    for old, address in bundle.nodes {
+        if !reuse.index.locations.has(address) || reuse.index.locations[address].module != module { return .Ok(.None) }
+        nodes[old] = reuse.index.locations[address].node
+    }
+    reuse.valid = true
+    reuse.changed = false
+    let graph = bundle.graph
+    var inputs: [state.FlowInput] = []
+    var initialInputs: [state.FlowInput] = []
+    for input in graph.inputs { inputs.append(FlowInput(input, nodes, &reuse)) }
+    for input in graph.initialInputs { initialInputs.append(FlowInput(input, nodes, &reuse)) }
+    var names = map[string, string]{}
+    names[reuse.oldFunctions[key]] = string(id)
+    var cells: [state.FlowCell] = []
+    for cell in graph.states {
+        let node = FlowNode(cell.node, nodes)
+        let initializer = "$flow:" + string(id) + ":" + string(node)
+        names[cell.initializer] = initializer
+        cells.append(cell with { node, initializer, type: Type(cell.type, &reuse) })
+    }
+    var children: [state.FlowChild] = []
+    for child in graph.children {
+        var initializers: [string] = []
+        for name in child.initializers {
+            let instructions = bundle.functions[name].instructions
+            let argument = FlowNode(instructions[len(instructions) - 1].node, nodes)
+            let initializer = "$flow:" + string(id) + ":arg:" + string(argument)
+            names[name] = initializer
+            initializers.append(initializer)
+        }
+        children.append(child with { node: FlowNode(child.node, nodes), function: Target(child.function, &reuse), initializers })
+    }
+    var values: [state.FlowValue] = []
+    for value in graph.values { values.append(value with { node: FlowNode(value.node, nodes), expression: FlowNode(value.expression, nodes), type: Type(value.type, &reuse) }) }
+    var updates: [state.FlowUpdate] = []
+    for update in graph.updates { updates.append(update with { node: FlowNode(update.node, nodes), state: FlowNode(update.state, nodes), expression: FlowNode(update.expression, nodes) }) }
+    var dependencies: [model.FlowDependency] = []
+    for edge in graph.dependencies { dependencies.append(edge with { source: FlowNode(edge.source, nodes), target: FlowNode(edge.target, nodes), reference: FlowNode(edge.reference, nodes) }) }
+    var order: [int] = []
+    for node in graph.order { order.append(FlowNode(node, nodes)) }
+    let output = graph.output with { node: FlowNode(graph.output.node, nodes), type: Type(graph.output.type, &reuse) }
+    let relocated = graph with { module, node: FlowNode(graph.node, nodes), inputs, initialInputs, states: cells, children, values, updates, dependencies, order, returnNode: FlowNode(graph.returnNode, nodes), output }
+    var functions = map[string, state.Function]{}
+    for name, function in bundle.functions { functions[names[name]] = FlowFunction(function, module, nodes, &reuse)? }
+    if !reuse.valid { return .Ok(.None) }
+    reuse.hits += 1
+    reuse.relocated += 1
+    StoreFlow(id, relocated, functions, &reuse)
+    return .Ok(.Some(reuse.current.flows[key]))
 }

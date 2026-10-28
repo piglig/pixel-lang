@@ -2,75 +2,91 @@ import "model.pxl" as model
 import "types.pxl" as types
 
 export record Conflict { path: string, message: string, formal: int, actual: int }
-export record Context { resolved: model.ResolvedTypes, parameters: [int], arguments: [int], conflicts: [Conflict] }
-export record Result { arguments: [int], typeId: int, conflicts: [Conflict] }
-export fn Begin(resolved: model.ResolvedTypes, parameters: [int]) -> Context {
-    let arguments: [int] = []
-    for parameter in parameters { append(arguments, -1) }
-    return Context{resolved, parameters, arguments, conflicts: []}
+// A context owns only inference decisions. Copies can explore independently;
+// type interning always uses the caller's explicitly supplied arena.
+export record Context { parameters: [int], arguments: [int], conflicts: [Conflict] }
+export record InferenceResult { arguments: [int], typeId: int, conflicts: [Conflict] }
+export fn Begin(parameters: [int]) -> Context {
+    var arguments: [int] = []
+    for parameter in parameters { arguments.append(-1) }
+    return Context{parameters, arguments, conflicts: []}
 }
-fn Known(context: Context, typeId: int) -> bool {
-    if typeId < 0 { return false }
-    for argument in context.resolved.types[typeId].arguments { if !Known(context, argument) { return false } }
-    return true
+fn Reject(context: inout Context, formal: int, actual: int, path: string, message: string) {
+    context.conflicts.append(Conflict{path, message, formal, actual})
 }
-fn Reject(context: Context, formal: int, actual: int, path: string, message: string) {
-    append(context.conflicts, Conflict{path, message, formal, actual})
+export fn Constrain(formal: int, actual: int, path: string, resolved: model.ResolvedTypes, context: inout Context) {
+    ConstrainMode(formal, actual, path, 1, resolved, &context)
 }
-export fn Constrain(context: Context, formal: int, actual: int, path: string) {
+export fn Expected(formal: int, actual: int, path: string, resolved: model.ResolvedTypes, context: inout Context) {
+    ConstrainMode(formal, actual, path, -1, resolved, &context)
+}
+fn ConstrainMode(formal: int, actual: int, path: string, direction: int, resolved: model.ResolvedTypes, context: inout Context) {
     if formal < 0 || actual < 0 { return }
     for index, parameter in context.parameters {
         if formal == parameter {
-            if !Known(context, actual) { return }
+            if !types.Known(actual, resolved) { return }
             if context.arguments[index] < 0 { context.arguments[index] = actual }
-            else if context.arguments[index] != actual { Reject(context, context.arguments[index], actual, path, "Conflicting type parameter constraints") }
+            else if context.arguments[index] != actual { Reject(&context, context.arguments[index], actual, path, "Conflicting type parameter constraints") }
             return
         }
     }
     if formal == actual { return }
-    let expected = context.resolved.types[formal]
-    let received = context.resolved.types[actual]
-    if expected.kind != received.kind || expected.name != received.name || expected.module != received.module || expected.declaration != received.declaration {
-        Reject(context, formal, actual, path, "Type shapes do not match")
+    let expected = resolved.types[formal]
+    let received = resolved.types[actual]
+    var namesMatch = expected.name == received.name
+    if expected.kind == "function" && received.kind == "function" {
+        if direction == 1 && expected.name == "effect" { namesMatch = true }
+        if direction == -1 && received.name == "effect" { namesMatch = true }
+    }
+    if expected.kind != received.kind || !namesMatch || expected.module != received.module || expected.declaration != received.declaration {
+        Reject(&context, formal, actual, path, "Type shapes do not match")
         return
     }
     if len(expected.arguments) != len(received.arguments) {
-        Reject(context, formal, actual, path, "Type arities do not match")
+        Reject(&context, formal, actual, path, "Type arities do not match")
         return
     }
     for index, argument in expected.arguments {
-        Constrain(context, argument, received.arguments[index], path + "." + string(index))
+        var nested = 0
+        if expected.kind == "function" {
+            nested = direction
+            if index + 1 < len(expected.arguments) { nested = -direction }
+        }
+        ConstrainMode(argument, received.arguments[index], path + "." + string(index), nested, resolved, &context)
     }
 }
-export fn Preview(context: Context, typeId: int) -> int {
-    let arguments: [int] = []
+export fn Preview(context: Context, typeId: int, resolved: inout model.ResolvedTypes) -> int {
+    var arguments: [int] = []
     for index, parameter in context.parameters {
         var actual = context.arguments[index]
         if actual < 0 { actual = parameter }
-        append(arguments, actual)
+        arguments.append(actual)
     }
-    return types.Substitute(context.resolved, typeId, context.parameters, arguments)
+    return types.Substitute(typeId, context.parameters, arguments, &resolved)
 }
-export fn Complete(context: Context, typeId: int) -> Result {
-    let conflicts = slice(context.conflicts, 0, len(context.conflicts))
+export fn Complete(context: Context, typeId: int, resolved: inout model.ResolvedTypes) -> InferenceResult {
+    var conflicts = context.conflicts
     for index, argument in context.arguments {
-        if argument < 0 { append(conflicts, Conflict{path: "type_argument." + string(index), message: "Cannot infer type parameter", formal: context.parameters[index], actual: -1}) }
+        if argument < 0 { conflicts.append(Conflict{path: "type_argument." + string(index), message: "Cannot infer type parameter", formal: context.parameters[index], actual: -1}) }
+        else if !types.Satisfies(context.parameters[index], argument, &resolved) {
+            conflicts.append(Conflict{path: "type_argument." + string(index), message: "Type argument does not satisfy generic capability", formal: context.parameters[index], actual: argument})
+        }
     }
-    if len(conflicts) > 0 { return Result{arguments: slice(context.arguments, 0, len(context.arguments)), typeId: -1, conflicts} }
-    return Result{arguments: slice(context.arguments, 0, len(context.arguments)), typeId: Preview(context, typeId), conflicts}
+    if len(conflicts) > 0 { return InferenceResult{arguments: context.arguments, typeId: -1, conflicts: conflicts} }
+    return InferenceResult{arguments: context.arguments, typeId: Preview(context, typeId, &resolved), conflicts: conflicts}
 }
-export fn Call(resolved: model.ResolvedTypes, signature: model.FunctionSignature, arguments: [int], expected: int) -> Result {
-    let context = Begin(resolved, signature.parameters)
+export fn Call(signature: model.FunctionSignature, arguments: [int], expected: int, resolved: inout model.ResolvedTypes) -> InferenceResult {
+    var context = Begin(signature.parameters)
     if signature.typeId < 0 {
-        Reject(context, -1, -1, "callee", "Callee signature is unresolved")
-        return Complete(context, -1)
+        Reject(&context, -1, -1, "callee", "Callee signature is unresolved")
+        return Complete(context, -1, &resolved)
     }
     let function = resolved.types[signature.typeId]
     if function.kind != "function" || len(function.arguments) != len(arguments) + 1 {
-        Reject(context, signature.typeId, -1, "arguments", "Call argument count mismatch")
-        return Complete(context, signature.typeId)
+        Reject(&context, signature.typeId, -1, "arguments", "Call argument count mismatch")
+        return Complete(context, signature.typeId, &resolved)
     }
-    for index, argument in arguments { Constrain(context, function.arguments[index], argument, "argument." + string(index)) }
-    Constrain(context, function.arguments[len(arguments)], expected, "result")
-    return Complete(context, signature.typeId)
+    for index, argument in arguments { Constrain(function.arguments[index], argument, "argument." + string(index), resolved, &context) }
+    Expected(function.arguments[len(arguments)], expected, "result", resolved, &context)
+    return Complete(context, signature.typeId, &resolved)
 }

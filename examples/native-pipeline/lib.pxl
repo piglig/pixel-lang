@@ -1,0 +1,16 @@
+record Data { values: [int] }
+fn Double(values: [int]) -> Data {
+ var result: [int] = []
+ for value in values { result.append(value * 2) }
+ return Data{values: result}
+}
+fn Total(values: [int]) -> int {
+ var total = 0
+ for value in values { total += value }
+ return total
+}
+export flow Pipeline() step(values: [int]) -> int {
+ let total = Total(doubled.values)
+ let doubled = Double(values)
+ output total
+}

@@ -1,6 +1,7 @@
 """Explicit file capabilities and bounded, replayable file observations."""
 
 import errno
+import codecs
 import hashlib
 import json
 import os
@@ -40,7 +41,7 @@ def failure_code(exc):
 
 
 class FileAccess:
-    def __init__(self, read_root=None, write_root=None, budget=8_000_000):
+    def __init__(self, read_root=None, write_root=None, budget=8_000_000, *, record=True, limit_total=False):
         self.read_root = Path(read_root).resolve() if read_root is not None else None
         self.write_root = Path(write_root).resolve() if write_root is not None else None
         self.budget = budget
@@ -48,6 +49,69 @@ class FileAccess:
             raise PixelError("runtime", "Invalid file effect budget")
         self.effects, self.bytes = [], 0
         self.replay_only = False
+        if type(record) is not bool:
+            raise PixelError("runtime", "Invalid file recording mode")
+        self.record = record
+        if type(limit_total) is not bool:
+            raise PixelError("runtime", "Invalid file accounting mode")
+        self.limit_total = limit_total
+
+    def read_chunk(self, path, offset, size):
+        if type(offset) is not int or offset < 0 or type(size) is not int or not 4 <= size <= 262144:
+            raise AccessFailure("io.invalid_range", "Chunk offset must be nonnegative and size must be 4..262144 bytes")
+        with self.parent("read", path) as (parent, name):
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode):
+                    raise AccessFailure("io.invalid_file", "Read requires a regular file")
+                if offset > info.st_size:
+                    raise AccessFailure("io.invalid_range", "Chunk offset exceeds file size")
+                stream.seek(offset)
+                raw = stream.read(size)
+                eof = len(raw) < size or offset + len(raw) >= info.st_size
+                decoder = codecs.getincrementaldecoder("utf-8")("strict")
+                text = decoder.decode(raw, final=eof)
+                pending, _ = decoder.getstate()
+                return {"text": text, "next": offset + len(raw) - len(pending), "done": eof}
+
+    def list_directory(self, path):
+        probe = path + "/.pixel-directory" if path else ".pixel-directory"
+        entries, size = [], 0
+        with self.parent("read", probe) as (parent, _):
+            with os.scandir(parent) as stream:
+                for entry in stream:
+                    directory = entry.is_dir(follow_symlinks=False)
+                    if not directory and not entry.is_file(follow_symlinks=False):
+                        continue
+                    if "\\" in entry.name:
+                        raise AccessFailure("io.invalid_path", "Directory contains an unsupported path name")
+                    size += len(entry.name.encode("utf-8")) + 64
+                    if len(entries) >= 10000 or size > 262144:
+                        raise AccessFailure("io.too_large", "Directory listing exceeds its entry budget")
+                    entries.append({"name": entry.name, "directory": directory})
+        return sorted(entries, key=lambda entry: entry["name"])
+
+    def observe(self, operation, path, value):
+        try:
+            if operation == "read":
+                return self.read(path)
+            if operation == "readChunk":
+                return self.read_chunk(path, *value)
+            if operation == "listDirectory":
+                return self.list_directory(path)
+            if operation == "readBytes":
+                raw = self.read_binary(path, value)
+                return list(raw) if self.record else bytearray(raw)
+            if operation == "writeBytes":
+                return self.write_binary(path, bytes(value))
+            if operation == "write":
+                return self.write(path, value)
+            raise PixelError("runtime", "Unknown file operation")
+        except (OSError, UnicodeError) as exc:
+            raise PixelError("data", str(exc)[:256].encode("utf-8", "replace").decode("utf-8"),
+                             code=failure_code(exc), path=path[:1024].encode("utf-8", "replace").decode("utf-8"),
+                             operation=operation) from exc
 
     @contextmanager
     def parent(self, operation, path):
@@ -159,11 +223,28 @@ class FileAccess:
             + (
                 len(effect["result"].encode("utf-8"))
                 if isinstance(effect.get("result"), str)
-                else len(effect["result"]) if isinstance(effect.get("result"), list) else 0
+                else len(json.dumps(effect["result"], ensure_ascii=False).encode("utf-8"))
+                if isinstance(effect.get("result"), dict) or effect.get("operation") == "listDirectory"
+                else len(effect["result"]) if isinstance(effect.get("result"), (list, bytes, bytearray)) else 0
             )
         )
 
     def perform(self, operation, path, text, cursor):
+        if not self.record:
+            if self.limit_total and self.bytes + 2 * EFFECT_OVERHEAD > self.budget:
+                raise PixelError("runtime", "File operation budget exceeded", code="runtime.effect_budget")
+            try:
+                result = self.observe(operation, path, text)
+            except PixelError:
+                if self.limit_total:
+                    self.bytes += 2 * EFFECT_OVERHEAD
+                raise
+            if self.limit_total:
+                cost = self.cost({"operation": operation, "result": result, "error": None})
+                if self.bytes + cost + EFFECT_OVERHEAD > self.budget:
+                    raise PixelError("runtime", "File operation budget exceeded", code="runtime.effect_budget")
+                self.bytes += cost
+            return result
         request = hashlib.sha256(
             json.dumps([operation, path, text], ensure_ascii=True).encode("utf-8")
         ).hexdigest()
@@ -193,23 +274,16 @@ class FileAccess:
                 }
             else:
                 try:
-                    if operation == "read":
-                        effect["result"] = self.read(path)
-                    elif operation == "readBytes":
-                        effect["result"] = list(self.read_binary(path, text))
-                    elif operation == "writeBytes":
-                        effect["result"] = self.write_binary(path, bytes(text))
-                    elif operation == "write":
-                        effect["result"] = self.write(path, text)
-                    else:
-                        raise PixelError("runtime", "Unknown file operation")
-                except (OSError, UnicodeError) as exc:
+                    effect["result"] = self.observe(operation, path, text)
+                except PixelError as exc:
+                    if exc.phase != "data":
+                        raise
                     effect["error"] = {
                         "phase": "data",
-                        "code": failure_code(exc),
+                        "code": exc.code,
                         "path": path[:1024].encode("utf-8", "replace").decode("utf-8"),
                         "operation": operation,
-                        "message": str(exc)[:256]
+                        "message": exc.message[:256]
                         .encode("utf-8", "replace")
                         .decode("utf-8"),
                     }
@@ -231,12 +305,16 @@ class FileAccess:
         return deepcopy(effect["result"])
 
     def replay(self):
+        if not self.record:
+            raise PixelError("temporal", "File effects were not recorded")
         result = FileAccess(budget=self.budget)
         result.effects = self.effects
         result.replay_only = True
         return result
 
     def document(self):
+        if not self.record:
+            raise PixelError("temporal", "File effects were not recorded")
         return {"budget": self.budget, "effects": deepcopy(self.effects)}
 
     @classmethod
@@ -253,7 +331,7 @@ class FileAccess:
             if (
                 not isinstance(effect, dict)
                 or set(effect) != {"operation", "path", "request", "result", "error"}
-                or effect["operation"] not in ("read", "write", "readBytes", "writeBytes")
+                or effect["operation"] not in ("read", "write", "readBytes", "writeBytes", "readChunk", "listDirectory")
                 or not isinstance(effect["path"], str)
                 or len(effect["path"]) > 256
                 or not isinstance(effect["request"], str)
@@ -282,6 +360,22 @@ class FileAccess:
                     or len(effect["result"]) > MAX_TEXT
                 ):
                     raise PixelError("temporal", "Invalid recorded file text")
+            elif effect["operation"] == "listDirectory":
+                value = effect["result"]
+                if (not isinstance(value, list) or len(value) > 10000
+                        or any(not isinstance(entry, dict) or set(entry) != {"name", "directory"}
+                               or not isinstance(entry["name"], str) or not entry["name"]
+                               or "/" in entry["name"] or "\\" in entry["name"] or "\x00" in entry["name"]
+                               or entry["name"] in (".", "..") or type(entry["directory"]) is not bool
+                               for entry in value)):
+                    raise PixelError("temporal", "Invalid recorded directory listing")
+            elif effect["operation"] == "readChunk":
+                value = effect["result"]
+                if (not isinstance(value, dict) or set(value) != {"text", "next", "done"}
+                        or not isinstance(value["text"], str) or len(value["text"]) > 262144
+                        or type(value["next"]) is not int or not 0 <= value["next"] <= (1 << 63) - 1
+                        or type(value["done"]) is not bool):
+                    raise PixelError("temporal", "Invalid recorded file chunk")
             elif effect["operation"] == "readBytes":
                 value = effect["result"]
                 if (not isinstance(value, list) or len(value) > MAX_BINARY

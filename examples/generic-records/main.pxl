@@ -1,10 +1,16 @@
 import "models.pxl" as models
 import "std/collections.pxl" as collections
 
-fn main() {
-    let batch = jsonDecode[models.Batch[models.Sample]](input())
+effect fn main() {
+    match jsonDecode::[models.Batch[models.Sample]](input()) {
+        .Ok(batch) => { Report(batch) },
+        .Err(error) => { print(error.message) }
+    }
+}
+
+effect fn Report(batch: models.Batch[models.Sample]) {
     var total = 0.0
-    for sample in collections.Copy[models.Sample](batch.items) {
+    for sample in batch.items {
         total += sample.value
     }
     let count = len(batch.items)

@@ -1,59 +1,81 @@
 import "pixel_reader.pxl" as reader
 
-export fn Parse(r: reader.Reader) -> int {
+export fn Parameter(r: inout reader.Reader) -> int {
     let start = r.index
-    if len(r.diagnostics) > 0 { return reader.Add(r, "invalid", "", [], start) }
-    if r.depth >= 32 { reader.Problem(r, "Type nesting exceeds 32"); return reader.Add(r, "invalid", "", [], start) }
+    if !reader.Take("type", "inout", &r) { return Parse(&r) }
+    reader.Need("punct", "(", &r)
+    let child = Parse(&r)
+    reader.Need("punct", ")", &r)
+    return reader.Add("type_inout", "", [child], start, &r)
+}
+export fn Parse(r: inout reader.Reader) -> int {
+    let start = r.index
+    if len(r.diagnostics) > 0 { return reader.Add("invalid", "", [], start, &r) }
+    if r.depth >= 32 { reader.Problem("Type nesting exceeds 32", &r); return reader.Add("invalid", "", [], start, &r) }
     r.depth += 1
-    let result = Inner(r)
+    let result = Inner(&r)
     r.depth -= 1
     return result
 }
-fn Inner(r: reader.Reader) -> int {
+fn Inner(r: inout reader.Reader) -> int {
     let start = r.index
     if r.index >= len(r.tokens) || r.tokens[r.index].kind != "type" {
-        reader.Problem(r, "Expected type pixel"); return reader.Add(r, "invalid", "", [], start)
+        reader.Problem("Expected type pixel", &r); return reader.Add("invalid", "", [], start, &r)
     }
-    var name = jsonAsString(r.tokens[r.index].value)
+    var name = reader.String(r.tokens[r.index].value, &r)
+    if name == "mut" || name == "Frozen" {
+        reader.Problem("Unsupported type pixel: " + name, &r)
+        return reader.Add("invalid", "", [], start, &r)
+    }
     r.index += 1
     var kind = "type"
-    let children: [int] = []
-    if name == "function" {
-        kind = "type_fn"; name = ""
-        reader.Need(r, "punct", "(")
+    var children: [int] = []
+    if name == "function" || name == "effect_function" {
+        kind = "type_fn"
+        if name == "effect_function" { name = "effect" } else { name = "" }
+        reader.Need("punct", "(", &r)
         if !reader.At(r, "punct", ")") {
             while len(r.diagnostics) == 0 {
-                append(children, Parse(r))
-                if !reader.Take(r, "punct", ",") { break }
+                children.append(Parameter(&r))
+                if !reader.Take("punct", ",", &r) { break }
             }
         }
-        reader.Need(r, "punct", ")"); reader.Need(r, "punct", "->"); reader.Need(r, "punct", "(")
-        append(children, Parse(r)); reader.Need(r, "punct", ")")
-    } else if name == "record" {
-        reader.Need(r, "punct", "(")
-        let module = reader.Identity(r); reader.Need(r, "punct", ".")
-        let id = reader.Identity(r)
+        reader.Need("punct", ")", &r); reader.Need("punct", "->", &r); reader.Need("punct", "(", &r)
+        children.append(Parse(&r)); reader.Need("punct", ")", &r)
+    } else if name == "record" || name == "frame" {
+        reader.Need("punct", "(", &r)
+        let module = reader.Identity(&r); reader.Need("punct", ".", &r)
+        let id = reader.Identity(&r)
         name = reader.Qualified(r, module, id)
-        if reader.Take(r, "punct", "[") {
+        if reader.Take("punct", "[", &r) {
             while len(r.diagnostics) == 0 {
-                append(children, Parse(r))
-                if !reader.Take(r, "punct", ",") { break }
+                children.append(Parse(&r))
+                if !reader.Take("punct", ",", &r) { break }
             }
-            reader.Need(r, "punct", "]")
+            reader.Need("punct", "]", &r)
         }
-        reader.Need(r, "punct", ")")
+        reader.Need("punct", ")", &r)
     } else if name == "parameter" {
-        reader.Need(r, "punct", "("); name = reader.Name(reader.Identity(r)); reader.Need(r, "punct", ")")
-    } else if name == "map" || name == "Option" {
-        reader.Need(r, "punct", "("); append(children, Parse(r)); reader.Need(r, "punct", ")")
+        reader.Need("punct", "(", &r); name = reader.Name(reader.Identity(&r)); reader.Need("punct", ")", &r)
+    } else if name == "map" || name == "Option" || name == "Result" {
+        reader.Need("punct", "(", &r); children.append(Parse(&r))
+        if name == "map" || name == "Result" { reader.Need("punct", ",", &r); children.append(Parse(&r)) }
+        reader.Need("punct", ")", &r)
+    } else if name == "Point3" || name == "Vec3" || name == "Transform3" || name == "Entity" || name == "Space" || name == "Link" || name == "Flow" {
+        reader.Need("punct", "(", &r)
+        while len(r.diagnostics) == 0 && !reader.At(r, "punct", ")") {
+            children.append(Parse(&r))
+            if !reader.Take("punct", ",", &r) { break }
+        }
+        reader.Need("punct", ")", &r)
     } else if name == "str" { name = "string" }
-    var result = reader.Add(r, kind, name, children, start)
+    var result = reader.Add(kind, name, children, start, &r)
     var suffixes = 0
-    while len(r.diagnostics) == 0 && reader.Take(r, "punct", "[") {
+    while len(r.diagnostics) == 0 && reader.Take("punct", "[", &r) {
         suffixes += 1
-        if r.depth + suffixes > 32 { reader.Problem(r, "Type nesting exceeds 32"); return result }
-        reader.Need(r, "punct", "]")
-        result = reader.Add(r, "type_array", "", [result], start)
+        if r.depth + suffixes > 32 { reader.Problem("Type nesting exceeds 32", &r); return result }
+        reader.Need("punct", "]", &r)
+        result = reader.Add("type_array", "", [result], start, &r)
     }
     return result
 }

@@ -1,20 +1,42 @@
-# 源码、可执行文件与时间记录
+# 文件类型与记录
 
-[中文](files.md) · [English](../../../en/reference/formats/files.md) · [文档首页](../../README.md)
+[简体中文](files.md) · [English](../../../en/reference/formats/files.md) · [文档首页](../../README.md)
+
+源码、编译产物与执行记录承担不同职责。不要用截图代替 PNG，也不要用执行记录替代可编辑源码。
+
+| 扩展名 | 用途 |
+| --- | --- |
+| `.pxl` | UTF-8 文本源码 |
+| `.pixel` | JSON 形式的语义像素文档 |
+| `.png` | 可执行图片容器 |
+| `.pxb` | PixelVM 字节码 |
+| `.pixeltime` | 指令级时间记录 |
+| `.pxevents` / `.pxjournal` | 事件记录／持久化应用日志 |
+
+## 规则与接口
 
 `.pixel` 是 UTF-8 JSON，magic 为 PIXELLANG，版本为
-`{language:"0.8",encoding:"0.8",format:"0.8"}`，encoding 为 rgba8。
+`{language:"0.9",encoding:"0.9",format:"0.9"}`，encoding 为 rgba8。
 包含正的二维 dimensions、稀疏 position/RGBA pixels 列表、spatial.links 和可选 metadata。
 坐标唯一、非负且不越界，最多一百万逻辑单元，原生文件最多 64 MB。
 连接为 next/child 端点或 region 自标记。
 
-可选 0.8 bundle 包含入口文件名和编号模块。元数据可以保留名称和文本范围，不能决定执行值、可变性或入口。
+可选 0.9 bundle 包含入口文件名和编号模块。元数据可以保留名称和文本范围，不能决定执行值、可变性或入口。
 入口关键字编码在像素中。裸表达式不是可执行模块，必须放在入口函数内。
 
 原始 PNG 使用精确 RGBA，透明单元为空；可选 pixellang 附加元数据承载连接，移除可能改变关系。
 交付图片使用[可执行容器](png.md)，把模块与关系存在物理像素中，移除 PNG 附加元数据仍能恢复。
 有损编辑和缩放均不属于合法传输。
 
-`.pxb` 是 magic 为 PIXELVM 的 JSON，language/VM 为 0.8，compiler 信息版本为 0.8.0。
-`.pixeltime` 是独立的 0.8 时间记录，包含源码、输入、执行长度/游标、预算、文件效果、取消位置和可选验证源码快照。
+`.pxb` 是 magic 为 PIXELVM 的 JSON，language/VM 为 0.9，compiler 信息版本为 0.9.0。
+`.pixeltime` 是独立的 1.0 时间记录，包含文本源码项目、输入、程序参数、执行长度/游标、预算、文件效果、取消位置和源码快照。
+记录不嵌入生成的像素投影；投影视图按需重建。原生（`selfhost`）记录必须包含由 `files` 和 `entry` 组成的源码快照。时间线独立保存编译时快照，
+字节码摘要对应实际执行的不可变代码。恢复先验证快照结构，再编译并核对程序摘要。
+调用方后续修改编译结果，不会改写既有会话的源码快照或执行代码身份。
+指令时间线必须接收原生编译的调试产物。恢复仅接受 `selfhost` 后端记录，使用原生编译器
+重新编译所保存的源码快照；不再提供 Python 前端回退或旧记录转换路径。
 记录不修改源码，回放不重复外部写入。各读取器验证支持的版本；PNG 容器的版本支持见其格式说明。
+
+## 继续阅读
+
+- [完整文档目录](../../README.md)

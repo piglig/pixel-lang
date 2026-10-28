@@ -73,3 +73,47 @@ class ParallelRegressionTests(unittest.TestCase):
                 dict(kind='start', test='slow'), dict(kind='stop', test='slow', seconds=20),
                 dict(kind='start', test='interrupted'))))
             self.assertEqual(timing_costs(directory), {'slow': 20, 'interrupted': 20})
+
+
+class FixtureSchedulingTests(unittest.TestCase):
+    def test_class_setup_runs_once_with_multiple_requested_workers(self):
+        setups = []
+
+        class First(unittest.TestCase):
+            @classmethod
+            def setUpClass(cls):
+                setups.append(cls.__name__)
+            def test_a(self): pass
+            def test_b(self): pass
+
+        class Second(unittest.TestCase):
+            @classmethod
+            def setUpClass(cls):
+                setups.append(cls.__name__)
+            def test_a(self): pass
+            def test_b(self): pass
+
+        cases = [First('test_a'), First('test_b'), Second('test_a'), Second('test_b')]
+        by_id = {case.id(): case for case in cases}
+        groups = shards(list(by_id), 4, {cases[0].id(): 100})
+        self.assertEqual(len(groups), 2)
+        observed = []
+        for group in groups:
+            result = unittest.TestResult()
+            unittest.TestSuite(by_id[name] for name in group).run(result)
+            self.assertTrue(result.wasSuccessful())
+            self.assertEqual(result.testsRun, len(group))
+            observed.extend(group)
+        self.assertCountEqual(observed, list(by_id))
+        self.assertCountEqual(setups, ['First', 'Second'])
+
+    def test_same_class_name_in_different_modules_stays_independent(self):
+        ids = ['left.Cases.test_a', 'left.Cases.test_b',
+               'right.Cases.test_a', 'right.Cases.test_b']
+        groups = shards(ids, 2)
+        self.assertEqual(groups, [ids[:2], ids[2:]])
+
+    def test_interleaved_selection_keeps_class_fixtures_contiguous(self):
+        ids = ['left.Cases.test_b', 'right.Cases.test_a',
+               'left.Cases.test_a', 'right.Cases.test_b']
+        self.assertEqual(shards(ids, 1), [[ids[0], ids[2], ids[1], ids[3]]])

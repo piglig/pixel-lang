@@ -9,18 +9,21 @@ from unittest.mock import patch
 
 from PIL import Image
 
+from tests.native_compiler import compile_native_sources
 from pixellang.bootstrap import compile_with
 from pixellang.fileaccess import FileAccess
 from pixellang.model import PixelError
-from pixellang.project import compile_project
 from pixellang.vm import VM
 
 ROOT = Path(__file__).resolve().parents[1]
 DRIVER = '''import "png.pxl" as png
 record Request { width: int, height: int, rgba: [int] }
-fn main() {
-    let request = jsonDecode[Request](input())
-    print(png.Encode(request.width, request.height, request.rgba))
+effect fn main() {
+    match Encode(input()) {.Ok(bytes)=>{print(bytes)},.Err(error)=>{print(map[string,string]{"error":error.message})}}
+}
+fn Encode(text:string)->Result[[int],Error] {
+    let request = jsonDecode::[Request](text)?
+    return png.Encode(request.width, request.height, request.rgba)
 }
 '''
 
@@ -28,14 +31,15 @@ fn main() {
 class SelfHostedPNGTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.files = {'main.pxl': DRIVER, 'png.pxl': (ROOT / 'selfhost/png.pxl').read_text()}
-        cls.bytecode = compile_project(cls.files)[1].bytecode
+        cls.files = {'main.pxl': DRIVER, 'png.pxl': (ROOT / 'selfhost/png.pxl').read_text(), 'failures.pxl': (ROOT / 'selfhost/failures.pxl').read_text()}
+        cls.bytecode = compile_native_sources(cls.files)
 
     def encode(self, width, height, rgba, bytecode=None):
         vm = VM(bytecode or self.bytecode, input_text=json.dumps(dict(
             width=width, height=height, rgba=rgba)), max_steps=10_000_000)
         with patch('PIL.Image.Image.save', side_effect=AssertionError('host encoder')):
-            return bytes(vm.run()[0])
+            output = vm.run()[0]
+            return bytes(output) if isinstance(output, list) else output
 
     def check_image(self, data, width, height, rgba):
         self.assertEqual(data[:8], b'\x89PNG\r\n\x1a\n')
@@ -75,19 +79,21 @@ class SelfHostedPNGTests(unittest.TestCase):
             (1, 1, [-1, 0, 0, 255], 'byte out of range'),
         ):
             with self.subTest(width=width, height=height, rgba=rgba):
-                with self.assertRaisesRegex(PixelError, message):
-                    self.encode(width, height, rgba)
+                result = self.encode(width, height, rgba)
+                self.assertIsInstance(result, dict)
+                self.assertIn(message, result['error'])
 
     def test_pixellang_compiles_png_encoder(self):
         compiler_files = {p.name: p.read_text() for p in (ROOT / 'selfhost').glob('*.pxl')}
-        seed = compile_project(compiler_files)[1].bytecode
+        seed = compile_native_sources(compiler_files)
         bytecode, _ = compile_with(seed, self.files)
         rgba = [255, 0, 8, 255, 20, 127, 240, 0]
         self.check_image(self.encode(2, 1, rgba, bytecode), 2, 1, rgba)
 
 
 DECODE_DRIVER = '''import "png.pxl" as png
-fn main() { print(png.Decode(jsonDecode[[int]](input()), 100000)) }
+fn Decode(text:string)->Result[png.Image,Error]=png.Decode(jsonDecode::[[int]](text)?,100000)
+effect fn main() {match Decode(input()) {.Ok(image)=>{print(image)},.Err(error)=>{print(map[string,string]{"error":error.message})}}}
 '''
 
 
@@ -103,8 +109,8 @@ def png_data(width, height, rows, color=6):
 class SelfHostedPNGDecodeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.files = {'main.pxl': DECODE_DRIVER, 'png.pxl': (ROOT / 'selfhost/png.pxl').read_text()}
-        cls.bytecode = compile_project(cls.files)[1].bytecode
+        cls.files = {'main.pxl': DECODE_DRIVER, 'png.pxl': (ROOT / 'selfhost/png.pxl').read_text(), 'failures.pxl': (ROOT / 'selfhost/failures.pxl').read_text()}
+        cls.bytecode = compile_native_sources(cls.files)
 
     def decode(self, data, bytecode=None):
         with patch('PIL.Image.open', side_effect=AssertionError('host decoder')):
@@ -159,12 +165,12 @@ class SelfHostedPNGDecodeTests(unittest.TestCase):
             (png_data(1000, 1000, b''), 'output limit'),
         ]
         for data, message in cases:
-            with self.subTest(message=message), self.assertRaisesRegex(PixelError, message):
-                self.decode(data)
+            with self.subTest(message=message):
+                self.assertIn(message, self.decode(data)['error'])
 
     def test_pixellang_compiles_decoder(self):
         compiler_files = {p.name: p.read_text() for p in (ROOT / 'selfhost').glob('*.pxl')}
-        seed = compile_project(compiler_files)[1].bytecode
+        seed = compile_native_sources(compiler_files)
         bytecode, _ = compile_with(seed, self.files)
         self.assertEqual(self.decode(png_data(1, 1, b'\0\x01\x02\x03\xff'), bytecode),
                          dict(width=1, height=1, rgba=[1, 2, 3, 255]))
@@ -172,15 +178,14 @@ class SelfHostedPNGDecodeTests(unittest.TestCase):
     def test_selfhosted_codec_binary_file_roundtrip_and_replay(self):
         files = dict(self.files)
         files['main.pxl'] = '''import "png.pxl" as png
-fn main() {
-    let bytes = png.Encode(2, 1, [1, 2, 3, 255, 4, 5, 6, 255])
-    print(writeBytes("program.png", bytes))
-    let image = png.Decode(readBytes("program.png", 10000), 10000)
-    print(image.rgba)
-}'''
-        compiler_files = {p.name: p.read_text() for p in (ROOT / 'selfhost').glob('*.pxl')}
-        seed = compile_project(compiler_files)[1].bytecode
-        bytecode, _ = compile_with(seed, files)
+effect fn Roundtrip()->Result[[int],Error] {
+    let bytes = png.Encode(2, 1, [1, 2, 3, 255, 4, 5, 6, 255])?
+    print(writeBytes("program.png", bytes)?)
+    let image = png.Decode(readBytes("program.png", 10000)?, 10000)?
+    return .Ok(image.rgba)
+}
+effect fn main() {match Roundtrip(){.Ok(rgba)=>{print(rgba)},.Err(error)=>{print(error.message)}}}'''
+        bytecode = compile_native_sources(files)
         expected = [True, [1, 2, 3, 255, 4, 5, 6, 255]]
         with tempfile.TemporaryDirectory() as directory:
             access = FileAccess(read_root=directory, write_root=directory)

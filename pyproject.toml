@@ -34,4 +34,4 @@ packages = ["pixellang"]
 include-package-data = false
 
 [tool.setuptools.package-data]
-pixellang = ["stdlib/*.pxl", "artifacts/*.json"]
+pixellang = ["stdlib/*.pxl", "artifacts/*.json", "artifacts/compiler-native", "native_runtime.h", "native_access.h", "native_map.h", "native_io.h", "native_session.h", "native_json.h", "native_unicode.h", "native_decode.h"]

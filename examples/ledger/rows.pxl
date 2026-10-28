@@ -1,19 +1,21 @@
+import "std/error.pxl" as errors
 import "models.pxl" as models
 
-export fn Header(fields: [string]) {
-    if len(fields) != 2 { fail("Expected category,amount_minor CSV header") }
+export fn Header(fields: [string]) -> Result[[string], Error] {
+    if len(fields) != 2 { return .Err(errors.New("ledger.invalid_header", "Expected category,amount_minor CSV header", "Header", "")) }
     if trim(fields[0]) != "category" || trim(fields[1]) != "amount_minor" {
-        fail("Expected category,amount_minor CSV header")
+        return .Err(errors.New("ledger.invalid_header", "Expected category,amount_minor CSV header", "Header", ""))
     }
+    return .Ok(fields)
 }
 
-export fn Parse(fields: [string]) -> models.Sale {
-    if len(fields) != 2 { fail("Expected category and amount_minor columns") }
+export fn Parse(fields: [string]) -> Result[models.Sale, Error] {
+    if len(fields) != 2 { return .Err(errors.New("ledger.invalid_row", "Expected category and amount_minor columns", "Parse", "")) }
     let category = trim(fields[0])
-    if len(category) == 0 { fail("Category cannot be empty") }
-    let amount = parseInt(trim(fields[1]))
+    if len(category) == 0 { return .Err(errors.New("ledger.invalid_row", "Category cannot be empty", "Parse", "")) }
+    let amount = parseInt(trim(fields[1]))?
     if amount < -1_000_000_000_000 || amount > 1_000_000_000_000 {
-        fail("Amount must be between -1000000000000 and 1000000000000")
+        return .Err(errors.New("ledger.invalid_row", "Amount must be between -1000000000000 and 1000000000000", "Parse", ""))
     }
-    return models.Sale{category: category, amount: amount}
+    return .Ok(models.Sale{category: category, amount: amount})
 }

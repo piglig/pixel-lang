@@ -41,3 +41,25 @@ class DocumentationTests(unittest.TestCase):
         errors = check(self.root)
         self.assertTrue(any('README requires' in e for e in errors))
         self.assertTrue(any('missing absent.pxl' in e for e in errors))
+
+    def test_heading_links_check_duplicates_and_ignore_code(self):
+        page = self.root / 'docs/en/README.md'
+        page.write_text(page.read_text() + '\n## Values\n\n## Values\n'
+                        '\n[Second](#values-1)\n\n```text\n## Not a heading\n```\n')
+        self.assertEqual(check(self.root), [])
+        page.write_text(page.read_text() + '\n[Missing](#not-a-heading)\n')
+        self.assertTrue(any('missing heading' in e for e in check(self.root)))
+
+    def test_root_contributing_and_html_images_are_checked(self):
+        (self.root / 'CONTRIBUTING.md').write_text(
+            '# Contributing\n\n[Guide](missing.md)\n<img src="missing.png">\n')
+        errors = check(self.root)
+        self.assertTrue(any('missing missing.md' in e for e in errors))
+        self.assertTrue(any('missing image missing.png' in e for e in errors))
+
+    def test_unclosed_fences_and_multiple_titles_fail(self):
+        page = self.root / 'docs/en/README.md'
+        page.write_text(page.read_text() + '\n# Another title\n\n```sh\npixel doctor\n')
+        errors = check(self.root)
+        self.assertTrue(any('expected one page title' in e for e in errors))
+        self.assertTrue(any('unclosed code fence' in e for e in errors))

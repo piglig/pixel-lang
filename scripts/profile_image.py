@@ -16,10 +16,11 @@ from pixellang.bootstrap import compile_with, normalized, read_bytecode_stream
 from pixellang.bootstrap_image import HOST_STAGES, PROFILE
 from pixellang.fileaccess import FileAccess
 from pixellang.profiling import ScopedProfileVM
-from pixellang.project import compile_project
+from pixellang.native_bundle import load_bundle
+from pixellang.compiler_service import CompilerService
 from pixellang.regression import fingerprint
 from pixellang.vm import VM
-from scripts.native_vm_probe import power
+from scripts.benchmark_support import power
 
 
 def phase_map(code, sources):
@@ -58,7 +59,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--sources', type=Path, default=ROOT / 'selfhost')
-    parser.add_argument('--compiler', type=Path, help='Execute this frozen compiler artifact instead of building a host seed')
+    parser.add_argument('--compiler', type=Path, help='Frozen native compiler; defaults to the verified bundled artifact')
     parser.add_argument('--functions', type=int, default=100)
     parser.add_argument('--workload', type=Path, help='Frozen source-map JSON, independent of compiler implementation')
     parser.add_argument('--compiler-smoke', action='store_true', help='Require the recovered program to compile and run a fresh source')
@@ -72,7 +73,7 @@ def main():
     before = fingerprint(ROOT)
     sources = {p.name: p.read_text() for p in sorted(args.sources.glob('*.pxl'))}
     workload = sources if args.whole_compiler else {'main.pxl': '\n'.join(
-        f'fn f{i}(n: int) -> int = n + {i}' for i in range(args.functions)) + '\nfn main(){ print(f0(42)) }'}
+        f'fn f{i}(n: int) -> int = n + {i}' for i in range(args.functions)) + '\neffect fn main(){ print(f0(42)) }'}
     if args.workload:
         workload = json.loads(args.workload.read_text())
     workload_hash = hashlib.sha256(json.dumps(workload,sort_keys=True).encode()).hexdigest()
@@ -82,13 +83,14 @@ def main():
         profile=PROFILE, sourcesDirectory=str(args.sources.resolve()), plain=args.plain,
         workloadSha256=workload_hash, scriptSha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()), indent=2))
     started = time.perf_counter()
-    compiler_bytes = args.compiler.read_bytes() if args.compiler else None
-    seed = json.loads(compiler_bytes) if compiler_bytes else compile_project(sources)[1].bytecode
+    compiler_path = args.compiler or ROOT / 'pixellang/artifacts/compiler.json'
+    compiler_bytes = compiler_path.read_bytes()
+    seed = json.loads(compiler_bytes) if args.compiler else load_bundle(Path(__file__).resolve().parents[1]/'pixellang/artifacts')[0]
     phases = phase_map(seed, sources)
     (args.output / 'function-phases.json').write_text(json.dumps(phases, indent=2))
     summary = dict(stage0Seconds=time.perf_counter()-started, stages={}, powerBefore=power(),
-        compilerSha256=hashlib.sha256(compiler_bytes).hexdigest() if compiler_bytes else None,
-        compilerOrigin='frozen-artifact' if compiler_bytes else 'host-seed',
+        compilerSha256=hashlib.sha256(compiler_bytes).hexdigest(),
+        compilerOrigin='frozen-artifact' if args.compiler else 'bundled-native-artifact',
         profiled=not args.plain)
     requests = [('delivery', dict(source='main.pxl', text='', files=workload, operation='png-file', file='program.png', scale=4)),
         ('recovery', dict(source='program.png', text='', operation='png-file-bytecode-stream',
@@ -131,7 +133,7 @@ def main():
                 (args.output/'recovered.json').write_text(artifact)
                 summary['recoveredSha256'] = hashlib.sha256(artifact.encode()).hexdigest()
                 if args.whole_compiler or args.compiler_smoke:
-                    fresh, steps = compile_with(built['bytecode'], {'main.pxl':'fn main(){print(42)}'},timeout=60)
+                    fresh, steps = compile_with(built['bytecode'], {'main.pxl':'effect fn main(){print(42)}'},timeout=60)
                     assert VM(fresh).run()==[42]
                     summary['compilerSmokeSteps']=steps
                 if not args.whole_compiler and not args.workload:
@@ -139,7 +141,7 @@ def main():
         summary['verified'] = True
     finally:
         summary['inputsUnchanged'] = before == fingerprint(ROOT) and sources == {p.name:p.read_text() for p in args.sources.glob('*.pxl')}
-        summary['inputsUnchanged'] = summary['inputsUnchanged'] and (not args.compiler or args.compiler.read_bytes()==compiler_bytes)
+        summary['inputsUnchanged'] = summary['inputsUnchanged'] and compiler_path.read_bytes()==compiler_bytes
         summary['inputsUnchanged'] = summary['inputsUnchanged'] and (not args.workload or workload_hash==hashlib.sha256(json.dumps(json.loads(args.workload.read_text()),sort_keys=True).encode()).hexdigest())
         summary['verified'] = summary.get('verified', False) and summary['inputsUnchanged']
         summary['seconds'] = time.perf_counter()-started

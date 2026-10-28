@@ -1,52 +1,62 @@
 import "model.pxl" as model
 import "spatial_layout.pxl" as layout
 import "pixel_project.pxl" as project
+import "failures.pxl" as failures
 
-fn Field(value: json, name: string, fallback: json) -> json {
-    for key in jsonKeys(value) { if key == name { return jsonGet(value, name) } }
-    return fallback
+fn Field(value: json, name: string, fallback: json) -> Result[json, Error] {
+    for key in jsonKeys(value)? { if key == name { return jsonGet(value, name) } }
+    return .Ok(fallback)
 }
-export fn Source(value: json) -> layout.Source {
-    let empty = jsonFrom(map[json]{})
-    let spatial = Field(value, "spatial", empty)
-    let links = jsonDecode[[layout.Link]](jsonStringify(Field(spatial, "links", jsonFrom(([]: [json])))))
-    return layout.Source{
-        magic: jsonAsString(jsonGet(value, "magic")),
-        versions: jsonDecode[map[string]](jsonStringify(jsonGet(value, "versions"))),
-        encoding: jsonAsString(jsonGet(value, "encoding")),
-        dimensions: jsonDecode[[int]](jsonStringify(jsonGet(value, "dimensions"))),
-        pixels: jsonDecode[[layout.Pixel]](jsonStringify(jsonGet(value, "pixels"))),
+export fn Source(value: json) -> Result[layout.Source, Error] {
+    let empty = jsonFrom(map[string, json]{})
+    let spatial = Field(value, "spatial", empty)?
+    let links = jsonDecode::[[layout.PixelLink]](jsonStringify(Field(spatial, "links", jsonFrom(([]: [json])))?))?
+    return .Ok(layout.Source{
+        magic: jsonAsString(jsonGet(value, "magic")?)?,
+        versions: jsonDecode::[map[string, string]](jsonStringify(jsonGet(value, "versions")?))?,
+        encoding: jsonAsString(jsonGet(value, "encoding")?)?,
+        dimensions: jsonDecode::[[int]](jsonStringify(jsonGet(value, "dimensions")?))?,
+        pixels: jsonDecode::[[layout.Pixel]](jsonStringify(jsonGet(value, "pixels")?))?,
         spatial: layout.Spatial{links},
-        metadata: jsonDecode[map[json]](jsonStringify(Field(value, "metadata", empty)))
+        metadata: jsonDecode::[map[string, json]](jsonStringify(Field(value, "metadata", empty)?))?
+    })
+}
+export record Document { root: layout.Source, modules: map[string, layout.Source], entry: string }
+export fn Read(value: json) -> Result[Document, Error] {
+    let root = Source(value)?
+    var modules: map[string, layout.Source] = map[string, layout.Source]{}
+    let bundle = Field(value, "bundle", jsonNull())?
+    // Explicit null is invalid too; absence is the only no-bundle form.
+    var bundled = false
+    for key in jsonKeys(value)? { if key == "bundle" { bundled = true } }
+    if bundled {
+        if jsonAsString(jsonGet(bundle, "version")?)? != "0.9" { return .Err(failures.New("Unsupported pixel bundle version")) }
+        let values = Field(bundle, "modules", jsonFrom(map[string, json]{}))?
+        let names = jsonKeys(values)?
+        if len(names) > 127 { return .Err(failures.New("Pixel project exceeds 128 modules")) }
+        for name in names { modules[name] = Source(jsonGet(values, name)?)? }
     }
+    var entry = "main.pxl"
+    if bundled { entry = jsonAsString(Field(bundle, "entry", jsonFrom("main.pxl"))?)? }
+    return .Ok(Document{root, modules, entry})
+}
+fn Invalid(source: string, phase: string, error: Error) -> model.Project {
+    return model.Project{entryName: "main", modules: [], diagnostics: [model.Diagnostic{source, phase, message: error.message, start: 0, end: 0, line: 1, column: 1}]}
 }
 export fn Load(value: json, source: string) -> model.Project {
-    try {
-        let root = Source(value)
-        let modules = map[layout.Source]{}
-        let bundle = Field(value, "bundle", jsonNull())
-        // Explicit null is invalid too; absence is the only no-bundle form.
-        var bundled = false
-        for key in jsonKeys(value) { if key == "bundle" { bundled = true } }
-        if bundled {
-            if jsonAsString(jsonGet(bundle, "version")) != "0.8" { fail("Unsupported pixel bundle version") }
-            let values = Field(bundle, "modules", jsonFrom(map[json]{}))
-            let names = jsonKeys(values)
-            if len(names) > 127 { fail("Pixel project exceeds 128 modules") }
-            for name in names { modules[name] = Source(jsonGet(values, name)) }
-        }
-        return project.Build(root, modules)
-    } catch error {
-        return model.Project{modules: [], diagnostics: [model.Diagnostic{source, phase: "format", message: error.message, start: 0, end: 0, line: 1, column: 1}]}
+    match Read(value) {
+        .Ok(document) => { return project.Build(document.root, document.modules) },
+        .Err(error) => { return Invalid(source, "format", error) }
     }
 }
-export fn LoadFile(path: string) -> model.Project {
-    var phase = "io"
-    try {
-        let text = readText(path)
-        phase = "format"
-        return Load(jsonParse(text), path)
-    } catch error {
-        return model.Project{modules: [], diagnostics: [model.Diagnostic{source: path, phase, message: error.message, start: 0, end: 0, line: 1, column: 1}]}
+export effect fn LoadFile(path: string) -> model.Project {
+    match readText(path) {
+        .Ok(text) => {
+            match jsonParse(text) {
+                .Ok(value) => { return Load(value, path) },
+                .Err(error) => { return Invalid(path, "format", error) }
+            }
+        },
+        .Err(error) => { return Invalid(path, "io", error) }
     }
 }

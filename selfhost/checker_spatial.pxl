@@ -1,0 +1,163 @@
+import "model.pxl" as model
+import "checker_state.pxl" as state
+import "types.pxl" as types
+
+// Names map to runtime intrinsics, not source-level wrapper calls.
+export fn Property(receiver: string, name: string) -> string {
+    if receiver == "Entity" {
+        if name == "id" { return "entityId" }
+        if name == "position" { return "entityPosition" }
+        if name == "payload" { return "entityPayload" }
+    }
+    if receiver == "Link" {
+        if name == "id" { return "linkId" }
+        if name == "payload" { return "linkPayload" }
+    }
+    return ""
+}
+
+export fn Method(receiver: string, name: string) -> string {
+    if receiver == "Space" {
+        if name == "insert" { return "spaceInsert" }
+        if name == "get" { return "spaceGet" }
+        if name == "move" { return "spaceMove" }
+        if name == "remove" { return "spaceRemove" }
+        if name == "neighbors" { return "spaceNeighbors" }
+        if name == "ahead" { return "spaceAhead" }
+        if name == "size" { return "spaceSize" }
+        if name == "connect" { return "spaceConnect" }
+        if name == "disconnect" { return "spaceDisconnect" }
+        if name == "getLink" { return "spaceGetLink" }
+        if name == "setLinkPayload" { return "spaceSetLinkPayload" }
+        if name == "outgoing" { return "spaceOutgoing" }
+        if name == "incoming" { return "spaceIncoming" }
+        if name == "linkCount" { return "spaceLinkCount" }
+        if name == "source" { return "linkSource" }
+        if name == "target" { return "linkTarget" }
+    }
+    if receiver == "Point3" && name == "distance" { return "distance3" }
+    if receiver == "Vec3" && name == "dot" { return "dot3" }
+    if receiver == "Transform3" {
+        if name == "point" { return "transformPoint" }
+        if name == "vector" { return "transformVector" }
+        if name == "then" { return "transformThen" }
+    }
+    return ""
+}
+
+export fn Receiver(module: int, index: int, receiver: int, arguments: [int], name: string, visit: fn(int, int, int, inout state.State, inout model.ResolvedTypes) -> int, c: inout state.State, resolved: inout model.ResolvedTypes) -> int {
+    let operation = Method(resolved.types[receiver].name,name)
+    if operation == "" { state.Report(module,index,"Unknown spatial method: " + name,resolved,&c); return -1 }
+    let firstExpression = len(c.expressions)
+    let result = CheckKnown(module,index,operation,arguments,receiver,visit,&c,&resolved)
+    if result < 0 { return result }
+    // Publish the concrete bound method contract. Effects of evaluating the
+    // receiver and arguments are checked at their own call sites; the spatial
+    // operation itself computes a value without external effects.
+    var parameters: [int] = []
+    for argument in slice(arguments, 1, len(arguments)) {
+        var actual = -1
+        for expression in slice(c.expressions, firstExpression, len(c.expressions)) {
+            if expression.module == module && expression.node == argument { actual = expression.typeId }
+        }
+        if actual < 0 { return result }
+        parameters.append(actual)
+    }
+    parameters.append(result)
+    let callee = resolved.bound.project.modules[module].syntax.nodes[index].children[0]
+    state.Save(module,callee,types.Callable("",parameters,&resolved),&c)
+    return result
+}
+
+// A receiver's native method contract is shared by checking and editor clients.
+export fn Signatures(receiver: int, resolved: inout model.ResolvedTypes) -> [model.MethodSignature] {
+    let typ = resolved.types[receiver]
+    var signatures: [model.MethodSignature] = []
+    if typ.kind != "spatial" { return signatures }
+    for name in ["insert", "get", "move", "remove", "neighbors", "ahead", "size", "connect", "disconnect", "getLink", "setLinkPayload", "outgoing", "incoming", "linkCount", "source", "target", "distance", "dot", "point", "vector", "then"] {
+        let operation = Method(typ.name, name)
+        if operation != "" { signatures.append(Describe(receiver, name, operation, &resolved)) }
+    }
+    return signatures
+}
+fn Describe(receiver: int, name: string, operation: string, resolved: inout model.ResolvedTypes) -> model.MethodSignature {
+    let typ = resolved.types[receiver]
+    var parameters: [model.TypeField] = []
+    var generics: [string] = []
+    var result = receiver
+    let integer = state.Scalar("int", &resolved)
+    let number = state.Scalar("float64", &resolved)
+    if typ.name == "Point3" || typ.name == "Vec3" {
+        parameters.append(model.TypeField{name:"other",typeId:receiver})
+        result = number
+    } else if typ.name == "Transform3" {
+        if operation == "transformThen" {
+            let target = types.IntrinsicParameter("Target", &resolved)
+            generics.append("Target")
+            parameters.append(model.TypeField{name:"after",typeId:types.Spatial("Transform3",[typ.arguments[1],target],&resolved)})
+            result = types.Spatial("Transform3",[typ.arguments[0],target],&resolved)
+        } else {
+            var valueKind = "Point3"
+            if operation == "transformVector" { valueKind = "Vec3" }
+            parameters.append(model.TypeField{name:"value",typeId:types.Spatial(valueKind,[typ.arguments[0]],&resolved)})
+            result = types.Spatial(valueKind,[typ.arguments[1]],&resolved)
+        }
+    } else {
+        let point = types.Spatial("Point3",[typ.arguments[0]],&resolved)
+        let entity = types.Spatial("Entity",slice(typ.arguments,0,2),&resolved)
+        let link = types.Spatial("Link",typ.arguments,&resolved)
+        if operation == "spaceSize" || operation == "spaceLinkCount" { result = integer }
+        if operation == "spaceGet" || operation == "spaceGetLink" {
+            parameters.append(model.TypeField{name:"id",typeId:integer})
+            result = entity
+            if operation == "spaceGetLink" { result = link }
+        }
+        if operation == "spaceInsert" {
+            parameters.append(model.TypeField{name:"position",typeId:point})
+            parameters.append(model.TypeField{name:"payload",typeId:typ.arguments[1]})
+        }
+        if operation == "spaceMove" || operation == "spaceRemove" || operation == "spaceNeighbors" || operation == "spaceOutgoing" || operation == "spaceIncoming" {
+            parameters.append(model.TypeField{name:"entity",typeId:entity})
+        }
+        if operation == "spaceMove" { parameters.append(model.TypeField{name:"position",typeId:point}) }
+        if operation == "spaceNeighbors" {
+            parameters.append(model.TypeField{name:"radius",typeId:number})
+            result = types.Structural("array",[entity],&resolved)
+        }
+        if operation == "spaceOutgoing" || operation == "spaceIncoming" { result = types.Structural("array",[link],&resolved) }
+        if operation == "spaceConnect" || operation == "spaceAhead" {
+            parameters.append(model.TypeField{name:"source",typeId:entity})
+            parameters.append(model.TypeField{name:"target",typeId:entity})
+        }
+        if operation == "spaceConnect" { parameters.append(model.TypeField{name:"payload",typeId:typ.arguments[2]}) }
+        if operation == "spaceAhead" {
+            parameters.append(model.TypeField{name:"direction",typeId:types.Spatial("Vec3",[typ.arguments[0]],&resolved)})
+            parameters.append(model.TypeField{name:"tolerance",typeId:number})
+            result = state.Scalar("bool",&resolved)
+        }
+        if operation == "spaceDisconnect" || operation == "spaceSetLinkPayload" || operation == "linkSource" || operation == "linkTarget" {
+            parameters.append(model.TypeField{name:"link",typeId:link})
+        }
+        if operation == "spaceSetLinkPayload" { parameters.append(model.TypeField{name:"payload",typeId:typ.arguments[2]}) }
+        if operation == "linkSource" || operation == "linkTarget" { result = entity }
+    }
+    return model.MethodSignature{name,generics,parameters,result,effect:false}
+}
+fn CheckKnown(module: int, index: int, name: string, arguments: [int], first: int, visit: fn(int, int, int, inout state.State, inout model.ResolvedTypes) -> int, c: inout state.State, resolved: inout model.ResolvedTypes) -> int {
+    if name == "transformThen" {
+        if len(arguments) != 2 { state.Report(module,index,"Wrong spatial operation argument count: " + name,resolved,&c); return -1 }
+        let other = visit(module,arguments[1],-1,&c,&resolved)
+        if other < 0 { return -1 }
+        let target = resolved.types[other]
+        let typ = resolved.types[first]
+        if target.kind != "spatial" || target.name != "Transform3" { state.Report(module,arguments[1],"Expected a coordinate transform",resolved,&c); return -1 }
+        state.Match(module,arguments[1],typ.arguments[1],target.arguments[0],resolved,&c)
+        return types.Spatial("Transform3",[typ.arguments[0],target.arguments[1]],&resolved)
+    }
+    let signature = Describe(first,"",name,&resolved)
+    if len(arguments) != len(signature.parameters) + 1 { state.Report(module,index,"Wrong spatial operation argument count: " + name,resolved,&c); return -1 }
+    for position, parameter in signature.parameters {
+        state.Match(module,arguments[position+1],parameter.typeId,visit(module,arguments[position+1],parameter.typeId,&c,&resolved),resolved,&c)
+    }
+    return signature.result
+}

@@ -1,0 +1,21 @@
+import "std/time.pxl" as time
+
+export enum Event { Tick, Pay(cents: int), Ship(tracking: string), Cancel }
+export enum Status { AwaitingPayment, Paid, Shipped(tracking: string), Cancelled, Expired }
+export enum Rejection {
+    PaymentExpired,
+    AmountMismatch(expected: int, actual: int),
+    InvalidTransition(status: Status, event: Event),
+    MissingTracking
+}
+export record Order { id: string, status: Status, totalCents: int, expiresAt: time.Duration }
+export record Decision { order: Order, outcome: Result[Status, Rejection] }
+
+export fn Accept(previous: Order, status: Status) -> Decision {
+    let order = previous with {status}
+    return Decision{order, outcome: .Ok(status)}
+}
+
+export fn Reject(previous: Order, error: Rejection) -> Decision {
+    return Decision{order: previous, outcome: .Err(error)}
+}

@@ -1,0 +1,206 @@
+import "model.pxl" as model
+import "ir_state.pxl" as ir
+
+export record Range { start: int, end: int }
+export record Port { node: int, name: string, type: string, range: Range }
+export record Expression { node: int, type: string, range: Range }
+export record Callable { target: string, kind: string, source: string, range: Range, inputs: [Port], initialInputs: [Port], result: string, generic: bool }
+export record Value { node: int, name: string, type: string, expression: Expression, range: Range }
+export record Instance { node: int, name: string, target: string, constructor: Expression, inputs: [Port], initializers: [Range], result: string, range: Range }
+export record Cell { node: int, name: string, type: string, initializer: Range, range: Range }
+export record Dependency { source: int, target: int, reference: int, range: Range }
+export record Update { node: int, state: string, expression: Expression, range: Range }
+export record Output { node: int, expression: Expression, range: Range }
+export record Graph { node: int, name: string, source: string, range: Range, body: Range, inputs: [Port], initialInputs: [Port], result: string, values: [Value], children: [Instance], states: [Cell], dependencies: [Dependency], order: [int], updates: [Update], outputs: [Output], palette: [Callable] }
+export record Axis { name: string, range: Range, literal: bool }
+export record Coordinates { source: string, node: int, type: string, range: Range, axes: [Axis] }
+export record Projection { coordinates: [Coordinates], version: string, graphs: [Graph], types: map[string, string], diagnostics: [model.Diagnostic] }
+
+fn Span(node: model.Node) -> Range = Range{start: node.start, end: node.end}
+fn Type(id: int, resolved: model.ResolvedTypes) -> string {
+    if id < 0 || id >= len(resolved.types) { return "" }
+    return ir.TypeName(id, resolved)
+}
+fn Annotation(module: int, node: int, resolved: model.ResolvedTypes) -> string {
+    for item in resolved.annotations { if item.module == module && item.node == node { return Type(item.typeId, resolved) } }
+    return ""
+}
+fn Signature(module: int, declaration: int, target: string, resolved: model.ResolvedTypes) -> Callable {
+    let source = resolved.bound.project.modules[module]
+    let node = source.syntax.nodes[declaration]
+    var result: Callable = Callable{target, kind: node.kind, source: source.path, range: Span(node), inputs: [], initialInputs: [], result: "unit", generic: false}
+    for child in node.children {
+        let item = source.syntax.nodes[child]
+        if item.kind == "type_parameter" { result.generic = true }
+        if item.kind == "parameter" || item.kind == "initial_parameter" {
+            var typ = ""
+            if len(item.children) > 0 { typ = Annotation(module, item.children[0], resolved) }
+            let port = Port{node: child, name: item.text, type: typ, range: Span(item)}
+            if item.kind == "initial_parameter" { result.initialInputs.append(port) }
+            else { result.inputs.append(port) }
+        }
+        if item.kind == "result" { result.result = Annotation(module, item.children[0], resolved) }
+    }
+    return result
+}
+fn Palette(module: int, resolved: model.ResolvedTypes) -> [Callable] {
+    var result: [Callable] = []
+    let source = resolved.bound.project.modules[module]
+    for index, candidate in resolved.bound.project.modules {
+        var prefixes: [string] = []
+        if index == module { prefixes.append("") }
+        else { for imported in source.imports { if imported.target == candidate.path { prefixes.append(imported.alias + ".") } } }
+        for prefix in prefixes {
+            for declaration in candidate.declarations {
+                if declaration.kind != "fn" && declaration.kind != "flow" { continue }
+                if model.Effectful(candidate.syntax.nodes, declaration.node) { continue }
+                if index != module && !declaration.exported { continue }
+                result.append(Signature(index, declaration.node, prefix + declaration.name, resolved))
+            }
+        }
+    }
+    return result
+}
+fn Key(module: int, node: int) -> string = string(module) + ":" + string(node)
+fn KnownType(module: int, node: int, types: map[string, string]) -> string {
+    let key = Key(module, node)
+    if types.has(key) { return types[key] }
+    return ""
+}
+// Grouping parentheses are not semantic AST nodes. Recover their concrete range
+// from native tokens within the owning expression slot, without changing the
+// identifier spans used for references and renaming.
+fn ExpressionSpan(index: int, lower: int, upper: int, syntax: model.Parsed) -> Range {
+    var result = Span(syntax.nodes[index])
+    var before = -1
+    var after = len(syntax.tokens)
+    for position, token in syntax.tokens {
+        if token.end <= result.start && token.value != "\n" { before = position }
+        if token.start >= result.end && token.value != "\n" { after = position; break }
+    }
+    while before >= 0 && after < len(syntax.tokens) {
+        let left = syntax.tokens[before]
+        let right = syntax.tokens[after]
+        if left.start < lower || right.end > upper { break }
+        if left.kind == "str" || right.kind == "str" || left.value != "(" || right.value != ")" { break }
+        result = Range{start: left.start, end: right.end}
+        before -= 1; after += 1
+        while before >= 0 && syntax.tokens[before].value == "\n" { before -= 1 }
+        while after < len(syntax.tokens) && syntax.tokens[after].value == "\n" { after += 1 }
+    }
+    return result
+}
+fn Computation(module: int, index: int, owner: model.Node, source: model.Module, types: map[string, string]) -> Expression {
+    return Expression{node: index, type: KnownType(module, index, types), range: ExpressionSpan(index, owner.start, owner.end, source.syntax)}
+}
+fn Qualified(index: int, nodes: [model.Node]) -> string {
+    let node = nodes[index]
+    if node.kind == "name" { return node.text }
+    if node.kind == "field" && len(node.children) == 1 {
+        let root = Qualified(node.children[0], nodes)
+        if root != "" { return root + "." + node.text }
+    }
+    return ""
+}
+export fn Build(checked: model.ExpressionCheck) -> Projection {
+    let resolved = checked.resolved
+    var projection: Projection = Projection{coordinates: [], version: "pixellang-native-graphs/2", graphs: [], types: map[string, string]{}, diagnostics: checked.diagnostics}
+    for typ in resolved.types {
+        if typ.module >= 0 && (typ.kind == "record" || typ.kind == "enum" || typ.kind == "frame") {
+            projection.types["@" + string(typ.module) + ":" + string(typ.declaration)] = resolved.bound.project.modules[typ.module].path + ":" + typ.name
+        }
+    }
+    for expression in checked.expressions {
+        if expression.typeId < 0 || expression.typeId >= len(resolved.types) { continue }
+        let typ = resolved.types[expression.typeId]
+        if typ.kind != "spatial" || (typ.name != "Point3" && typ.name != "Vec3") { continue }
+        let source = resolved.bound.project.modules[expression.module]
+        let node = source.syntax.nodes[expression.node]
+        if node.kind != "construct" && node.kind != "binary" && node.kind != "call" { continue }
+        var coordinates: Coordinates = Coordinates{source: source.path, node: expression.node, type: Type(expression.typeId, resolved), range: Span(node), axes: []}
+        for child in node.children {
+            if node.kind != "construct" { break }
+            let field = source.syntax.nodes[child]
+            if field.kind != "initializer" || len(field.children) != 1 { continue }
+            if field.text != "x" && field.text != "y" && field.text != "z" { continue }
+            let value = source.syntax.nodes[field.children[0]]
+            var scalar = value
+            if scalar.kind == "unary" && (scalar.text == "-" || scalar.text == "+") && len(scalar.children) == 1 { scalar = source.syntax.nodes[scalar.children[0]] }
+            coordinates.axes.append(Axis{name: field.text, range: Span(value), literal: scalar.kind == "literal_float64" || scalar.kind == "literal_int"})
+        }
+        projection.coordinates.append(coordinates)
+    }
+    // Types and edges are checked facts; preserve syntax even when a diagnostic
+    // prevents those facts from being available. Never guess binding by spelling.
+    var bindingTypes: map[string, string] = map[string, string]{}
+    var expressionTypes: map[string, string] = map[string, string]{}
+    for symbol in resolved.bound.symbols {
+        if symbol.module >= 0 { bindingTypes[Key(symbol.module, symbol.node)] = Type(symbol.typeId, resolved) }
+    }
+    for expression in checked.expressions {
+        expressionTypes[Key(expression.module, expression.node)] = Type(expression.typeId, resolved)
+    }
+    for module, source in resolved.bound.project.modules {
+        let palette = Palette(module, resolved)
+        for declaration in source.declarations {
+            if declaration.kind != "flow" { continue }
+            let node = source.syntax.nodes[declaration.node]
+            var body = -1
+            for child in node.children { if source.syntax.nodes[child].kind == "flow_body" { body = child } }
+            if body < 0 { continue }
+            let signature = Signature(module, declaration.node, declaration.name, resolved)
+            var graph = Graph{node: declaration.node, name: declaration.name, source: source.path,
+                range: Span(node), body: Span(source.syntax.nodes[body]), inputs: signature.inputs,
+                initialInputs: signature.initialInputs, result: signature.result, values: [], children: [],
+                states: [], dependencies: [], order: [], updates: [], outputs: [], palette}
+            for plan in checked.flows {
+                if plan.module != module || plan.graph.declaration != declaration.node { continue }
+                graph.order = plan.graph.order
+                for edge in plan.graph.dependencies {
+                    graph.dependencies.append(Dependency{source: edge.source, target: edge.target,
+                        reference: edge.reference, range: Span(source.syntax.nodes[edge.reference])})
+                }
+            }
+            for child in source.syntax.nodes[body].children {
+                let item = source.syntax.nodes[child]
+                if len(item.children) == 0 { continue }
+                let expression = item.children[len(item.children) - 1]
+                let value = Computation(module, expression, item, source, expressionTypes)
+                if item.kind == "flow_value" {
+                    graph.values.append(Value{node: child, name: item.text,
+                        type: KnownType(module, child, bindingTypes), expression: value, range: Span(item)})
+                }
+                if item.kind == "flow_instance" {
+                    let creation = source.syntax.nodes[expression]
+                    var instance = Instance{node: child, name: item.text, target: "", constructor: value,
+                        inputs: [], initializers: [], result: "", range: Span(item)}
+                    if creation.kind == "call" && len(creation.children) > 0 {
+                        instance.target = Qualified(creation.children[0], source.syntax.nodes)
+                        var lower = source.syntax.nodes[creation.children[0]].end
+                        for token in source.syntax.tokens {
+                            if token.start >= lower && token.end <= creation.end && token.kind != "str" && token.value == "(" {
+                                lower = token.end; break
+                            }
+                        }
+                        for argument in slice(creation.children, 1, len(creation.children)) {
+                            instance.initializers.append(ExpressionSpan(argument, lower, creation.end - 1, source.syntax))
+                        }
+                        for callable in palette {
+                            if callable.target != instance.target { continue }
+                            instance.inputs = callable.inputs; instance.result = callable.result
+                        }
+                    }
+                    graph.children.append(instance)
+                }
+                if item.kind == "flow_state" {
+                    graph.states.append(Cell{node: child, name: item.text,
+                        type: KnownType(module, child, bindingTypes), initializer: value.range, range: Span(item)})
+                }
+                if item.kind == "flow_next" { graph.updates.append(Update{node: child, state: item.text, expression: value, range: Span(item)}) }
+                if item.kind == "flow_output" { graph.outputs.append(Output{node: child, expression: value, range: Span(item)}) }
+            }
+            projection.graphs.append(graph)
+        }
+    }
+    return projection
+}

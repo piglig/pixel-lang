@@ -1,12 +1,12 @@
 import unittest
 
-from pixellang.editor import SymbolIndex, complete, format_source
+from tests.editor_support import NativeEditorCase
 from pixellang.workstation import Workstation
 
 
-class EditorTests(unittest.TestCase):
+class EditorTests(NativeEditorCase):
     def test_shadowing_and_compound_assignment(self):
-        source = """fn main() {
+        source = """effect fn main() {
  let value = 1
  if true {
   var value = 2
@@ -17,7 +17,7 @@ class EditorTests(unittest.TestCase):
  print("value") // value
 }
 """
-        index = SymbolIndex({"main.pxl": source})
+        index = self.index({"main.pxl": source})
         outer = index.references("main.pxl", source.index("value"))
         inner = index.references("main.pxl", source.index("value = 2"))
         self.assertEqual(len(outer), 2)
@@ -30,8 +30,8 @@ class EditorTests(unittest.TestCase):
     def test_cross_file_records_fields_and_aliases(self):
         files = {
             "main.pxl": """import "models.pxl" as model
-fn main() {
- let item = model.Item{label: "你好"}
+effect fn main() {
+ var item: model.Item = model.Item{label: "你好"}
  item.label = model.Label(item)
  print(item.label)
 }
@@ -40,7 +40,7 @@ fn main() {
 export fn Label(item: Item) -> string = item.label
 """,
         }
-        index = SymbolIndex(files)
+        index = self.index(files)
         refs = index.references("main.pxl", files["main.pxl"].index("label:"))
         self.assertEqual(len(refs), 5)
         self.assertEqual({r["source"] for r in refs}, set(files))
@@ -50,25 +50,25 @@ export fn Label(item: Item) -> string = item.label
             definition["start"]["offset"], files["models.pxl"].index("Label")
         )
         types = index.references("models.pxl", files["models.pxl"].index("Item"))
-        self.assertEqual(len(types), 3)
+        self.assertEqual(len(types), 4)
         self.assertEqual(
             len(index.references("main.pxl", files["main.pxl"].index("as model") + 3)),
-            3,
+            4,
         )
 
     def test_disconnected_files_and_parameter_identity(self):
         files = {
-            "main.pxl": "fn main() { print(1) }",
+            "main.pxl": "effect fn main() { print(1) }",
             "other.pxl": "fn Echo(x: int) -> int = x",
         }
-        index = SymbolIndex(files)
+        index = self.index(files)
         self.assertEqual(
             len(index.references("other.pxl", files["other.pxl"].index("x:"))), 2
         )
 
     def test_editor_service_uses_supplied_source(self):
-        source = "fn main() { let 数字 = 1\nprint(数字) }"
-        result = Workstation().request(
+        source = "effect fn main() { let 数字 = 1\nprint(数字) }"
+        result = self.workstation.request(
             "definition",
             {
                 "files": {"main.pxl": source},
@@ -79,7 +79,7 @@ export fn Label(item: Item) -> string = item.label
         self.assertEqual(result["start"]["offset"], source.index("数字"))
 
     def apply_rename(self, files, filename, offset, name):
-        edits = SymbolIndex(files).rename(filename, offset, name)
+        edits = self.index(files).rename(filename, offset, name, analyze=self.index)
         changed = dict(files)
         for edit in reversed(edits):
             span = edit["span"]
@@ -92,26 +92,26 @@ export fn Label(item: Item) -> string = item.label
         return changed
 
     def test_rename_preserves_comments_and_strings(self):
-        text = 'fn main() { let 数字 = 1\nprint(数字) // 数字\nprint("数字") }'
+        text = 'effect fn main() { let 数字 = 1\nprint(数字) // 数字\nprint("数字") }'
         changed = self.apply_rename(
             {"main.pxl": text}, "main.pxl", text.index("数字"), "amount"
         )["main.pxl"]
         self.assertEqual(
             changed,
-            'fn main() { let amount = 1\nprint(amount) // 数字\nprint("数字") }',
+            'effect fn main() { let amount = 1\nprint(amount) // 数字\nprint("数字") }',
         )
 
     def test_rename_rejects_capture_in_both_directions(self):
         from pixellang.model import PixelError
 
-        text = "fn main() { let a = 1\nif true {\n let b = 2\n print(a)\n print(b)\n} }"
+        text = "effect fn main() { let a = 1\nif true {\n let b = 2\n print(a)\n print(b)\n} }"
         for offset, name in ((text.index("a ="), "b"), (text.index("b ="), "a")):
             with self.assertRaisesRegex(PixelError, "binding"):
-                SymbolIndex({"main.pxl": text}).rename("main.pxl", offset, name)
+                self.index({"main.pxl": text}).rename("main.pxl", offset, name, analyze=self.index)
 
     def test_rename_implicit_alias_keeps_import_path(self):
         files = {
-            "main.pxl": 'import "util.pxl"\nfn main() { print(util.Value()) }',
+            "main.pxl": 'import "util.pxl"\neffect fn main() { print(util.Value()) }',
             "util.pxl": "export fn Value() -> int = 42",
         }
         changed = self.apply_rename(
@@ -119,12 +119,12 @@ export fn Label(item: Item) -> string = item.label
         )
         self.assertEqual(
             changed["main.pxl"],
-            'import "util.pxl" as helper\nfn main() { print(helper.Value()) }',
+            'import "util.pxl" as helper\neffect fn main() { print(helper.Value()) }',
         )
 
     def test_rename_cross_file_type_and_field(self):
         files = {
-            "main.pxl": 'import "util.pxl"\nfn main() { let a = util.Row{value: 1}\nprint(a.value) }',
+            "main.pxl": 'import "util.pxl"\neffect fn main() { let a = util.Row{value: 1}\nprint(a.value) }',
             "util.pxl": "export record Row { value: int }",
         }
         changed = self.apply_rename(
@@ -140,33 +140,32 @@ export fn Label(item: Item) -> string = item.label
     def completions(self, source, extra=None):
         offset = source.index("|")
         source = source.replace("|", "", 1)
-        return complete(
-            {"main.pxl": source, **(extra or {})}, "main.pxl", "main.pxl", offset
+        return self.complete(
+            {"main.pxl": source, **(extra or {})}, "main.pxl", offset
         )
 
     def test_completion_nested_record_and_partial_name(self):
         items = self.completions(
-            'record Row { count: int, label: string }\nfn main() { let rows = [Row{count: 1, label: "a"}]\nrows[0].co|'
+            'record Row { count: int, label: string }\neffect fn main() { let rows = [Row{count: 1, label: "a"}]\nrows[0].co|'
         )
         self.assertEqual(items, [{"label": "count", "kind": "Field", "detail": "int"}])
 
     def test_completion_scope_and_unfinished_block(self):
         items = self.completions(
-            "fn main() {\n let local = true\n if true { let inner = 2 }\n lo|"
+            "effect fn main() {\n let local = true\n if true { let inner = 2 }\n lo|"
         )
         self.assertEqual(
             items,
             [
                 {"label": "local", "kind": "Variable", "detail": "bool"},
-                {"label": "lookup", "kind": "Function", "detail": "PixelLang builtin"},
             ],
         )
-        items = self.completions("fn helper() { let hidden = 1 }\nfn main() {\n hi|")
+        items = self.completions("fn helper() { let hidden = 1 }\neffect fn main() {\n hi|")
         self.assertEqual(items, [])
 
     def test_completion_only_exported_module_members(self):
         items = self.completions(
-            'import "util.pxl"\nfn main() { util.|',
+            'import "util.pxl"\neffect fn main() { util.|',
             {
                 "util.pxl": "export fn Public() -> int = 1\nfn private() -> int = 2\nexport record Row { value: int }"
             },
@@ -179,7 +178,7 @@ export fn Label(item: Item) -> string = item.label
 
     def test_completion_local_record_named_like_module(self):
         items = self.completions(
-            'import "util.pxl"\nrecord Row { field: int }\nfn main() { let util = Row{field: 1}\nutil.|',
+            'import "util.pxl"\nrecord Row { field: int }\neffect fn main() { let util = Row{field: 1}\nutil.|',
             {"util.pxl": "export fn Public() -> int = 1"},
         )
         self.assertEqual([item["label"] for item in items], ["field"])
@@ -187,7 +186,7 @@ export fn Label(item: Item) -> string = item.label
     def test_completion_in_type_annotations(self):
         for code in (
             "record Row { value: int }\nfn use(item: Ro|) { return }",
-            "record Row { value: int }\nfn main() { let item: Ro| = 1 }",
+            "record Row { value: int }\neffect fn main() { let item: Ro| = 1 }",
             "record Row { value: int }\nfn make() -> Ro| { return 1 }",
         ):
             self.assertEqual(
@@ -195,7 +194,7 @@ export fn Label(item: Item) -> string = item.label
                 [{"label": "Row", "kind": "Struct", "detail": "record Row"}],
             )
         self.assertEqual(
-            self.completions("fn main() { let count: in| = 1 }"),
+            self.completions("effect fn main() { let count: in| = 1 }"),
             [{"label": "int", "kind": "Keyword", "detail": "type"}],
         )
 
@@ -208,18 +207,17 @@ export fn Label(item: Item) -> string = item.label
         )
         self.assertEqual([item["label"] for item in result], ["Public"])
 
-    def test_format_preserves_comments_literals_and_line_endings(self):
-        text = 'fn main() {\r\n// keep me\r\nlet data = [\r\n"}", // bracket in string\r\n"猫"\r\n]\r\n/* multiline\r\n original spacing */\r\nprint(data)\r\n}\r\n'
-        formatted = format_source(text, "main.pxl")
-        self.assertIn("    // keep me\r\n", formatted)
-        self.assertIn('        "}", // bracket in string\r\n', formatted)
+    def test_format_preserves_comments_literals_and_formats_code_lines(self):
+        text = 'effect fn main() {\r\n// keep me\r\nlet data = [\r\n"}", // bracket in string\r\n"猫"\r\n]\r\n/* multiline\r\n original spacing */\r\nprint(data)\r\n}\r\n'
+        formatted = self.format(text, "main.pxl")
+        self.assertIn("    // keep me\n", formatted)
+        self.assertIn('        "}", // bracket in string\n', formatted)
         self.assertIn("/* multiline\r\n original spacing */", formatted)
-        self.assertEqual(format_source(formatted, "main.pxl"), formatted)
-        from pixellang.project import compile_project
+        self.assertEqual(self.format(formatted, "main.pxl"), formatted)
         from pixellang.vm import VM
 
         self.assertEqual(
-            VM(compile_project({"main.pxl": formatted})[1].bytecode).run(),
+            VM(self.compile({"main.pxl": formatted})).run(),
             [["}", "猫"]],
         )
 

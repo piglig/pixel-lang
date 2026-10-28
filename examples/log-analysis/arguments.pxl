@@ -1,0 +1,28 @@
+import "std/error.pxl" as errors
+import "models.pxl" as models
+import "std/cli.pxl" as cli
+import "std/path.pxl" as path
+import "std/io.pxl" as io
+
+export effect fn Config(values: [string]) -> Result[models.Config, Error] {
+    let parsed = cli.Parse(values, [], ["output", "since", "until", "level", "directory"])?
+    var files: [string] = []
+    for filename in parsed.files { files.append(path.Clean(filename)?) }
+    if parsed.options.has("directory") {
+        files.extend(Collect(path.Clean(parsed.options["directory"])?)?)
+    }
+    if len(files) == 0 { return .Err(errors.New("log.missing_input", "Provide input files or --directory", "Config", "")) }
+    var output = "report.json"
+    if parsed.options.has("output") { output = path.Clean(parsed.options["output"])? }
+    return .Ok(models.Config{files, output, since: parsed.options.get("since"), until: parsed.options.get("until"), minimum_level: parsed.options.get("level")})
+}
+
+effect fn Collect(directory: string) -> Result[[string], Error] {
+    var files: [string] = []
+    for entry in io.List(directory)? {
+        let filename = path.Join(directory, entry.name)?
+        if entry.directory { files.extend(Collect(filename)?) }
+        else if path.Extension(filename)? == ".jsonl" { files.append(filename) }
+    }
+    return .Ok(files)
+}

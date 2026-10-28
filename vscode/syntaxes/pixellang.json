@@ -23,19 +23,39 @@
     },
     {
       "name": "keyword.control.pixellang",
-      "match": "\\b(fn|let|var|if|else|while|for|in|break|continue|return|export|import|as|try|catch|record|enum|match)\\b"
+      "match": "\\b(fn|let|var|if|else|while|for|in|break|continue|return|export|import|as|record|enum|match|with|inout)\\b"
+    },
+    {
+      "name": "storage.modifier.effect.pixellang",
+      "match": "\\beffect\\b(?=\\s+fn\\b)"
+    },
+    {
+      "name": "keyword.declaration.pixellang",
+      "match": "\\b(flow|frame|instance|state|next)\\b(?=\\s+[\\p{L}_][\\p{L}\\p{N}_]*\\s*(?:[:=(\\[]|$))"
+    },
+    {
+      "name": "keyword.control.flow.pixellang",
+      "match": "(?<![.\\p{L}\\p{N}_])\\boutput\\b(?=\\s+\\S)"
     },
     {
       "name": "storage.type.pixellang",
-      "match": "\\b(int|float64|bool|string|map|json|Error|Option)\\b"
+      "match": "\\b(int|float64|bool|string|unit|map|json|Error|Option|Result|Flow|Point3|Vec3|Transform3|Entity|Space|Link)\\b"
     },
     {
       "name": "constant.language.pixellang",
-      "match": "\\b(true|false|Some|None)\\b"
+      "match": "\\b(true|false)\\b"
     },
     {
       "name": "constant.numeric.pixellang",
       "match": "\\b[0-9][0-9_]*(?:\\.[0-9][0-9_]*)?(?:[eE][+-]?[0-9][0-9_]*)?\\b"
+    },
+    {
+      "name": "keyword.operator.propagation.pixellang",
+      "match": "\\?"
+    },
+    {
+      "name": "keyword.operator.specialization.pixellang",
+      "match": "::"
     },
     {
       "name": "entity.name.function.pixellang",

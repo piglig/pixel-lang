@@ -3,9 +3,9 @@ import unittest
 from contextlib import ExitStack
 from unittest.mock import patch
 
+from tests.native_compiler import compile_native_sources
 from pixellang.bootstrap_image import HOST_STAGES
 from pixellang.compiler_service import CompilerService
-from pixellang.project import compile_project
 from pixellang.vm import VM
 
 
@@ -13,18 +13,18 @@ class SelfHostedDebugTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         root=Path(__file__).resolve().parents[1]
-        cls.compiler=compile_project({p.name:p.read_text() for p in (root/'selfhost').glob('*.pxl')})[1].bytecode
+        cls.compiler=compile_native_sources({p.name:p.read_text() for p in (root/'selfhost').glob('*.pxl')})
 
     def test_debug_sidecar_matches_generic_and_closure_frames(self):
         files={'main.pxl':'''import "lib.pxl" as lib
-fn main(){
+effect fn main(){
  let base = 20
  let twice = fn(value:int)->int = base + value
  print(lib.identity(twice(22)))
 }''','lib.pxl':'export fn identity[T](value:T)->T=value'}
         service=CompilerService(self.compiler)
         with ExitStack() as stack:
-            for target in (*HOST_STAGES,'pixellang.project.compile_project'):
+            for target in HOST_STAGES:
                 stack.enter_context(patch(target,side_effect=AssertionError('Host frontend used')))
             built=service.request(dict(version=1,operation='debug-compile',files=files))
             plain=service.request(dict(version=1,operation='compile',files=files))
@@ -46,7 +46,7 @@ fn main(){
 
     def test_invalid_program_has_no_debug_artifact(self):
         service=CompilerService(self.compiler)
-        result=service.request(dict(version=1,operation='debug-compile',files={'main.pxl':'fn main(){print(missing)}'}))
+        result=service.request(dict(version=1,operation='debug-compile',files={'main.pxl':'effect fn main(){print(missing)}'}))
         self.assertEqual(result['status'],'diagnostics',result)
         self.assertIsNone(result['result'])
 
@@ -54,15 +54,14 @@ fn main(){
         from pixellang.debug_artifact import prepare_debug
         from pixellang.temporal import Timeline
         from pixellang.workstation import Workstation
-        files={'main.pxl':'import "lib.pxl" as lib\nfn main(){\nlet result=lib.twice(21)\nprint(result)\n}',
+        files={'main.pxl':'import "lib.pxl" as lib\neffect fn main(){\nlet result=lib.twice(21)\nprint(result)\n}',
                'lib.pxl':'export fn twice(value:int)->int {\nreturn value*2\n}'}
         service=CompilerService(self.compiler)
         result=service.request(dict(version=1,operation='debug-compile',files=files))
         mapped=service.request(dict(version=1,operation='debug-pixels',files=files))
         self.assertEqual(mapped['status'],'ok',mapped)
         artifact=prepare_debug(result['result']['bytecode'],result['result']['debug'],mapped['result']['document'])
-        with patch('pixellang.temporal.compile_source',side_effect=AssertionError('Host frontend used')):
-            timeline=Timeline(artifact.source,compiled=artifact)
+        timeline=Timeline(artifact.source,compiled=artifact)
         studio=Workstation();self.addCleanup(studio.close)
         seen=[]
         while not timeline.vm.halted:
@@ -76,17 +75,16 @@ fn main(){
         timeline.source_project=artifact.source_project
         timeline.seek(3)
         recording=timeline.document()
-        with patch('pixellang.temporal.compile_source',side_effect=AssertionError('Host replay compiler')):
-            restored=Timeline.restore(recording,compiled=artifact)
+        restored=Timeline.restore(recording,compiled=artifact)
         self.assertEqual(restored.seek(3),timeline.seek(3))
         from copy import deepcopy
         damaged=deepcopy(recording);damaged['compiled_sha256']='0'*64
         from pixellang.model import PixelError
         with self.assertRaisesRegex(PixelError,'differs from recorded'):
             Timeline.restore(damaged,compiled=artifact)
-        damaged=deepcopy(recording);damaged['source']['metadata']['filename']='wrong.pxl'
-        with self.assertRaisesRegex(PixelError,'differs from timeline'):
-            Timeline.restore(damaged,compiled=artifact)
+        damaged=deepcopy(artifact.source);damaged['metadata']['filename']='wrong.pxl'
+        with self.assertRaisesRegex(PixelError,'does not match source document'):
+            timeline.set_projection(damaged)
         volume=timeline.volume()
         self.assertTrue(volume['voxels'])
         self.assertEqual({v['module'] for v in volume['voxels']},{'main','1'})
@@ -99,7 +97,6 @@ fn main(){
         import base64,io
         from PIL import Image
         from pixellang.picture import decode_picture
-        from pixellang.project import project_text
         from pixellang.compiler_client import CompilerClient
         from pixellang.workstation import Workstation
         service=CompilerService(self.compiler)
@@ -110,13 +107,15 @@ fn main(){
                 return service.request(request,cancelled=kwargs.get('cancelled',lambda:False))
         studio=Workstation();self.addCleanup(studio.close)
         studio.compiler=CompilerClient(InlineWorker())
-        files={'main.pxl':'fn main(){\nlet values=[3,1,2]\nprint(values)\n}'}
+        files={'main.pxl':'effect fn main(){\nlet values=[3,1,2]\nprint(values)\n}'}
         with ExitStack() as stack:
-            for target in (*HOST_STAGES,'pixellang.workstation.compile_project','pixellang.workstation.encode_picture','pixellang.temporal.compile_source'):
+            for target in HOST_STAGES:
                 stack.enter_context(patch(target,side_effect=AssertionError('Host Studio frontend used')))
             built=studio.request('build',{'files':files})
             self.assertEqual(len(submissions),1,'Build must use one compilation transaction')
-            recovered=studio.request('recover',{'image':built['image']})
+            self.assertNotIn('image',built)
+            png=studio.request('inspect-image',{'session':built['session']})['image']
+            recovered=studio.request('recover',{'image':png})
             self.assertIn('let values',recovered['files']['main.pxl'])
             self.assertIsNone(built['inspection']['ir'])
             inspected=studio.request('inspect-ir',{'session':built['session']})
@@ -133,9 +132,11 @@ fn main(){
             self.assertEqual(len(submissions),1,'Restore must use one compilation transaction')
             self.assertIsNotNone(submissions[0])
             self.assertEqual(len(set(submissions)),1,'Restore phases must share one deadline')
-        with Image.open(io.BytesIO(base64.b64decode(built['image']))) as image:
+        with Image.open(io.BytesIO(base64.b64decode(png))) as image:
             document=decode_picture(image)
         self.assertNotIn('source_map',document['metadata'])
         self.assertEqual(document['metadata']['filename'],'main.pxl')
-        recovered=project_text(document)
+        response=service.request(dict(version=1,id='recover-document',operation='recover-pixels',document=document))
+        self.assertEqual(response['status'],'ok',response)
+        recovered=response['result']
         self.assertIn('let values',recovered['files']['main.pxl'])

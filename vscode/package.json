@@ -44,6 +44,18 @@
     ],
     "commands": [
       {
+        "command": "pixellang.openApplicationJournal",
+        "title": "PixelLang: Open Native Application Journal"
+      },
+      {
+        "command": "pixellang.openApplication",
+        "title": "PixelLang: Open Native Application"
+      },
+      {
+        "command": "pixellang.openNativeGraph",
+        "title": "PixelLang: Open Native Graph"
+      },
+      {
         "command": "pixellang.studio",
         "title": "PixelLang: Open Studio",
         "icon": "$(symbol-color)"
@@ -68,6 +80,10 @@
       {
         "command": "pixellang.testProject",
         "title": "PixelLang: Save and Test Project"
+      },
+      {
+        "command": "pixellang.runTest",
+        "title": "PixelLang: Run a Test"
       },
       {
         "command": "pixellang.buildProject",
@@ -133,6 +149,39 @@
           "minimum": 1,
           "maximum": 1000000,
           "description": "Instruction budget for Studio runs and debugging."
+        },
+        "pixellang.application": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": false,
+          "properties": {
+            "instance": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "intervalNanoseconds": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 100000000
+            },
+            "tick": {
+              "type": "object",
+              "required": [
+                "variant",
+                "fields"
+              ],
+              "properties": {
+                "variant": {
+                  "type": "string"
+                },
+                "fields": {
+                  "type": "object"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "description": "Host scheduling configuration for flow applications. Select an initialized flow, tick event and logical interval."
         }
       }
     },
@@ -157,6 +206,14 @@
                 "type": "string",
                 "default": ""
               },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": [],
+                "description": "Program arguments returned by programArgs()"
+              },
               "stopOnEntry": {
                 "type": "boolean",
                 "default": true
@@ -179,7 +236,7 @@
   "scripts": {
     "prepare-runtime": "node scripts/prepare.js",
     "package": "npm run prepare-runtime && vsce package --pre-release",
-    "check": "node --check src/extension.js && node --check src/debug.js && node --check media/studio.js && node --check src/onboarding.js",
+    "check": "node test/pending-requests.js && node test/bridge-backpressure.js && node --check src/extension.js && node --check src/debug.js && node --check media/studio.js && node --check src/onboarding.js && node test/native-debug.js && node test/native-graph-edits.js && node --check src/native-graphs.js && node --check media/native-graph.js && node --check media/native-graph-renderer.js && node test/native-graphs.js && node test/native-graph-debug.js && node test/native-runtime-navigation.js && node test/native-constructor-controls.js && node test/native-space-renderer.js && node test/native-coordinate-edits.js && node --check src/application.js && node --check media/application.js && node test/application-controls.js && node test/application-journal.js && node test/editor-work.js",
     "test": "npm run prepare-runtime && node scripts/test.js"
   },
   "devDependencies": {

@@ -1,0 +1,109 @@
+import "model.pxl" as model
+import "types.pxl" as types
+import "semantic_cache.pxl" as semantic
+import "source_identity.pxl" as identity
+import "type_cache_model.pxl" as typeCache
+
+record Slot { symbol: string, typeId: int, kind: string, mutable: bool }
+export record Entry { fingerprint: [string], dependencies: [string], types: [typeCache.CachedType], slots: [Slot], parameters: int, captures: int }
+export record Snapshot { contracts: map[string, [string]], entries: map[string, Entry] }
+export record Reuse { previous: Snapshot, current: Snapshot, semantic: semantic.Snapshot, addresses: identity.Index, symbols: map[string, int], hits: int, checked: int }
+record Encoding { ids: map[int, int], types: [typeCache.CachedType] }
+export fn Empty() -> Snapshot = Snapshot{contracts: map[string, [string]]{}, entries: map[string, Entry]{}}
+export fn Begin(previous: Snapshot, checked: semantic.Snapshot, planned: model.ClosurePlan) -> Reuse {
+    var wanted = map[string, bool]{}
+    for key, entry in previous.entries {
+        for typ in entry.types { if typ.origin != "" { wanted[typ.origin] = true } }
+    }
+    let resolved = planned.named.checked.resolved
+    let addresses = identity.ForLocations(resolved.bound.project, wanted)
+    var symbols = map[string, int]{}
+    for id, symbol in resolved.bound.symbols {
+        let node = identity.Key(symbol.module, symbol.node)
+        if symbol.module >= 0 && addresses.nodes.has(node) { symbols[addresses.nodes[node]] = id }
+    }
+    return Reuse{previous, current: Snapshot{contracts: checked.contracts, entries: map[string, Entry]{}}, semantic: checked, addresses, symbols, hits: 0, checked: 0}
+}
+fn TypeKey(id: int, resolved: model.ResolvedTypes, addresses: identity.Index) -> string {
+    let typ = resolved.types[id]
+    var origin = ""
+    if typ.module >= 0 { origin = addresses.nodes[identity.Key(typ.module, typ.declaration)] }
+    var parts = [typ.kind, typ.name, origin]
+    for argument in typ.arguments { parts.append(TypeKey(argument, resolved, addresses)) }
+    return jsonStringify(jsonFrom(parts))
+}
+fn Root(owner: int, planned: model.ClosurePlan, reuse: Reuse) -> string {
+    let symbol = planned.named.checked.resolved.bound.symbols[planned.named.instances[owner].symbol]
+    return reuse.addresses.nodes[identity.Key(symbol.module, symbol.node)]
+}
+fn Key(owner: int, module: int, node: int, typeId: int, planned: model.ClosurePlan, reuse: Reuse) -> string {
+    let resolved = planned.named.checked.resolved
+    var parts = [Root(owner, planned, reuse), reuse.addresses.nodes[identity.Key(module, node)], TypeKey(typeId, resolved, reuse.addresses)]
+    for argument in planned.named.instances[owner].arguments { parts.append(TypeKey(argument, resolved, reuse.addresses)) }
+    return jsonStringify(jsonFrom(parts))
+}
+fn Encode(id: int, resolved: model.ResolvedTypes, addresses: identity.Index, encoding: inout Encoding) -> int {
+    if encoding.ids.has(id) { return encoding.ids[id] }
+    let typ = resolved.types[id]
+    var arguments: [int] = []
+    for argument in typ.arguments { arguments.append(Encode(argument, resolved, addresses, &encoding)) }
+    var origin = ""
+    if typ.module >= 0 { origin = addresses.nodes[identity.Key(typ.module, typ.declaration)] }
+    let result = len(encoding.types)
+    encoding.types.append(typeCache.CachedType{kind: typ.kind, name: typ.name, origin, arguments})
+    encoding.ids[id] = result
+    return result
+}
+export fn Take(owner: int, closure: int, module: int, node: int, typeId: int, planned: inout model.ClosurePlan, reuse: inout Reuse) -> Option[model.FunctionFrame] {
+    let key = Key(owner, module, node, typeId, planned, reuse)
+    let root = Root(owner, planned, reuse)
+    if !reuse.previous.entries.has(key) || !reuse.semantic.entries.has(root) { reuse.checked += 1; return .None }
+    let entry = reuse.previous.entries[key]
+    let query = reuse.semantic.entries[root]
+    if entry.fingerprint != query.fingerprint || entry.dependencies != query.dependencies { reuse.checked += 1; return .None }
+    for dependency in entry.dependencies {
+        if !reuse.previous.contracts.has(dependency) || !reuse.semantic.contracts.has(dependency) { reuse.checked += 1; return .None }
+        if reuse.previous.contracts[dependency] != reuse.semantic.contracts[dependency] { reuse.checked += 1; return .None }
+    }
+    // Validate every address before interning anything into the current arena.
+    for typ in entry.types {
+        if typ.origin != "" && !reuse.addresses.locations.has(typ.origin) { reuse.checked += 1; return .None }
+    }
+    for slot in entry.slots { if !reuse.symbols.has(slot.symbol) { reuse.checked += 1; return .None } }
+    var relocated: [int] = []
+    for typ in entry.types {
+        var arguments: [int] = []
+        for argument in typ.arguments { arguments.append(relocated[argument]) }
+        var targetModule = -1
+        var targetNode = -1
+        if typ.origin != "" { let location = reuse.addresses.locations[typ.origin]; targetModule = location.module; targetNode = location.node }
+        relocated.append(types.Reintern(typ.kind, typ.name, targetModule, targetNode, arguments, &planned.named.checked.resolved))
+    }
+    var slots: [model.BindingSlot] = []
+    for slot in entry.slots { slots.append(model.BindingSlot{symbol: reuse.symbols[slot.symbol], typeId: relocated[slot.typeId], kind: slot.kind, mutable: slot.mutable}) }
+    reuse.current.entries[key] = entry
+    reuse.hits += 1
+    return .Some(model.FunctionFrame{owner, closure, module, node, typeId, parameters: entry.parameters, captures: entry.captures, slots})
+}
+export fn Save(frame: model.FunctionFrame, planned: model.ClosurePlan, reuse: inout Reuse) {
+    let root = Root(frame.owner, planned, reuse)
+    if !reuse.semantic.entries.has(root) { return }
+    let query = reuse.semantic.entries[root]
+    let resolved = planned.named.checked.resolved
+    var encoding = Encoding{ids: map[int, int]{}, types: []}
+    var slots: [Slot] = []
+    for slot in frame.slots {
+        let symbol = resolved.bound.symbols[slot.symbol]
+        slots.append(Slot{symbol: reuse.addresses.nodes[identity.Key(symbol.module, symbol.node)], typeId: Encode(slot.typeId, resolved, reuse.addresses, &encoding), kind: slot.kind, mutable: slot.mutable})
+    }
+    reuse.current.entries[Key(frame.owner, frame.module, frame.node, frame.typeId, planned, reuse)] = Entry{fingerprint: query.fingerprint, dependencies: query.dependencies, types: encoding.types, slots, parameters: frame.parameters, captures: frame.captures}
+}
+export fn Size(snapshot: Snapshot) -> int {
+    var size = len(snapshot.contracts)
+    for key, contract in snapshot.contracts { size += len(contract) }
+    for key, entry in snapshot.entries {
+        size += 1 + len(entry.fingerprint) + len(entry.dependencies) + len(entry.slots) + len(entry.types)
+        for typ in entry.types { size += len(typ.arguments) }
+    }
+    return size
+}

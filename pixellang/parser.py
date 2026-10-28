@@ -425,10 +425,6 @@ class RowParser:
             extra = {"value_name": self.ident()} if self.take(",") else {}
             self.need("in")
             n = Node("for", {"name": name, **extra, "value": self.expr(), "body": []})
-        elif self.take("try"):
-            n = Node("try", {"body": [], "otherwise": [], "name": None})
-        elif self.take("catch"):
-            n = Node("catch", {"name": self.ident(), "body": []})
         elif self.take("if"):
             n = Node("if", {"condition": self.expr(), "body": [], "otherwise": []})
         elif self.take("while"):
@@ -561,8 +557,6 @@ def parse(regions):
                 "fn",
                 "lambda_body",
                 "else",
-                "try",
-                "catch",
                 "for",
                 "match_stmt",
                 "case",
@@ -572,19 +566,7 @@ def parse(regions):
                 n.data["cases"] = n.data.pop("body")
                 if any(case.kind != "case" for case in n.data["cases"]):
                     raise PixelError("syntax", "Match children must be cases", n.span)
-            if n.kind == "catch":
-                if (
-                    not nodes
-                    or nodes[-1].kind != "try"
-                    or nodes[-1].data.get("_catch_seen")
-                ):
-                    raise PixelError(
-                        "syntax", "Catch must follow a try in the same scope", n.span
-                    )
-                nodes[-1].data["_catch_seen"] = True
-                nodes[-1].data["name"] = n.data["name"]
-                nodes[-1].data["otherwise"] = n.data["body"]
-            elif n.kind == "else":
+            if n.kind == "else":
                 if (
                     not nodes
                     or nodes[-1].kind != "if"
@@ -597,9 +579,6 @@ def parse(regions):
                 nodes[-1].data["_else_span"] = n.span
             else:
                 nodes.append(n)
-        for node in nodes:
-            if node.kind == "try" and not node.data.get("_catch_seen"):
-                raise PixelError("syntax", "Try requires a catch block", node.span)
         return nodes
 
     nodes = block(None)

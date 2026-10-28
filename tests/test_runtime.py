@@ -1,18 +1,23 @@
 import unittest
 
 from pixellang.model import PixelError
-from pixellang.project import compile_project
+from pixellang.compiler_client import CompilerClient
 from pixellang.vm import VM
 
 
-def machine(text, **kwargs):
-    _, compiled = compile_project({"main.pxl": text})
-    return VM(compiled.bytecode, **kwargs)
-
-
 class RuntimeMemoryTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.compiler = CompilerClient()
+        cls.addClassCleanup(cls.compiler.close)
+
+    def machine(self, text, **kwargs):
+        response = self.compiler.request('compile', files={'main.pxl': text})
+        self.assertEqual(response['status'], 'ok', response)
+        return VM(response['result']['bytecode'], **kwargs)
+
     def test_leaf_containers_and_captured_bindings_survive_gc(self):
-        vm = machine('''fn main() {
+        vm = self.machine('''effect fn main() {
             var values = [1, 2, 3]
             let read = fn() -> int { return values[0] }
             values = [42]
@@ -21,28 +26,25 @@ class RuntimeMemoryTests(unittest.TestCase):
             print(read())
             print(values)
         }''')
-        self.assertEqual(vm.run(), [42, [42]])
+        self.assertEqual(vm.run(), [1, [42]])
 
     def test_warm_builtin_signature_checks_values_and_changed_types(self):
-        vm = machine('fn main() {}')
-        numbers = vm.allocate('int[]', [1], None)
-        vm.builtin('append', [numbers, 2], None)
-        with self.assertRaisesRegex(PixelError, 'element type'):
-            vm.builtin('append', [numbers, True], None)
-        self.assertEqual(vm.sequence(numbers, None), [1, 2])
-        # Same signature, different contents: validation of byte ranges must run
-        # even after a successful call warmed the signature cache.
-        vm.builtin('crc32', [numbers], None)
-        vm.builtin('append', [numbers, 256], None)
+        from pixellang.value_update import replace_path
+        vm = self.machine('fn main() {}')
+        numbers = vm.allocate('int[]', [1, 2], None)
+        expected = vm.builtin('crc32', [numbers], None)
+        # A cached signature cannot skip content validation on a new value.
+        changed = replace_path(vm, numbers, [{'index': True}], [0], 256, None)
         with self.assertRaisesRegex(PixelError, 'Byte values'):
-            vm.builtin('crc32', [numbers], None)
-        other = vm.allocate('str[]', ['a'], None)
-        vm.builtin('append', [other, 'b'], None)
-        self.assertEqual(vm.sequence(other, None), ['a', 'b'])
+            vm.builtin('crc32', [changed], None)
+        with self.assertRaises(PixelError):
+            vm.builtin('crc32', [vm.allocate('bool[]', [True], None)], None)
+        self.assertEqual(vm.materialize(numbers), [1, 2])
+        self.assertEqual(vm.builtin('crc32', [numbers], None), expected)
 
     def test_allocation_churn_reclaims_unreachable_arrays(self):
-        vm = machine(
-            "fn main() {\nvar i = 0\nwhile i < 2000 { let scratch = [i, i + 1]; i += 1 }\nprint(i)\n}"
+        vm = self.machine(
+            "effect fn main() {\nvar i = 0\nwhile i < 2000 { let scratch = [i, i + 1]; i += 1 }\nprint(i)\n}"
         )
         self.assertEqual(vm.run(), [2000])
         self.assertLess(len(vm.heap), 130)
@@ -50,14 +52,14 @@ class RuntimeMemoryTests(unittest.TestCase):
         self.assertEqual(vm.next_address, 2000)
 
     def test_nested_alias_and_transient_roots_survive_collection(self):
-        vm = machine(
-            "fn main() {\nlet root = [[42]]\nlet alias = root[0]\nvar i = 0\nwhile i < 1000 { let scratch = [[i]]; i += 1 }\nprint(alias[0])\nprint(root[0][0])\n}"
+        vm = self.machine(
+            "effect fn main() {\nlet root = [[42]]\nlet alias = root[0]\nvar i = 0\nwhile i < 1000 { let scratch = [[i]]; i += 1 }\nprint(alias[0])\nprint(root[0][0])\n}"
         )
         self.assertEqual(vm.run(), [42, 42])
 
     def test_checkpoints_resume_identically_across_gc(self):
-        vm = machine(
-            "fn main() {\nvar i = 0\nwhile i < 400 { let a = [i]; i += 1 }\nprint(i)\n}"
+        vm = self.machine(
+            "effect fn main() {\nvar i = 0\nwhile i < 400 { let a = [i]; i += 1 }\nprint(i)\n}"
         )
         for _ in range(1000):
             vm.step(snapshot=False)
@@ -69,7 +71,7 @@ class RuntimeMemoryTests(unittest.TestCase):
         self.assertEqual(vm.state(), final)
 
     def test_cancel_is_checked_between_instructions(self):
-        vm = machine("fn main() {\nwhile true { let x = [1] }\n}")
+        vm = self.machine("effect fn main() {\nwhile true { let x = [1] }\n}")
         vm.step(snapshot=False)
         vm.cancel()
         with self.assertRaisesRegex(PixelError, "cancelled"):
@@ -78,15 +80,20 @@ class RuntimeMemoryTests(unittest.TestCase):
 
 
 class RecordingBudgetTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.compiler = CompilerClient()
+        cls.addClassCleanup(cls.compiler.close)
+
     def make(self, **kwargs):
         from pixellang.temporal import Timeline
 
-        source, _ = compile_project(
+        compiled = self.compiler.debug_project(
             {
-                "main.pxl": "fn main() {\nvar i = 0\nwhile i < 700 { let a = [i]; i += 1 }\nprint(i)\n}"
+                "main.pxl": "effect fn main() {\nvar i = 0\nwhile i < 700 { let a = [i]; i += 1 }\nprint(i)\n}"
             }
         )
-        return Timeline(source, **kwargs)
+        return Timeline(compiled.source, compiled=compiled, **kwargs)
 
     def test_checkpoint_seek_is_bounded_and_exact(self):
         timeline = self.make(checkpoint_interval=64)
@@ -153,8 +160,9 @@ class RecordingBudgetTests(unittest.TestCase):
         from pixellang.workstation import Workstation
 
         service = Workstation()
+        self.addCleanup(service.close)
         built = service.request(
-            "build", {"files": {"main.pxl": "fn main() {\nwhile true { let i = 1 }\n}"}}
+            "build", {"files": {"main.pxl": "effect fn main() {\nwhile true { let i = 1 }\n}"}}
         )
         args = {"session": built["session"]}
         running = service.request("run", args)

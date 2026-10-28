@@ -4,20 +4,29 @@ import copy
 import unittest
 
 from examples.build import examples
-from pixellang.compiler import compile_source
+from pixellang.compiler_client import CompilerClient
 from pixellang.model import PixelError, Span
 from pixellang.vm import VM
 
 
 class ContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.compiler = CompilerClient()
+        cls.addClassCleanup(cls.compiler.close)
+
+    def compile(self, source):
+        return self.compiler.request('compile-pixels', document=source)['result']['bytecode']
+
     def test_malformed_input_diagnostics(self):
         values = [None, True, False, 0, -1, 1, 3.2, "bad", [], {}, [1], {"a": 2}]
         source = examples()["addition"]
-        bytecode = compile_source(source).bytecode
+        bytecode = self.compile(source)
+        entry = bytecode["entry"][0]
         cases = [
             (
                 source,
-                compile_source,
+                self.compile,
                 [
                     ("magic",),
                     ("versions",),
@@ -39,13 +48,13 @@ class ContractTests(unittest.TestCase):
                     ("constants", 0, "type"),
                     ("entry",),
                     ("functions",),
-                    ("functions", "main:99"),
-                    ("functions", "main:99", "params"),
-                    ("functions", "main:99", "locals"),
-                    ("functions", "main:99", "instructions"),
-                    ("functions", "main:99", "instructions", 0),
-                    ("functions", "main:99", "instructions", 0, "op"),
-                    ("functions", "main:99", "instructions", 0, "span"),
+                    ("functions", entry),
+                    ("functions", entry, "params"),
+                    ("functions", entry, "locals"),
+                    ("functions", entry, "instructions"),
+                    ("functions", entry, "instructions", 0),
+                    ("functions", entry, "instructions", 0, "op"),
+                    ("functions", entry, "instructions", 0, "span"),
                 ],
             ),
         ]
@@ -67,7 +76,7 @@ class ContractTests(unittest.TestCase):
                             self.assertIsInstance(str(error), str)
 
     def test_step_and_batch_are_equivalent(self):
-        bytecode = compile_source(examples()["factorial"]).bytecode
+        bytecode = self.compile(examples()["factorial"])
         stepped, batch = VM(bytecode, trace=True), VM(bytecode, trace=True)
         while not stepped.halted:
             stepped.step()

@@ -1,11 +1,11 @@
-fn main() {
+effect fn main() {
     var text = trim(input())
     if len(text) == 0 {
         text = "space is code && code is space"
     }
     let words = split(text, " ")
-    let unique: [string] = []
-    let counts: [int] = []
+    var unique: [string] = []
+    var counts: [int] = []
     var i = 0
     while i < len(words) {
         let word = trim(words[i])
@@ -15,8 +15,8 @@ fn main() {
                 j = j + 1
             }
             if j == len(unique) {
-                append(unique, word)
-                append(counts, 1)
+                unique.append(word)
+                counts.append(1)
             } else {
                 counts[j] = counts[j] + 1
             }

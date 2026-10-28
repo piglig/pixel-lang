@@ -1,0 +1,104 @@
+import "model.pxl" as model
+import "ir_state.pxl" as state
+import "ir_constant.pxl" as constant
+import "ir_expr.pxl" as expression
+
+fn InitialFunction(value: model.FlowConstant, name: string, inputs: [state.FlowInput], functions: inout map[string, state.Function], c: inout state.Context, planned: inout model.ClosurePlan) {
+
+    var slots: [model.BindingSlot] = []
+    var parameters: [string] = []
+    for input in inputs {
+        let symbol = c.declarations[state.Key(c.frame.module, input.node)]
+        slots.append(model.BindingSlot{symbol, typeId: planned.named.checked.resolved.bound.symbols[symbol].typeId, kind: "parameter", mutable: false})
+        parameters.append(input.type)
+    }
+    let frame = model.FunctionFrame{owner: c.frame.owner, closure: -1, module: c.frame.module, node: c.frame.node, typeId: c.frame.typeId, parameters: len(inputs), captures: 0, slots: slots}
+    var init: state.Context = state.Context{frames: c.frames, frame, code: [], diagnostics: [], expressionTypes: c.expressionTypes, targets: c.targets, callTypes: c.callTypes, references: c.references, declarations: c.declarations, parameters: c.parameters, arguments: c.arguments, spans: c.spans, labels: 0, breaks: [], continues: [], loopStacks: [], locals: len(inputs)}
+    if value.kind == "expression" { expression.Emit(value.node, &init, &planned) }
+    else { constant.Emit(value, planned, &init) }
+    state.Op("RETURN", value.node, planned, &init)
+    c.diagnostics.extend(init.diagnostics)
+    c.spans = init.spans
+    functions[name] = state.Function{params: parameters, captures: [], locals: init.locals, result: state.TypeName(value.typeId, planned.named.checked.resolved), instructions: init.code}
+}
+
+// Lower the checked graph directly. No source generation, reparsing or host
+// expression evaluation occurs between checked expressions and VM instructions.
+export fn Lower(plan: model.TypedFlow, id: int, functions: inout map[string, state.Function], c: inout state.Context, planned: inout model.ClosurePlan) -> Option[state.FlowDefinition] {
+
+    let nodes = planned.named.checked.resolved.bound.project.modules[plan.module].syntax.nodes
+    var inputs: [state.FlowInput] = []
+    for slot, binding in c.frame.slots {
+        if binding.kind != "parameter" { continue }
+        let symbol = planned.named.checked.resolved.bound.symbols[binding.symbol]
+        inputs.append(state.FlowInput{name: symbol.name, node: symbol.node, slot, type: state.TypeName(binding.typeId, planned.named.checked.resolved)})
+    }
+    var initialInputs: [state.FlowInput] = []
+    for child in nodes[plan.graph.declaration].children {
+        if nodes[child].kind != "initial_parameter" { continue }
+        let symbol = planned.named.checked.resolved.bound.symbols[c.declarations[state.Key(plan.module, child)]]
+        initialInputs.append(state.FlowInput{name: symbol.name, node: child, slot: len(initialInputs), type: state.TypeName(symbol.typeId, planned.named.checked.resolved)})
+    }
+    for input in initialInputs {
+        let slot = state.Slot(c.declarations[state.Key(plan.module, input.node)], input.node, planned, &c)
+        state.Emit("FLOW_CONFIG", jsonFrom(input.slot), input.node, planned, &c)
+        state.Emit("STORE", jsonFrom(slot), input.node, planned, &c)
+    }
+    var cells: [state.FlowCell] = []
+    var stateNames: map[string, int] = map[string, int]{}
+    for cell in plan.graph.states {
+        let initializer = plan.initializers[string(cell)]
+        let typeId = initializer.typeId
+        let typ = state.TypeName(typeId, planned.named.checked.resolved)
+        let function = "$flow:" + string(id) + ":" + string(cell)
+        InitialFunction(initializer, function, initialInputs, &functions, &c, &planned)
+        let slot = state.Slot(c.declarations[state.Key(plan.module, cell)], cell, planned, &c)
+        stateNames[nodes[cell].text] = cell
+        cells.append(state.FlowCell{node: cell, name: nodes[cell].text, slot, type: typ, initializer: function})
+        state.Emit("FLOW_READ", jsonFrom(cell), cell, planned, &c)
+        state.Emit("STORE", jsonFrom(slot), cell, planned, &c)
+    }
+    var children: [state.FlowChild] = []
+    for instance in plan.instances {
+        let target = c.targets[state.Key(c.frame.owner, instance.node)]
+        var initializers: [string] = []
+        let creation = nodes[nodes[instance.node].children[0]]
+        for argument in slice(creation.children, 1, len(creation.children)) {
+            let function = "$flow:" + string(id) + ":arg:" + string(argument)
+            InitialFunction(plan.initializers[string(argument)], function, initialInputs, &functions, &c, &planned)
+            initializers.append(function)
+        }
+        children.append(state.FlowChild{node: instance.node, name: nodes[instance.node].text, function: string(target), initializers})
+    }
+    var values: [state.FlowValue] = []
+    for value in plan.graph.order {
+        let item = nodes[value]
+        let expr = item.children[len(item.children) - 1]
+        let symbol = c.declarations[state.Key(plan.module, value)]
+        let slot = state.Slot(symbol, value, planned, &c)
+        let typ = state.TypeName(planned.named.checked.resolved.bound.symbols[symbol].typeId, planned.named.checked.resolved)
+        expression.Emit(expr, &c, &planned)
+        state.Emit("STORE", jsonFrom(slot), value, planned, &c)
+        values.append(state.FlowValue{node: value, name: item.text, expression: expr, slot, type: typ})
+    }
+    var updates: [state.FlowUpdate] = []
+    for update in plan.graph.updates {
+        let item = nodes[update]
+        let cell = stateNames[item.text]
+        expression.Emit(item.children[0], &c, &planned)
+        state.Emit("FLOW_STAGE", jsonFrom(cell), update, planned, &c)
+        updates.append(state.FlowUpdate{node: update, state: cell, expression: item.children[0]})
+    }
+    if len(c.diagnostics) > 0 { return .None }
+    let outputExpression = nodes[plan.graph.output].children[0]
+    let slot = state.Temporary(outputExpression, planned, &c)
+    let outputType = state.ExpressionType(outputExpression, &c, &planned)
+    if outputType < 0 { return .None }
+    let typ = state.TypeName(outputType, planned.named.checked.resolved)
+    expression.Emit(outputExpression, &c, &planned)
+    state.Emit("STORE", jsonFrom(slot), outputExpression, planned, &c)
+    state.Emit("LOAD", jsonFrom(slot), outputExpression, planned, &c)
+    state.Op("RETURN", plan.graph.output, planned, &c)
+    let output = state.FlowResult{node: outputExpression, slot, type: typ}
+    return .Some(state.FlowDefinition{module: plan.module, node: plan.graph.declaration, name: nodes[plan.graph.declaration].text, stateful: plan.stateful, inputs, initialInputs, states: cells, updates, children, values, dependencies: plan.graph.dependencies, order: plan.graph.order, returnNode: plan.graph.output, output})
+}

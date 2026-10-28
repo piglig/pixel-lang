@@ -1,0 +1,51 @@
+frame World = meters
+record Road { cost: int, enabled: bool }
+
+// Each step relaxes one edge from the previous distance snapshot.
+// This example uses four stable, contiguous entity IDs and no removals.
+fn Relax(network: Space[World, string, Road], previous: [int]) -> [int] {
+ var distances = previous
+ var id = 0
+ while id < len(previous) {
+  if previous[id] >= 0 {
+   for road in network.outgoing(network.get(id)) {
+    let data = road.payload
+    if data.enabled {
+     let target = network.target(road).id
+     let candidate = previous[id] + data.cost
+     if distances[target] < 0 || candidate < distances[target] {
+      distances[target] = candidate
+     }
+    }
+   }
+  }
+  id += 1
+ }
+ return distances
+}
+flow Routes() step(network: Space[World, string, Road]) -> [int] {
+ state distances: [int] = [0, -1, -1, -1]
+ let updated = Relax(network, distances)
+ next distances = updated
+ output updated
+}
+effect fn main() {
+ var network = Space::[World, string, Road]("routes")
+ network = network.insert(Point3::[World]{x:0.0,y:0.0,z:0.0}, "A")
+ network = network.insert(Point3::[World]{x:1.0,y:0.0,z:1.0}, "B")
+ network = network.insert(Point3::[World]{x:2.0,y:0.0,z:2.0}, "C")
+ network = network.insert(Point3::[World]{x:3.0,y:0.0,z:3.0}, "D")
+ network = network.connect(network.get(0), network.get(1), Road{cost:5,enabled:true})
+ network = network.connect(network.get(0), network.get(2), Road{cost:20,enabled:true})
+ network = network.connect(network.get(1), network.get(2), Road{cost:2,enabled:true})
+ network = network.connect(network.get(2), network.get(3), Road{cost:1,enabled:true})
+ network = network.connect(network.get(0), network.get(3), Road{cost:1,enabled:false})
+ let routes = Routes()
+ print(routes.step(network))
+ print(routes.step(network))
+ print(routes.step(network))
+ let changed = network.setLinkPayload(network.getLink(4), Road{cost:1,enabled:true})
+ let rerouted = Routes()
+ print(rerouted.step(changed))
+ print(network.getLink(4).payload.enabled)
+}

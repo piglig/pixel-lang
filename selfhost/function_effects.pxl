@@ -1,0 +1,183 @@
+import "model.pxl" as model
+
+record Effect { name: string, node: int }
+record Routine { module: int, node: int, key: string }
+fn Key(module: int, node: int) -> string = string(module) + ":" + string(node)
+fn External(name: string) -> bool {
+    for effect in ["print", "input", "programArgs", "readText", "writeText", "readBytes", "writeBytes", "readChunk", "listDirectory"] {
+        if name == effect { return true }
+    }
+    return false
+}
+record Work { owners: map[int, int], routines: [Routine], calls: [int] }
+fn WorkFor(module: int, syntax: model.Parsed, reused: map[string, bool]) -> Work {
+    var result = Work{owners: map[int, int]{}, routines: [], calls: []}
+    var pending = syntax.roots
+    while true {
+        match pending.pop() {
+            .None => { break },
+            .Some(index) => {
+                if reused.has(Key(module, index)) { continue }
+                let node = syntax.nodes[index]
+                var owner = match result.owners.get(index) { .Some(value) => value, .None => -1 }
+                if model.CallableDeclaration(node.kind) || node.kind == "lambda" {
+                    owner = index
+                    result.routines.append(Routine{module, node: index, key: Key(module, index)})
+                }
+                if node.kind == "call" && owner >= 0 { result.calls.append(index) }
+                for child in node.children { result.owners[child] = owner; pending.append(child) }
+            }
+        }
+    }
+    return result
+}
+// Immutable aliases retain their target. Mutable variables and higher-order
+// parameters need an effect contract and are conservatively unknown for now.
+export fn Target(references: map[string, int], module: int, index: int, depth: int, resolved: model.ResolvedTypes) -> int {
+    if depth >= 64 { return -1 }
+    let nodes = resolved.bound.project.modules[module].syntax.nodes
+    let node = nodes[index]
+    if node.kind == "annotate" || node.kind == "specialize" { return Target(references, module, node.children[0], depth + 1, resolved) }
+    let key = Key(module, index)
+    if !references.has(key) { return -1 }
+    let id = references[key]
+    let symbol = resolved.bound.symbols[id]
+    if symbol.kind != "let" { return id }
+    let binding = resolved.bound.project.modules[symbol.module].syntax.nodes[symbol.node]
+    return Target(references, symbol.module, binding.children[len(binding.children) - 1], depth + 1, resolved)
+}
+export fn Lambda(references: map[string, int], module: int, index: int, depth: int, resolved: model.ResolvedTypes) -> string {
+    if depth >= 64 { return "" }
+    let node = resolved.bound.project.modules[module].syntax.nodes[index]
+    if node.kind == "lambda" { return Key(module, index) }
+    if node.kind == "annotate" || node.kind == "specialize" { return Lambda(references, module, node.children[0], depth + 1, resolved) }
+    let key = Key(module, index)
+    if !references.has(key) { return "" }
+    let symbol = resolved.bound.symbols[references[key]]
+    if symbol.kind != "let" { return "" }
+    let binding = resolved.bound.project.modules[symbol.module].syntax.nodes[symbol.node]
+    return Lambda(references, symbol.module, binding.children[len(binding.children) - 1], depth + 1, resolved)
+}
+export fn Contract(references: map[string, int], expressionTypes: map[string, int], module: int, index: int, resolved: model.ResolvedTypes) -> bool {
+    let key = Key(module, index)
+    var typeId = -1
+    if expressionTypes.has(key) { typeId = expressionTypes[key] }
+    else if references.has(key) { typeId = resolved.bound.symbols[references[key]].typeId }
+    if typeId < 0 { return false }
+    let typ = resolved.types[typeId]
+    return typ.kind == "function" && typ.name == ""
+}
+// State initialization runs once under the constructor effect permission. Its allowed
+// expressions are checked separately by flow_initializers; space allocation
+// there is not an effect of evaluating the flow's per-step dependency graph.
+fn StateInitializationCalls(flows: [model.TypedFlow], resolved: model.ResolvedTypes) -> map[string, bool] {
+    var calls = map[string, bool]{}
+    for flow in flows {
+        let nodes = resolved.bound.project.modules[flow.module].syntax.nodes
+        for cell in flow.graph.states {
+            var pending = [nodes[cell].children[len(nodes[cell].children) - 1]]
+            while true {
+                match pending.pop() {
+                    .Some(index) => {
+                        let node = nodes[index]
+                        if node.kind == "call" { calls[Key(flow.module, index)] = true }
+                        pending.extend(node.children)
+                    },
+                    .None => { break }
+                }
+            }
+        }
+    }
+    return calls
+}
+// Effects are declaration contracts. Invalid pure bodies are diagnosed at their
+// definition, never inferred into callers or propagated through a global graph.
+export fn Analyze(flows: [model.TypedFlow], expressions: [model.NodeType], calls: [model.CallResolution], references: map[string, int], reused: map[string, bool], selected: map[string, bool], all: bool, resolved: model.ResolvedTypes) -> [model.Diagnostic] {
+    let initialCalls = StateInitializationCalls(flows, resolved)
+    var nativeEffects: map[string, string] = map[string, string]{}
+    for call in calls {
+        if call.kind == "flow-new" || call.kind == "flow-step" || call.kind == "space-new" {
+            nativeEffects[Key(call.module, call.node)] = call.kind
+        }
+    }
+    var work: map[string, Work] = map[string, Work]{}
+    var wanted: map[string, bool] = map[string, bool]{}
+    var permissions: map[string, bool] = map[string, bool]{}
+    for module, source in resolved.bound.project.modules {
+        if !all && !selected.has(source.path) { continue }
+        let current = WorkFor(module, source.syntax, reused)
+        work[string(module)] = current
+        for routine in current.routines { permissions[routine.key] = model.Effectful(source.syntax.nodes, routine.node) }
+        for index in current.calls {
+            let callee = source.syntax.nodes[index].children[0]
+            wanted[Key(module, callee)] = true
+            if source.syntax.nodes[callee].kind == "field" { wanted[Key(module, source.syntax.nodes[callee].children[0])] = true }
+        }
+    }
+    var expressionTypes: map[string, int] = map[string, int]{}
+    for expression in expressions {
+        let key = Key(expression.module, expression.node)
+        if wanted.has(key) { expressionTypes[key] = expression.typeId }
+    }
+    var diagnostics: [model.Diagnostic] = []
+    for module, source in resolved.bound.project.modules {
+        if !work.has(string(module)) { continue }
+        let current = work[string(module)]
+        var effects: map[string, Effect] = map[string, Effect]{}
+        for index in current.calls {
+            let node = source.syntax.nodes[index]
+            let owner = Key(module, current.owners[index])
+            if permissions[owner] { continue }
+            let target = Lambda(references, module, node.children[0], 0, resolved)
+            var effect = ""
+            if target != "" {
+                if permissions.has(target) && permissions[target] { effect = "effect fn" }
+            } else {
+                var symbolId = Target(references, module, node.children[0], 0, resolved)
+                let callee = source.syntax.nodes[node.children[0]]
+                if symbolId < 0 && callee.kind == "field" { symbolId = Target(references, module, callee.children[0], 0, resolved) }
+                if symbolId < 0 { effect = "unknown callable" }
+                else {
+                    let symbol = resolved.bound.symbols[symbolId]
+                    if model.CallableDeclaration(symbol.kind) {
+                        if model.Effectful(resolved.bound.project.modules[symbol.module].syntax.nodes, symbol.node) { effect = "effect fn" }
+                    }
+                    else if symbol.kind == "builtin" { if External(symbol.name) { effect = symbol.name } }
+                    else if symbol.kind != "enum" && symbol.kind != "record" { effect = "unknown callable" }
+                }
+            }
+            if effect == "unknown callable" {
+                let callee = source.syntax.nodes[node.children[0]]
+                if callee.kind == "field" {
+                    let receiverKey = Key(module, callee.children[0])
+                    if expressionTypes.has(receiverKey) {
+                        let receiver = resolved.types[expressionTypes[receiverKey]]
+                        if receiver.kind == "array" || receiver.kind == "map" { effect = "" }
+                    }
+                }
+            }
+            if effect == "unknown callable" && Contract(references, expressionTypes, module, node.children[0], resolved) { effect = "" }
+            let calleeKey = Key(module, node.children[0])
+            var calleeType = -1
+            if expressionTypes.has(calleeKey) { calleeType = expressionTypes[calleeKey] }
+            else if references.has(calleeKey) { calleeType = resolved.bound.symbols[references[calleeKey]].typeId }
+            if calleeType >= 0 {
+                let callable = resolved.types[calleeType]
+                if callable.kind == "function" && callable.name == "effect" { effect = "effect fn" }
+            }
+            if nativeEffects.has(Key(module, index)) { effect = nativeEffects[Key(module, index)] }
+            if effect == "space-new" && initialCalls.has(Key(module, index)) { effect = "" }
+            if effect != "" && (!effects.has(owner) || index < effects[owner].node) { effects[owner] = Effect{name: effect, node: index} }
+        }
+        for routine in current.routines {
+            if permissions[routine.key] || !effects.has(routine.key) { continue }
+            let effect = effects[routine.key]
+            let node = source.syntax.nodes[effect.node]
+            var line = 1
+            var column = 1
+            for token in source.syntax.tokens { if token.start >= node.start { line = token.line; column = token.column; break } }
+            diagnostics.append(model.Diagnostic{source: source.path, phase: "effect", message: "Pure function cannot call an external effect: " + effect.name, start: node.start, end: node.end, line, column})
+        }
+    }
+    return diagnostics
+}

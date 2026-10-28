@@ -1,6 +1,7 @@
 """Manifest projects, content-locked local libraries and reproducible image builds."""
 
 import hashlib
+from fnmatch import fnmatchcase
 import json
 import re
 import tomllib
@@ -10,8 +11,9 @@ from tempfile import TemporaryDirectory, NamedTemporaryFile
 from .fileaccess import FileAccess
 from .model import PixelError
 from .compiler_client import CompilerClient, CompiledArtifact
-from .project import safe_name
+from .module_paths import safe_name
 from .vm import VM
+from .project_cache import compile_bytecode
 
 MANIFEST = "pixel.toml"
 LOCK = "pixel.lock"
@@ -76,7 +78,7 @@ class Workspace:
         tests = self.config.get("test", [])
         if not isinstance(tests, list):
             fail("Tests must use [[test]] tables")
-        self.tests = []
+        self._tests = []
         for item in tests:
             if not isinstance(item, dict) or set(item) - {
                 "name",
@@ -103,16 +105,49 @@ class Workspace:
                 for target, expected in item["written"].items():
                     inside(self.root, target)
                     inside(self.root, expected)
-            self.tests.append(dict(item))
+            self._tests.append(dict(item))
         # Assertion-based test programs require no explicit manifest entry.
-        explicit = {item["entry"] for item in self.tests}
-        self.tests.extend(
-            {"entry": name}
-            for name in sorted(self.files)
-            if name.startswith("tests/")
-            and name.endswith("_test.pxl")
-            and name not in explicit
-        )
+        explicit = {item["entry"] for item in self._tests}
+        self._test_candidates = [name for name in sorted(self.files)
+                      if name.startswith("tests/") and name.endswith("_test.pxl") and name not in explicit]
+
+    @property
+    def tests(self):
+        # Running/building/locking a project does not need test parsing. Discover
+        # only when tests are requested, and publish the list atomically.
+        if self._test_candidates:
+            original = list(self._tests)
+            try:
+                with CompilerClient() as compiler:
+                    self._discover_tests(compiler, self._test_candidates)
+            except BaseException:
+                self._tests = original
+                raise
+            self._test_candidates = []
+        return self._tests
+
+    def _discover_tests(self, compiler, candidates):
+        for name in candidates:
+            try:
+                info = compiler.request("module-info", files={name: self.files[name]}, entry=name)["result"]
+            except PixelError as error:
+                if getattr(error, "status", None) != "diagnostics":
+                    raise
+                # A syntax error remains an executable test case so filters can
+                # select other files; transport failures must never be hidden.
+                self._tests.append({"entry": name})
+                continue
+            if not info["tests"]:
+                self._tests.append({"entry": name})
+                continue
+            for function in info["tests"]:
+                case = {"entry": name, "function": function["name"],
+                        "name": name + "::" + function["name"]}
+                if not function["valid"]:
+                    case["discovery_error"] = "Test functions must be non-generic, take no parameters and return unit"
+                elif info["hasMain"]:
+                    case["discovery_error"] = "A test-function file must not declare main"
+                self._tests.append(case)
 
     def _load(self, root, prefix, visiting):
         if root in visiting:
@@ -208,7 +243,7 @@ class Workspace:
         self.verify_lock()
         with CompilerClient() as compiler:
             source=compiler.request("pixels",files=self.files,entry=entry or self.entry)["result"]["document"]
-            code=compiler.request("compile",files=self.files,entry=entry or self.entry)["result"]["bytecode"]
+            code=compile_bytecode(compiler, self.files, entry or self.entry)
             return source,CompiledArtifact(code,source)
 
     def build(self, output=None, *, cancelled=lambda:False, submitted_at=None):
@@ -235,32 +270,48 @@ class Workspace:
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         }
 
-    def run(self, input_text="", max_steps=100_000, file_access=None):
+    def run(self, input_text="", max_steps=100_000, file_access=None, arguments=None):
         self.verify_lock()
         with CompilerClient() as compiler:
-            code=compiler.request("compile",files=self.files,entry=self.entry)["result"]["bytecode"]
+            code=compile_bytecode(compiler, self.files, self.entry)
         vm = VM(
             code,
             input_text=input_text,
+            arguments=arguments,
             max_steps=max_steps,
             file_access=file_access,
         )
         return {"output": vm.run(), "steps": vm.steps}
 
-    def test(self, max_steps=100_000):
+    def test(self, max_steps=100_000, pattern=None, list_only=False, test_id=None):
         self.verify_lock()
         if not self.tests:
             fail("No tests found; add tests/*_test.pxl or [[test]] entries")
-        results = []
-        with CompilerClient() as compiler:
-            return self._test_with_compiler(compiler,max_steps)
-
-    def _test_with_compiler(self, compiler, max_steps):
-        results=[]
+        cases, duplicates = [], {}
         for case in self.tests:
+            digest = hashlib.sha256(canonical(case).encode()).hexdigest()
+            occurrence = duplicates.get(digest, 0)
+            duplicates[digest] = occurrence + 1
+            item = {**case, "id": f"{digest}:{occurrence}"}
+            if ((pattern is None or fnmatchcase(case.get("name", case["entry"]), pattern))
+                    and (test_id is None or item["id"] == test_id)):
+                cases.append(item)
+        if not cases:
+            fail(f"No tests match {test_id if test_id is not None else pattern!r}")
+        if list_only:
+            return {"tests": [{key: value for key, value in case.items()
+                               if key in ("id", "name", "entry", "function", "input")} for case in cases]}
+        with CompilerClient() as compiler:
+            return self._test_with_compiler(compiler,max_steps,cases)
+
+    def _test_with_compiler(self, compiler, max_steps, cases=None):
+        results=[]
+        for case in self.tests if cases is None else cases:
             item = {"name": case.get("name", case["entry"]), "entry": case["entry"]}
             try:
-                code=compiler.request("compile",files=self.files,entry=case["entry"])["result"]["bytecode"]
+                if case.get("discovery_error"):
+                    fail(case["discovery_error"])
+                code=compile_bytecode(compiler, self.files, case["entry"], entry_function=case.get("function"))
                 input_text = (
                     read_text(inside(self.root, case["input"]))
                     if "input" in case
@@ -298,5 +349,7 @@ class Workspace:
                 item.update(passed=True, steps=vm.steps)
             except (PixelError, OSError, ValueError) as exc:
                 item.update(passed=False, error=str(exc))
+                if isinstance(exc, PixelError):
+                    item["diagnostic"] = exc.to_dict()
             results.append(item)
         return {"passed": all(r["passed"] for r in results), "tests": results}

@@ -6,12 +6,66 @@ from pathlib import Path
 
 from pixellang.fileaccess import FileAccess
 from pixellang.model import PixelError
-from pixellang.project import compile_project
+from pixellang.compiler_client import CompilerClient
 from pixellang.temporal import Timeline
 from pixellang.vm import VM
 
 
 class FileCapabilityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.compiler = CompilerClient()
+        cls.addClassCleanup(cls.compiler.close)
+
+    def test_chunk_reads_preserve_unicode_and_replay_without_disk(self):
+        text = "a猫🌍\r\nb尾"
+        (self.read_root / "chunks.txt").write_bytes(text.encode("utf-8"))
+        access = FileAccess(self.read_root)
+        offset, pieces, requests = 0, [], []
+        while True:
+            requests.append([offset, 4])
+            value = access.perform("readChunk", "chunks.txt", requests[-1], len(requests) - 1)
+            pieces.append(value["text"])
+            if value["done"]:
+                break
+            self.assertGreater(value["next"], offset)
+            offset = value["next"]
+        self.assertEqual("".join(pieces), text)
+        (self.read_root / "chunks.txt").unlink()
+        restored = FileAccess.restore(access.document())
+        self.assertEqual("".join(restored.perform("readChunk", "chunks.txt", request, i)["text"]
+                                 for i, request in enumerate(requests)), text)
+
+    def test_unrecorded_stream_does_not_retain_observations(self):
+        (self.read_root / "chunks.txt").write_text("abcdef")
+        access = FileAccess(self.read_root, budget=8192, record=False)
+        for i in range(100):
+            self.assertEqual(access.perform("readChunk", "chunks.txt", [0, 4], i)["text"], "abcd")
+        self.assertEqual(access.effects, [])
+        self.assertEqual(access.bytes, 0)
+        with self.assertRaisesRegex(PixelError, "not recorded"):
+            access.document()
+
+    def test_unrecorded_compiler_access_keeps_aggregate_budget(self):
+        (self.read_root / "data.txt").write_text("abc")
+        access = FileAccess(self.read_root, budget=16384, record=False, limit_total=True)
+        self.assertEqual(access.perform("read", "data.txt", None, 0), "abc")
+        self.assertEqual(access.perform("read", "data.txt", None, 1), "abc")
+        with self.assertRaisesRegex(PixelError, "budget exceeded"):
+            access.perform("read", "data.txt", None, 2)
+        self.assertEqual(access.effects, [])
+
+    def test_chunk_errors_are_replayable(self):
+        (self.read_root / "bad.txt").write_bytes(b"abc\xff")
+        access = FileAccess(self.read_root)
+        with self.assertRaises(PixelError) as raised:
+            access.perform("readChunk", "bad.txt", [0, 4], 0)
+        self.assertEqual(raised.exception.code, "io.invalid_encoding")
+        (self.read_root / "bad.txt").unlink()
+        with self.assertRaises(PixelError) as raised:
+            FileAccess.restore(access.document()).perform("readChunk", "bad.txt", [0, 4], 0)
+        self.assertEqual(raised.exception.code, "io.invalid_encoding")
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -24,18 +78,18 @@ class FileCapabilityTests(unittest.TestCase):
         self.access = FileAccess(self.read_root, self.write_root)
 
     def machine(self, code, access=None):
-        source, compiled = compile_project({"main.pxl": code})
-        return source, VM(compiled.bytecode, file_access=access or self.access)
+        compiled = self.compiler.debug_project({"main.pxl": code})
+        return compiled, VM(compiled.bytecode, file_access=access or self.access)
 
     def test_granted_text_io_and_default_denial(self):
-        code = 'import "std/io.pxl" as io\nfn main() {\nlet text = io.Read("data.txt")\nprint(io.Write("report.txt", text))\nprint(text)\n}'
+        code = 'import "std/io.pxl" as io\neffect fn main() {\nmatch io.Read("data.txt") { .Ok(text)=>{\nmatch io.Write("report.txt", text) { .Ok(written)=>{print(written)}, .Err(error)=>{print(error.kind)} }\nprint(text)\n}, .Err(error)=>{print(error.kind)} }\n}'
         _, vm = self.machine(code)
         self.assertEqual(vm.run(), [True, "猫\r\n🌍"])
         self.assertEqual(
             (self.write_root / "report.txt").read_bytes(), "猫\r\n🌍".encode()
         )
         _, denied = self.machine(
-            'fn main() {\ntry { print(readText("data.txt")) } catch error { print(error.kind) }\n}',
+            'effect fn main() {\nmatch readText("data.txt") { .Ok(text)=>{print(text)}, .Err(error)=>{print(error.kind)} }\n}',
             FileAccess(),
         )
         self.assertEqual(denied.run(), ["io"])
@@ -56,24 +110,24 @@ class FileCapabilityTests(unittest.TestCase):
             ".",
         ]:
             _, vm = self.machine(
-                "fn main() { try { print(readText("
+                "effect fn main() { match readText("
                 + json.dumps(path)
-                + ")) } catch error { print(error.kind) } }",
+                + ") { .Ok(text)=>{print(text)}, .Err(error)=>{print(error.kind)} } }",
                 FileAccess(self.read_root),
             )
             self.assertEqual(vm.run(), ["io"], path)
         _, vm = self.machine(
-            'fn main() {\ntry { writeText("link", "overwrite") } catch error { print(error.kind) }\n}'
+            'effect fn main() {\nmatch writeText("link", "overwrite") { .Ok(written)=>{print(written)}, .Err(error)=>{print(error.kind)} }\n}'
         )
         self.assertEqual(vm.run(), ["io"])
         self.assertEqual(secret.read_text(), "secret")
         self.assertTrue((self.write_root / "link").is_symlink())
 
     def test_replay_uses_captured_reads_and_never_repeats_writes(self):
-        source, _ = self.machine(
-            'fn main() {\nlet text = readText("data.txt")\nwriteText("out.txt", text)\nprint(text)\n}'
+        compiled, _ = self.machine(
+            'effect fn main() {\nmatch readText("data.txt") { .Ok(text)=>{\nmatch writeText("out.txt", text) { .Ok(written)=>{assert(written)}, .Err(error)=>{print(error.kind)} }\nprint(text)\n}, .Err(error)=>{print(error.kind)} }\n}'
         )
-        timeline = Timeline(source, checkpoint_interval=2, file_access=self.access)
+        timeline = Timeline(compiled.source, compiled=compiled, checkpoint_interval=2, file_access=self.access)
         timeline.run()
         document = timeline.document()
         (self.read_root / "data.txt").unlink()
@@ -88,20 +142,20 @@ class FileCapabilityTests(unittest.TestCase):
         self.assertNotIn(str(self.root), json.dumps(document["files"]))
 
     def test_missing_file_errors_are_also_replayed(self):
-        source, _ = self.machine(
-            'fn main() {\ntry { print(readText("missing.txt")) } catch error { print("missing") }\n}'
+        compiled, _ = self.machine(
+            'effect fn main() {\nmatch readText("missing.txt") { .Ok(text)=>{print(text)}, .Err(error)=>{print("missing")} }\n}'
         )
-        timeline = Timeline(source, file_access=self.access)
+        timeline = Timeline(compiled.source, compiled=compiled, file_access=self.access)
         timeline.run()
         (self.read_root / "missing.txt").write_text("now present")
         self.assertEqual(Timeline.restore(timeline.document()).vm.output, ["missing"])
 
     def test_budget_failure_precedes_write_and_restores_identically(self):
-        source, _ = self.machine(
-            'fn main() { writeText("first", "1")\nwriteText("second", "2") }'
+        compiled, _ = self.machine(
+            'effect fn main() { let first = writeText("first", "1")\nlet second = writeText("second", "2") }'
         )
         timeline = Timeline(
-            source, file_access=FileAccess(write_root=self.write_root, budget=8192)
+            compiled.source, compiled=compiled, file_access=FileAccess(write_root=self.write_root, budget=8192)
         )
         timeline.run()
         self.assertIn("budget", timeline.vm.error["message"])
@@ -113,8 +167,8 @@ class FileCapabilityTests(unittest.TestCase):
         )
 
     def test_malformed_or_incomplete_effect_recording_is_rejected(self):
-        source, _ = self.machine('fn main() {\nprint(readText("data.txt"))\n}')
-        timeline = Timeline(source, file_access=self.access)
+        compiled, _ = self.machine('effect fn main() {\nmatch readText("data.txt") { .Ok(text)=>{print(text)}, .Err(error)=>{print(error.kind)} }\n}')
+        timeline = Timeline(compiled.source, compiled=compiled, file_access=self.access)
         timeline.run()
         document = timeline.document()
         bad = copy.deepcopy(document)

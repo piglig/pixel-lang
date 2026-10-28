@@ -1,34 +1,63 @@
+import "model.pxl" as model
 import "checker_state.pxl" as state
+import "types.pxl" as types
 
-export fn IntegerLiteral(c: state.State, module: int, index: int, negative: bool) -> int {
-    let node = c.resolved.bound.project.modules[module].syntax.nodes[index]
+export fn IntegerLiteral(module: int, index: int, negative: bool, c: inout state.State, resolved: inout model.ResolvedTypes) -> int {
+    let node = resolved.bound.project.modules[module].syntax.nodes[index]
     var start = 0
     while start + 1 < len(node.text) && node.text[start] == "0" { start += 1 }
     let magnitude = slice(node.text, start, len(node.text))
     var limit = "9223372036854775807"
     if negative { limit = "9223372036854775808" }
     if len(magnitude) > len(limit) || (len(magnitude) == len(limit) && magnitude > limit) {
-        state.Report(c, module, index, "Integer literal is outside signed 64-bit range")
+        state.Report(module, index, "Integer literal is outside signed 64-bit range", resolved, &c)
     }
-    return state.Scalar(c, "int")
+    return state.Scalar("int", &resolved)
 }
-export fn Binary(c: state.State, module: int, index: int, op: string, left: int, right: int) -> int {
-    state.Match(c, module, index, left, right)
-    let boolean = state.Scalar(c, "bool")
-    if op == "&&" || op == "||" || op == "and" || op == "or" {
-        state.Match(c, module, index, boolean, left)
-        return boolean
-    }
-    let numeric = left == state.Scalar(c, "int") || left == state.Scalar(c, "float64")
-    let text = left == state.Scalar(c, "string")
+export fn Binary(module: int, index: int, op: string, left: int, right: int, c: inout state.State, resolved: inout model.ResolvedTypes) -> int {
+    if left < 0 || right < 0 { return -1 }
+    let a = resolved.types[left]
+    let b = resolved.types[right]
     if op == "==" || op == "!=" {
-        if left >= 0 && !numeric && !text && left != boolean { state.Report(c, module, index, "Equality requires scalar operands") }
+        if left != right { state.Report(module, index, "Equality requires identical operand types", resolved, &c) }
+        else if !types.Equatable(left, &resolved) { state.Report(module, index, "Type does not support value equality", resolved, &c) }
+        return state.Scalar("bool", &resolved)
+    }
+    if a.kind == "spatial" || b.kind == "spatial" {
+        if op == "*" && a.name == "Vec3" && right == state.Scalar("float64", &resolved) { return left }
+        if op == "*" && b.name == "Vec3" && left == state.Scalar("float64", &resolved) { return right }
+        if (a.name != "Point3" && a.name != "Vec3") || (b.name != "Point3" && b.name != "Vec3") {
+            state.Report(module, index, "Spatial arithmetic requires positions or displacements", resolved, &c)
+            return -1
+        }
+        if a.arguments[0] != b.arguments[0] {
+            state.Report(module, index, "Spatial operands require the same coordinate frame", resolved, &c)
+            return -1
+        }
+        if op == "+" && (a.name == "Vec3" || b.name == "Vec3") {
+            if a.name == "Point3" { return left }
+            return right
+        }
+        if op == "-" && !(a.name == "Vec3" && b.name == "Point3") {
+            if a.name == b.name { return types.Spatial("Vec3", a.arguments, &resolved) }
+            return left
+        }
+        if (op == "==" || op == "!=") && left == right { return state.Scalar("bool", &resolved) }
+        state.Report(module, index, "Invalid spatial arithmetic operation: " + op, resolved, &c)
+        return -1
+    }
+    state.Match(module, index, left, right, resolved, &c)
+    let boolean = state.Scalar("bool", &resolved)
+    if op == "&&" || op == "||" {
+        state.Match(module, index, boolean, left, resolved, &c)
         return boolean
     }
+    let numeric = types.Numeric(left, resolved)
+    let text = left == state.Scalar("string", &resolved)
     if op == "<" || op == "<=" || op == ">" || op == ">=" {
-        if left >= 0 && !numeric && !text { state.Report(c, module, index, "Ordering requires numbers or strings") }
+        if !types.Ordered(left, resolved) { state.Report(module, index, "Ordering requires numbers, strings or an Ordered constraint", resolved, &c) }
         return boolean
     }
-    if left >= 0 && !numeric && !(op == "+" && text) { state.Report(c, module, index, "Arithmetic requires numbers or string concatenation") }
+    if left >= 0 && !numeric && !(op == "+" && text) { state.Report(module, index, "Arithmetic requires numbers or string concatenation", resolved, &c) }
     return left
 }

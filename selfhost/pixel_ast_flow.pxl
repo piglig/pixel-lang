@@ -1,0 +1,37 @@
+import "model.pxl" as model
+import "pixel_ast_state.pxl" as state
+import "pixel_ast_expr.pxl" as expression
+
+// Flow bindings use the same declaration identities as ordinary expressions.
+export fn Emit(declaration: int, parent: int, checked: model.ExpressionCheck, c: inout state.Context) {
+    let nodes = checked.resolved.bound.project.modules[c.module].syntax.nodes
+    for child in nodes[declaration].children {
+        if nodes[child].kind != "flow_body" { continue }
+        for member in nodes[child].children {
+            let item = nodes[member]
+            var colors: [[int]] = []
+            if item.kind == "flow_value" || item.kind == "flow_state" || item.kind == "flow_instance" {
+                var keyword = "let"
+                if item.kind == "flow_state" { keyword = "state" }
+                if item.kind == "flow_instance" { keyword = "instance" }
+                let symbol = state.Declare(member, checked, &c)
+                state.Token(64, keyword, member, checked, &c, &colors); state.Id(symbol, member, checked, &c, &colors)
+                if item.kind != "flow_instance" && symbol >= 0 {
+                    state.Token(80, ":", member, checked, &c, &colors)
+                    state.Type(checked.resolved.bound.symbols[symbol].typeId, member, checked, &c, &colors)
+                }
+                state.Token(80, "=", member, checked, &c, &colors)
+                expression.Emit(item.children[len(item.children) - 1], checked, &c, &colors)
+            } else if item.kind == "flow_next" {
+                state.Token(64, "next", member, checked, &c, &colors)
+                state.Id(state.Reference(member, checked, &c), member, checked, &c, &colors)
+                state.Token(80, "=", member, checked, &c, &colors); expression.Emit(item.children[0], checked, &c, &colors)
+            } else if item.kind == "flow_output" {
+                state.Token(64, "output", member, checked, &c, &colors); expression.Emit(item.children[0], checked, &c, &colors)
+            } else { state.Report(member, "Unsupported expression flow member", checked, &c) }
+            state.Row(colors, parent, member, &c)
+        }
+        return
+    }
+    state.Report(declaration, "Missing expression flow body", checked, &c)
+}

@@ -1,72 +1,73 @@
+import "failures.pxl" as failures
 import "picture_colors.pxl" as colors
 import "png.pxl" as png
 import "picture_layout.pxl" as packing
 import "spatial_layout.pxl" as layout
 import "pixel_decode.pxl" as decode
 
-export record Spec { magic: string, versions: map[string], encoding: string, dimensions: [int], spatial: layout.Spatial, linkChunks: Option[[string]], metadata: map[json] }
+export record Spec { magic: string, versions: map[string, string], encoding: string, dimensions: [int], spatial: layout.Spatial, linkChunks: Option[[string]], metadata: map[string, json] }
 export record Entry { id: string, origin: [int], source: Spec }
 export record Header { format: string, version: string, scale: int, canvas: [int], entry: string, modules: [Entry] }
 // Each chunk stays within the general JSON node and string budgets.
-export fn PackLinks(links: [layout.Link]) -> [string] {
-    if len(links) > 1000000 { fail("Picture exceeds link limit") }
-    let chunks: [string] = []
+export fn PackLinks(links: [layout.PixelLink]) -> Result[[string], Error] {
+    if len(links) > 1000000 { return .Err(failures.New("Picture exceeds link limit")) }
+    var chunks: [string] = []
     let digits = "0123456789abcdef"
     var start = 0
     while start < len(links) {
         var end = start + 512
         if end > len(links) { end = len(links) }
         let raw = utf8Encode(jsonStringify(jsonFrom(slice(links, start, end))))
-        if len(raw) > 100000 { fail("Picture link chunk exceeds limit") }
-        let packed = zlibCompress(raw)
-        let parts: [string] = []
-        for byte in packed { append(parts, digits[byte / 16]); append(parts, digits[byte % 16]) }
-        append(chunks, join(parts, ""))
+        if len(raw) > 100000 { return .Err(failures.New("Picture link chunk exceeds limit")) }
+        let packed = zlibCompress(raw)?
+        var parts: [string] = []
+        for byte in packed { parts.append(digits[byte / 16]); parts.append(digits[byte % 16]) }
+        chunks.append(join(parts, ""))
         start = end
     }
-    return chunks
+    return .Ok(chunks)
 }
-export fn UnpackLinks(chunks: [string]) -> [layout.Link] {
-    if len(chunks) > 1954 { fail("Picture exceeds link chunk limit") }
-    let values = map[int]{"0": 0, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "a": 10, "b": 11, "c": 12, "d": 13, "e": 14, "f": 15}
-    let links: [layout.Link] = []
+export fn UnpackLinks(chunks: [string]) -> Result[[layout.PixelLink], Error] {
+    if len(chunks) > 1954 { return .Err(failures.New("Picture exceeds link chunk limit")) }
+    let values = map[string, int]{"0": 0, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "a": 10, "b": 11, "c": 12, "d": 13, "e": 14, "f": 15}
+    var links: [layout.PixelLink] = []
     for chunk in chunks {
-        if len(chunk) < 2 || len(chunk) > 200000 || len(chunk) % 2 != 0 { fail("Invalid picture link chunk length") }
-        let bytes: [int] = []
+        if len(chunk) < 2 || len(chunk) > 200000 || len(chunk) % 2 != 0 { return .Err(failures.New("Invalid picture link chunk length")) }
+        var bytes: [int] = []
         var index = 0
         while index < len(chunk) {
             let high = chunk[index]; let low = chunk[index + 1]
-            if !has(values, high) || !has(values, low) { fail("Invalid picture link chunk hex") }
-            append(bytes, values[high] * 16 + values[low]); index += 2
+            if !values.has(high) || !values.has(low) { return .Err(failures.New("Invalid picture link chunk hex")) }
+            bytes.append(values[high] * 16 + values[low]); index += 2
         }
-        let decoded = jsonDecode[[layout.Link]](utf8Decode(zlibDecompress(bytes, 100000)))
-        if len(decoded) < 1 || len(decoded) > 512 || len(links) + len(decoded) > 1000000 { fail("Picture exceeds link limit") }
-        extend(links, decoded)
+        let decoded = jsonDecode::[[layout.PixelLink]](utf8Decode(zlibDecompress(bytes, 100000)?)?)?
+        if len(decoded) < 1 || len(decoded) > 512 || len(links) + len(decoded) > 1000000 { return .Err(failures.New("Picture exceeds link limit")) }
+        links.extend(decoded)
     }
-    return links
+    return .Ok(links)
 }
-export fn Encode(root: layout.Source, modules: map[layout.Source], entry: string, scale: int) -> [int] {
-    if scale < 4 || scale > 24 { fail("Picture tile scale must be 4..24") }
-    if len(modules) > 127 { fail("Picture exceeds 128 modules") }
-    let sources = [root]
-    let names = ["main"]
-    for name in keys(modules) {
-        let id = parseInt(name)
-        if id < 0 || id > 65535 || string(id) != name { fail("Invalid picture module ID") }
-        append(names, name); append(sources, modules[name])
+fn Render(root: layout.Source, modules: map[string, layout.Source], entry: string, scale: int) -> Result[png.Canvas, Error] {
+    if scale < 4 || scale > 24 { return .Err(failures.New("Picture tile scale must be 4..24")) }
+    if len(modules) > 127 { return .Err(failures.New("Picture exceeds 128 modules")) }
+    var sources: [layout.Source] = [root]
+    var names: [string] = ["main"]
+    for name in modules.keys() {
+        let id = parseInt(name)?
+        if id < 0 || id > 65535 || string(id) != name { return .Err(failures.New("Invalid picture module ID")) }
+        names.append(name); sources.append(modules[name])
     }
     var total = 0
     var width = 192
-    let dimensions: [[int]] = []
+    var dimensions: [[int]] = []
     for source in sources {
-        let validated = decode.Decode(source, "picture")
-        if len(validated.diagnostics) > 0 { fail(validated.diagnostics[0].message) }
+        let diagnostics = decode.Validate(source, "picture")
+        if len(diagnostics) > 0 { return .Err(failures.New(diagnostics[0].message)) }
         total += source.dimensions[0] * source.dimensions[1]
-        if total > 1000000 { fail("Picture exceeds logical cell limit") }
-        append(dimensions, source.dimensions)
+        if total > 1000000 { return .Err(failures.New("Picture exceeds logical cell limit")) }
+        dimensions.append(source.dimensions)
     }
-    let chunks: [[string]] = []
-    for source in sources { append(chunks, PackLinks(source.spatial.links)) }
+    var chunks: [[string]] = []
+    for source in sources { chunks.append(PackLinks(source.spatial.links)?) }
     var rows = 2
     var height = 0
     var entries: [Entry] = []
@@ -74,24 +75,24 @@ export fn Encode(root: layout.Source, modules: map[layout.Source], entry: string
     var packed: [int] = []
     while true {
         entries = []
-        let placement = packing.Plan(dimensions, scale, rows)
+        let placement = packing.Plan(dimensions, scale, rows)?
         width = placement.width
         height = placement.height
         for index, source in sources {
-            let spec = Spec{magic: source.magic, versions: source.versions, encoding: source.encoding, dimensions: source.dimensions, spatial: layout.Spatial{links: []}, linkChunks: Some(chunks[index]), metadata: source.metadata}
-            append(entries, Entry{id: names[index], origin: placement.origins[index], source: spec})
+            let spec = Spec{magic: source.magic, versions: source.versions, encoding: source.encoding, dimensions: source.dimensions, spatial: layout.Spatial{links: []}, linkChunks: .Some(chunks[index]), metadata: source.metadata}
+            entries.append(Entry{id: names[index], origin: placement.origins[index], source: spec})
         }
         let header = Header{format: "pixel-image", version: "0.9", scale, canvas: [width, height], entry, modules: entries}
         raw = utf8Encode(jsonStringify(jsonFrom(header)))
-        if len(raw) > 16000000 { fail("Picture header exceeds limit") }
-        packed = zlibCompress(raw)
-        if len(packed) > 16000000 { fail("Compressed picture header exceeds limit") }
+        if len(raw) > 16000000 { return .Err(failures.New("Picture header exceeds limit")) }
+        packed = zlibCompress(raw)?
+        if len(packed) > 16000000 { return .Err(failures.New("Compressed picture header exceeds limit")) }
         let required = (20 + len(packed) + width * 3 - 1) / (width * 3)
         if required <= rows { break }
         rows = required + 1
     }
     let palette = colors.Build()
-    let canvas = arrayRepeat([16, 20, 24, 255], width * height)
+    var canvas = png.NewCanvas(width, height, [16, 20, 24, 255])?
     for index, source in sources {
         let origin = entries[index].origin
         for item in source.pixels {
@@ -106,18 +107,26 @@ export fn Encode(root: layout.Source, modules: map[layout.Source], entry: string
             while y < scale - 2 {
                 var x = 0
                 while x < scale - 2 {
-                    let offset = ((top + y) * width + left + x) * 4
-                    canvas[offset] = red; canvas[offset + 1] = green; canvas[offset + 2] = blue
+                    let offset = (top + y) * (width * 4 + 1) + 1 + (left + x) * 4
+                    canvas.scanlines[offset] = red; canvas.scanlines[offset + 1] = green; canvas.scanlines[offset + 2] = blue
                     x += 1
                 }
                 y += 1
             }
         }
     }
-    let payload = [80, 88, 73, 77, 71, 8, 13, 10]
-    png.U32(payload, len(packed)); png.U32(payload, len(raw)); png.U32(payload, crc32(packed))
-    extend(payload, packed)
-    while len(payload) % 3 != 0 { append(payload, 0) }
-    for index, byte in payload { canvas[(index / 3) * 4 + index % 3] = byte }
-    return png.Encode(width, height, canvas)
+    var payload: [int] = [80, 88, 73, 77, 71, 9, 13, 10]
+    payload.extend(png.U32(len(packed))?); payload.extend(png.U32(len(raw))?); payload.extend(png.U32(crc32(packed))?)
+    payload.extend(packed)
+    while len(payload) % 3 != 0 { payload.append(0) }
+    for index, byte in payload {
+        let pixel = index / 3
+        canvas.scanlines[pixel * 4 + index % 3 + pixel / width + 1] = byte
+    }
+    return .Ok(canvas)
+}
+
+export fn Encode(root: layout.Source, modules: map[string, layout.Source], entry: string, scale: int) -> Result[[int], Error] {
+    // Keep the drawing buffer private and compress it without a full snapshot.
+    return png.EncodeCanvas(Render(root, modules, entry, scale)?)
 }

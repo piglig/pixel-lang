@@ -1,14 +1,35 @@
-# 泛型记录与函数（语言 0.8）
+# 泛型与能力约束
 
-[中文](generics.md) · [English](../../../en/reference/language/generics.md) · [文档首页](../../README.md)
+[简体中文](generics.md) · [English](../../../en/reference/language/generics.md) · [文档首页](../../README.md)
+
+泛型复用类型结构，能力约束声明允许的操作。优先使用类型推导；证据不足时显式给出类型实参。
+
+
+**本页内容**
+
+- [显式类型实参](#显式类型实参)
+- [泛型记录](#泛型记录)
+- [泛型函数](#泛型函数)
+- [泛型值保持类型](#泛型值保持类型)
+- [参数推导](#参数推导)
+- [能力约束](#能力约束)
+- [继续阅读](#继续阅读)
+
+## 显式类型实参
+
+值表达式的显式特化使用 `::[T]`；类型注解保留 `[T]`。例如
+`let box: Box[int] = Box::[int]{value: 42}`。普通的 `values[index]` 始终表示下标访问，
+不受已声明的类型或函数名称影响。
 
 ## 泛型记录
 
 `record Box[T] { value: T }` 显式声明类型参数，作用域限于当前声明。
-类型注解和记录构造使用显式参数：`Box[int]`、`Box[float64]{value: 1.25}`、`Pair[int, string]`。
+类型注解显式指定参数，如 `Box[int]`、`Pair[int, string]`。记录构造可从字段值或预期类型推导参数：
+`Box{value: 42}` 推导为 `Box[int]`；`let items: Box[[int]] = Box{value: []}` 使用注解确定空数组类型。
+需要显式指定时使用 `Box::[float64]{value: 1.25}`。类型证据冲突或不足时报告错误，不隐式转换数值类型。
 参数可嵌套容器或其他记录，如 `record Batch[T] { items: [T] }` 和 `record Node[T] { children: [Node[T]] }`。
 普通递归结构合法，无界扩张由类型复杂度与实例数限制拒绝。
-每个程序最多 256 个具体记录实例，每个声明最多 32 个类型参数；结构深度和节点限制见 `typeexpr.py`。
+每个程序最多 256 个具体泛型记录／枚举实例（包含内建泛型枚举）；普通非泛型声明不计入实例化上限，仍受编译资源预算限制。每个声明最多 32 个类型参数；结构深度和节点限制见 `typeexpr.py`。
 未使用的声明也检查未知类型。
 
 记录保持名义身份和不变性，Box[int] 与 Box[float64] 不能隐式互转。
@@ -20,10 +41,10 @@ Studio 把特化字段关联回模板，并显示替换后的字段类型；类�
 
 ## 泛型函数
 
-`fn identity[T](value: T) -> T = value` 可用 `identity[int](42)` 或 `module.identity[int](42)` 调用。
+`fn identity[T](value: T) -> T = value` 可用 `identity::[int](42)` 或 `module.identity::[int](42)` 调用。
 普通函数拒绝类型实参，显式实参数量必须匹配；不隐式转换数值或回退动态类型。
 即使未使用，定义也按抽象参数检查。无约束 T 支持传递、返回、容器、下标和兼容泛型调用，
-不支持算术、标量转换和相等比较；当前没有数值或接口约束。
+不支持算术、标量转换和相等比较；可通过下文的能力约束允许相等、排序和数值运算，目前不支持自定义接口约束。
 JSON 解码到 Error 等内建限制还会在具体特化时检查。
 
 每个使用到的具体参数元组生成一个实例，重复调用和普通泛型递归复用该实例。
@@ -31,7 +52,25 @@ JSON 解码到 Error 等内建限制还会在具体特化时检查。
 实参访问在调用者处检查，调用者私有记录可传给公共泛型函数而不需 export；模板不能访问不可见类型，
 也不能读取无约束 T 的字段。像素编译重新执行这些权限检查。
 Studio 将泛型调用关联声明，显示如 identity[int] 的栈帧和源码参数名；断点和逆向执行保留模板位置。
-标准库提供浅复制 Copy[T] 和 Repeat[T]。见[枚举](enums.md)、[函数](functions.md)。
+普通赋值保证值隔离，无须显式复制；标准库的 `Repeat[T]` 返回 `Result[[T], Error]`。
+局部修改保留其他绑定的值。见[枚举](enums.md)、[函数](functions.md)。
+
+## 泛型值保持类型
+
+读取 `Box[T]` 的字段、`[T]` 的元素或枚举的 `T` 负载，结果仍为 `T`。
+构造容器与传递回调不需要引入快照类型：
+
+```pixellang
+record Box[T] { value: T }
+fn Read[T](box: Box[T]) -> T = box.value
+fn First[T](values: [T]) -> T = values[0]
+fn Singleton[T](value: T) -> [T] = [value]
+```
+
+参数与 `let` 绑定只读；需要局部修改时使用 `var`，需要更新调用者时使用 `inout`。
+这些访问规则不改变泛型参数本身。能力约束仍按 `T` 的声明检查。
+
+泛型值遵循与具体类型相同的[值语义](data.md)。
 
 ## 参数推导
 
@@ -43,4 +82,51 @@ int 与 float64 证据冲突，不插入数值转换。
 泛型函数值仍要求显式特化；匿名参数可来自函数上下文，回调返回值可贡献输出约束，未知输入仍需独立证据。
 
 像素编译重新推导，不依赖隐藏执行元数据。参数仍从左到右求值一次。
-`tests/test_inference_v7.py` 覆盖私有跨模块类型、回调、容器、递归、歧义、图片恢复及逐状态回放。
+`tests/test_inference.py` 覆盖私有跨模块类型、回调、容器、递归、歧义、图片恢复及逐状态回放。
+
+## 能力约束
+
+使用 `T: Equatable` 声明相等比较能力，例如：
+
+```pixellang
+fn Same[T: Equatable](left: T, right: T) -> bool = left == right
+record Key[T: Equatable] { value: T }
+```
+
+该约束允许声明体对 T 使用值相等，也适用于由 T 组成的可比较容器和记录。
+显式类型实参与推导结果都必须满足约束；将类型参数传给另一泛型声明时，其声明的能力必须足够。
+即使声明体未使用相等操作、声明未被调用，显式声明的约束仍需成立。
+约束保留在语义像素和恢复后的源码中，恢复编译会重新检查。
+无约束 T 仍不允许直接判等；具体可比较类型见[数据语义](data.md)。
+目前提供 Equatable、Ordered、Numeric 和 Hashable，不提供自定义接口约束。
+附带开发编译器已同步；源码执行、约束拒绝、增量失效与 PNG 往返专项验证通过。
+
+### 排序与数值能力
+
+使用 `T: Ordered` 和 `T: Numeric` 声明排序与数值能力。Numeric 蕴含 Ordered，Ordered 蕴含 Equatable；
+类型参数可向要求较弱能力的泛型声明传递，反向传递会被拒绝。
+Ordered 支持 int、float64、string 的 `<`、`<=`、`>`、`>=`，不为数组或记录推导字典序。
+Numeric 支持 int、float64 的 `+`、`-`、`*`、`/`、`%` 和一元负号，沿用各具体类型的溢出及除法规则。
+两侧仍须为同一类型，不隐式混用 int 与 float64。约束不将整数字面量自动转换为抽象数值类型。
+
+标准库提供 `collections.Sorted(values)` 和 `collections.Sum(values, initial)`。
+Sorted 使用稳定自然排序；Sum 的显式 initial 定义空输入结果和数值类型，例如
+`Sum([1, 2], 0)` 与 `Sum([1.5, 2.5], 0.0)`。
+
+### 哈希键能力
+
+`T: Hashable` 是类型化映射键的前置契约。Hashable 蕴含 Equatable；
+Ordered 与 Numeric 满足 Hashable，但 Hashable 不蕴含 Ordered。
+允许 int、有限 float64、bool、string、Point3／Vec3，以及所有变体负载均可哈希的枚举。
+数组、映射、记录、函数、JSON 和运行实例不能作为哈希键；未选中的枚举变体同样参与检查。
+浮点的正零与负零标识同一个映射键；空间值的源码来源不参与键身份。
+
+`map[K, V]` 要求 K 满足 Hashable，未调用声明中的映射类型也会检查。
+因此泛型映射参数需声明 `K: Hashable`。原生源码执行、JSON 往返、状态快照及程序 PNG 恢复
+验证须覆盖源码、JSON、状态快照与 PNG 恢复。
+顺序和序列化规则见[集合](collections.md)。
+
+## 继续阅读
+
+- [完整文档目录](../../README.md)
+- [语言总览](overview.md)

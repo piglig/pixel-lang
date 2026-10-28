@@ -4,10 +4,20 @@ import "types.pxl" as types
 export record Position { line: int, column: int, offset: int }
 export record Span { source: string, kind: string, points: [[int]], min: [int], max: [int], start: Position, end: Position }
 export record Instruction { op: string, arg: json, module: int, node: int, span: Span }
+export record CaptureBinding { slot: int, type: string }
 export record Function { params: [string], captures: [string], locals: int, result: string, instructions: [Instruction] }
-export record Program { version: string, records: map[map[string]], enums: map[map[map[string]]], entry: [string], functions: map[Function] }
+// Executable graph provenance uses original AST identities and concrete VM slots.
+export record FlowInput { name: string, node: int, slot: int, type: string }
+export record FlowValue { node: int, name: string, expression: int, slot: int, type: string }
+export record FlowResult { node: int, slot: int, type: string }
+export record FlowChild { node: int, name: string, function: string, initializers: [string] }
+export record ChildStep { node: int, reference: int }
+export record FlowCell { node: int, name: string, slot: int, type: string, initializer: string }
+export record FlowUpdate { node: int, state: int, expression: int }
+export record FlowDefinition { module: int, node: int, name: string, stateful: bool, inputs: [FlowInput], initialInputs: [FlowInput], states: [FlowCell], updates: [FlowUpdate], children: [FlowChild], values: [FlowValue], dependencies: [model.FlowDependency], order: [int], returnNode: int, output: FlowResult }
+export record Program { version: string, coordinateFrames: map[string, string], effectFunctions: [string], flows: map[string, FlowDefinition], records: map[string, map[string, string]], enums: map[string, map[string, map[string, string]]], entry: [string], functions: map[string, Function] }
 export record Output { ir: Program, diagnostics: [model.Diagnostic] }
-export record Context { planned: model.ClosurePlan, frames: model.FramePlan, frame: model.FunctionFrame, code: [Instruction], diagnostics: [model.Diagnostic], expressionTypes: map[int], targets: map[int], callTypes: map[int], references: map[int], declarations: map[int], parameters: [int], arguments: [int], spans: map[Span], labels: int, breaks: [int], continues: [int], loopHandlers: [int], handlers: int, locals: int }
+export record Context { frames: model.FramePlan, frame: model.FunctionFrame, code: [Instruction], diagnostics: [model.Diagnostic], expressionTypes: map[string, int], targets: map[string, int], callTypes: map[string, int], references: map[string, int], declarations: map[string, int], parameters: [int], arguments: [int], spans: map[string, Span], labels: int, breaks: [int], continues: [int], loopStacks: [int], locals: int }
 export fn Key(module: int, node: int) -> string = string(module) + ":" + string(node)
 export fn Point(tokens: [model.Token], offset: int) -> Position {
     var low = 0
@@ -28,15 +38,33 @@ export fn Point(tokens: [model.Token], offset: int) -> Position {
     }
     return Position{line, column, offset}
 }
-export fn Emit(c: Context, op: string, arg: json, node: int) {
+export fn TextSpan(source: model.Module, node: int) -> Span {
+    let origin = source.syntax.nodes[node]
+    let start = Point(source.syntax.tokens, origin.start)
+    let end = Point(source.syntax.tokens, origin.end)
+    var left = start.column - 1
+    var right = end.column - 1
+    if left > right { let previous = left; left = right; right = previous }
+    return Span{source: source.path, kind: "text", points: [[start.column - 1, start.line - 1], [end.column - 1, end.line - 1]], min: [left, start.line - 1], max: [right, end.line - 1], start, end}
+}
+export fn Emit(op: string, arg: json, node: int, planned: model.ClosurePlan, c: inout Context) {
     let key = Key(c.frame.module, node)
-    if has(c.spans, key) { append(c.code, Instruction{op, arg, module: c.frame.module, node, span: c.spans[key]}); return }
-    let source = c.planned.named.checked.resolved.bound.project.modules[c.frame.module]
+    if c.spans.has(key) { c.code.append(Instruction{op, arg, module: c.frame.module, node, span: c.spans[key]}); return }
+    let source = planned.named.checked.resolved.bound.project.modules[c.frame.module]
     let origin = source.syntax.nodes[node]
     if origin.start < len(source.syntax.tokens) && source.syntax.tokens[origin.start].kind == "pixel" {
         let token = source.syntax.tokens[origin.start]
         var points = [[token.column - 1, token.line - 1]]
-        if token.value != "" { points = jsonDecode[[[int]]](token.value) }
+        if token.value != "" {
+            match jsonDecode::[[[int]]](token.value) {
+                .Ok(value) => { points = value },
+                .Err(error) => { Report(node, error.message, planned, &c); return }
+            }
+        }
+        if len(points) == 0 { Report(node, "Pixel source span requires a point", planned, &c); return }
+        for point in points {
+            if len(point) != 2 { Report(node, "Pixel source span requires coordinate pairs", planned, &c); return }
+        }
         var left = points[0][0]
         var right = left
         var top = points[0][1]
@@ -51,70 +79,69 @@ export fn Emit(c: Context, op: string, arg: json, node: int) {
         let end = Position{line: bottom + 1, column: right + 1, offset: origin.end}
         let span = Span{source: source.path, kind: "spatial", points, min: [left, top], max: [right, bottom], start, end}
         c.spans[key] = span
-        append(c.code, Instruction{op, arg, module: c.frame.module, node, span}); return
+        c.code.append(Instruction{op, arg, module: c.frame.module, node, span}); return
     }
-    let start = Point(source.syntax.tokens, origin.start)
-    let end = Point(source.syntax.tokens, origin.end)
-    var left = start.column - 1
-    var right = end.column - 1
-    if left > right { let previous = left; left = right; right = previous }
-    let span = Span{source: source.path, kind: "text", points: [[start.column - 1, start.line - 1], [end.column - 1, end.line - 1]], min: [left, start.line - 1], max: [right, end.line - 1], start, end}
+    let span = TextSpan(source, node)
     c.spans[key] = span
-    append(c.code, Instruction{op, arg, module: c.frame.module, node, span})
+    c.code.append(Instruction{op, arg, module: c.frame.module, node, span})
 }
-export fn Op(c: Context, op: string, node: int) { Emit(c, op, jsonNull(), node) }
-export fn Label(c: Context) -> int { let value = c.labels; c.labels += 1; return value }
-export fn Report(c: Context, index: int, message: string) {
-    let source = c.planned.named.checked.resolved.bound.project.modules[c.frame.module]
+export fn Op(op: string, node: int, planned: model.ClosurePlan, c: inout Context) { Emit(op, jsonNull(), node, planned, &c) }
+export fn Label(c: inout Context) -> int { let value = c.labels; c.labels += 1; return value }
+export fn Report(index: int, message: string, planned: model.ClosurePlan, c: inout Context) {
+    let source = planned.named.checked.resolved.bound.project.modules[c.frame.module]
     let node = source.syntax.nodes[index]
     var line = 1
     var column = 1
     for token in source.syntax.tokens { if token.start >= node.start { line = token.line; column = token.column; break } }
-    append(c.diagnostics, model.Diagnostic{source: source.path, phase: "ir", message, start: node.start, end: node.end, line, column})
+    c.diagnostics.append(model.Diagnostic{source: source.path, phase: "ir", message, start: node.start, end: node.end, line, column})
 }
-export fn TypeName(resolved: model.ResolvedTypes, typeId: int) -> string {
+export fn TypeName(typeId: int, resolved: model.ResolvedTypes) -> string {
     let typ = resolved.types[typeId]
     if typ.kind == "primitive" { if typ.name == "string" { return "str" }; return typ.name }
-    let arguments: [string] = []
-    for argument in typ.arguments { append(arguments, TypeName(resolved, argument)) }
+    var arguments: [string] = []
+    for argument in typ.arguments { arguments.append(TypeName(argument, resolved)) }
     if typ.kind == "array" { return arguments[0] + "[]" }
-    if typ.kind == "map" { return arguments[0] + "{}" }
-    if typ.kind == "function" { return "fn(" + join(slice(arguments, 0, len(arguments) - 1), ",") + ")->(" + arguments[len(arguments) - 1] + ")" }
+    if typ.kind == "inout" { return "inout<" + arguments[0] + ">" }
+    if typ.kind == "map" { return "map<" + arguments[0] + "," + arguments[1] + ">" }
+    if typ.kind == "function" {
+        var prefix = "fn"
+        if typ.name == "effect" { prefix = "effect_fn" }
+        return prefix + "(" + join(slice(arguments, 0, len(arguments) - 1), ",") + ")->(" + arguments[len(arguments) - 1] + ")" }
     var name = typ.name
     if typ.module >= 0 { name = "@" + string(typ.module) + ":" + string(typ.declaration) }
     if len(arguments) > 0 { name += "<" + join(arguments, ",") + ">" }
     return name
 }
-export fn ExpressionType(c: Context, node: int) -> int {
+export fn ExpressionType(node: int, c: inout Context, planned: inout model.ClosurePlan) -> int {
     let key = Key(c.frame.module, node)
-    if !has(c.expressionTypes, key) { Report(c, node, "Missing expression type"); return -1 }
-    let resolved = c.planned.named.checked.resolved
-    let typeId = types.Substitute(resolved, c.expressionTypes[key], c.parameters, c.arguments)
-    if !types.Concrete(resolved, typeId, 0) { Report(c, node, "Runtime expression type is not concrete"); return -1 }
+    if !c.expressionTypes.has(key) { Report(node, "Missing expression type", planned, &c); return -1 }
+
+    let typeId = types.Substitute(c.expressionTypes[key], c.parameters, c.arguments, &planned.named.checked.resolved)
+    if !types.Concrete(typeId, 0, planned.named.checked.resolved) { Report(node, "Runtime expression type is not concrete", planned, &c); return -1 }
     return typeId
 }
-export fn Slot(c: Context, symbol: int, node: int) -> int {
+export fn Slot(symbol: int, node: int, planned: model.ClosurePlan, c: inout Context) -> int {
     for slot, binding in c.frame.slots { if binding.symbol == symbol { return slot } }
-    Report(c, node, "Binding has no frame slot")
+    Report(node, "Binding has no frame slot", planned, &c)
     return -1
 }
 export fn Reference(c: Context, node: int) -> int {
     let key = Key(c.frame.module, node)
-    if has(c.references, key) { return c.references[key] }
+    if c.references.has(key) { return c.references[key] }
     return -1
 }
 record Constant { type: string, value: json }
-export fn ConstantValue(c: Context, typ: string, value: json, node: int) { Emit(c, "CONST", jsonFrom(Constant{type: typ, value}), node) }
-export fn Unit(c: Context, node: int) { ConstantValue(c, "int", jsonFrom(0), node) }
+export fn ConstantValue(typ: string, value: json, node: int, planned: model.ClosurePlan, c: inout Context) { Emit("CONST", jsonFrom(Constant{type: typ, value}), node, planned, &c) }
+export fn Unit(node: int, planned: model.ClosurePlan, c: inout Context) { ConstantValue("int", jsonFrom(0), node, planned, &c) }
 export fn Binary(op: string) -> string {
-    let names = map[string]{"+": "ADD", "-": "SUB", "*": "MUL", "/": "DIV", "%": "MOD", "==": "EQ", "!=": "NE", "<": "LT", "<=": "LE", ">": "GT", ">=": "GE"}
-    if has(names, op) { return names[op] }
+    let names = map[string, string]{"+": "ADD", "-": "SUB", "*": "MUL", "/": "DIV", "%": "MOD", "==": "EQ", "!=": "NE", "<": "LT", "<=": "LE", ">": "GT", ">=": "GE"}
+    if names.has(op) { return names[op] }
     return ""
 }
 
-export fn Temporary(c: Context, node: int) -> int {
+export fn Temporary(node: int, planned: model.ClosurePlan, c: inout Context) -> int {
     let slot = c.locals
-    if slot >= 65536 { Report(c, node, "Function slot limit 65536 exceeded"); return -1 }
+    if slot >= 65536 { Report(node, "Function slot limit 65536 exceeded", planned, &c); return -1 }
     c.locals += 1
     return slot
 }

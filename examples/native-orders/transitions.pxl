@@ -1,0 +1,15 @@
+import "model.pxl" as model
+import "std/time.pxl" as time
+
+export fn Transition(previous: model.Order, event: model.Event, clock: time.Step) -> model.Decision = match (previous.status, event) {
+        (.AwaitingPayment, .Tick) if clock.elapsed.nanoseconds >= previous.expiresAt.nanoseconds => model.Accept(previous, .Expired),
+        (_, .Tick) => model.Accept(previous, previous.status),
+        (.AwaitingPayment, .Pay(cents)) if clock.elapsed.nanoseconds >= previous.expiresAt.nanoseconds => model.Reject(previous, .PaymentExpired),
+        (.AwaitingPayment, .Pay(cents)) if cents != previous.totalCents => model.Reject(previous, .AmountMismatch(previous.totalCents, cents)),
+        (.AwaitingPayment, .Pay(cents)) => model.Accept(previous, .Paid),
+        (.Expired, .Pay(_)) => model.Reject(previous, .PaymentExpired),
+        (.Paid, .Ship(tracking)) if len(tracking) == 0 => model.Reject(previous, .MissingTracking),
+        (.Paid, .Ship(tracking)) => model.Accept(previous, .Shipped(tracking)),
+        (.AwaitingPayment, .Cancel) => model.Accept(previous, .Cancelled),
+        (_, _) => model.Reject(previous, .InvalidTransition(previous.status, event))
+    }

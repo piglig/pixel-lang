@@ -1,42 +1,25 @@
-# IR 0.8
+# Intermediate representation and function reuse
 
-[中文](../../zh-CN/internals/ir.md) · [English](ir.md) · [Documentation](../README.md)
+[简体中文](../../zh-CN/internals/ir.md) · [English](ir.md) · [Documentation](../README.md)
 
-Representation-independent stack IR contains version, records, enums, entry and functions.
-Entry identifies exactly one parameterless unit root function; there are no module
-initializers. Each function has params, captured-cell types, locals, result and instructions.
+IR lowers checked programs into stack operations with source provenance. It is independent of PNG layout and assembles into PixelVM bytecode.
 
-Instructions carry op, optional arg and provenance. CONST and LABEL are symbolic;
-assembly interns typed constants, resolves labels and emits bytecode. Numeric IDs
-identify functions/modules and fixed slots identify locals. No RGBA operation is
-needed by lowering or execution. Optimization removes jumps to the next label.
+## Programs and functions
 
-Operands/arguments evaluate left to right. Short-circuit logic uses DUP, conditional
-jump and POP. Collection iteration snapshots before its loop and uses internal
-slots for index/keys/values. Continue targets the advancement block. Break/continue
-emit END_TRY only for handlers exited by the transfer. JSON_DECODE carries the
-resolved target schema type. Incomplete editor ASTs cannot enter executable builds.
+IR stores versions, records, enums, an entry and functions. The entry takes no arguments and returns unit. Functions contain parameters, captures, local slots, result types and instructions. Instructions carry an opcode, optional operands and provenance. Assembly interns typed constants and resolves labels; constant-pool numbers are not reusable semantic identities. Generic arguments identify concrete instances, and closures lower to separate functions with typed captures.
 
-Concrete generic instances share code for repeated argument tuples. Anonymous
-functions lower to separate checked bodies. CAPTURE/CLOSURE preserve shared binding
-identity, BIND establishes fresh declarations, and INVOKE carries the complete
-callable signature. Enum constructors and matches use typed ENUM operations.
+## Lowering rules
 
-## Reusing lowered functions
+- Evaluate arguments once, left to right; short-circuit branches preserve explicit operand state.
+- Iterate the entry snapshot of a collection; `continue` targets advancement.
+- Capture readonly values and release explicit `inout` access on exits and failures.
+- Lower `?` through result propagation and operand cleanup, not recoverable exception handlers.
+- Preserve native types, state and transaction boundaries for spatial operations and flows.
 
-`ir_cache.pxl` matches canonical module paths, declaration identities, concrete
-generic arguments and closure locations. Reuse also requires matching source and
-transitive dependency-interface stamps supplied by the service. All semantic
-checks and frame planning still run on the current program.
+See [bytecode](../reference/formats/bytecode.md) for instruction contracts. Incomplete editor ASTs cannot produce executables.
 
-The current plans determine executable IDs. Cached function references, nominal
-types and instruction module IDs are relocated; source positions are retained
-only for unchanged module text. Constants remain symbolic until fresh assembly,
-and string payloads are never treated as identifiers. The program's schemas and
-entry are rebuilt from the current plans, not copied from the cached program.
+## Query reuse
 
-Function payloads are loaded lazily and remain independently subject to JSON
-limits. Unchanged payloads can be retained under separate prior-file names; changed
-payloads are serialized anew. Cache absence, noncanonical paths or an oversized
-function leave ordinary lowering available. The service publishes only complete
-successful snapshots. See [the service contract](../reference/compiler-service.md).
+`selfhost/ir_cache.pxl` retains function queries in the native session. Keys include stable declaration/closure identities and concrete generic arguments. Reuse validates bodies, observed dependency contracts and frame layouts. Nodes, symbols, types and call targets relocate into the current project. Flow IR, initializer functions and graph metadata reuse together.
+
+Caches retain structural values without disk JSON serialization. Missing queries, mismatched identities or capacity pressure cause fresh lowering; only successful snapshots publish. Fresh compilation provides the correctness comparison. See the [compiler service](../reference/compiler-service.md) for statistics and boundaries.

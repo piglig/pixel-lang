@@ -1,49 +1,87 @@
-# Data semantics contract (language 0.8)
+# Values and update permissions
 
-[中文](../../../zh-CN/reference/language/data.md) · [English](data.md) · [Documentation](../../README.md)
+[简体中文](../../../zh-CN/reference/language/data.md) · [English](data.md) · [Documentation](../../README.md)
 
-PixelLang distinguishes a binding (a name referring to a value) from an object.
-The following rules retain the existing model and make its consequences explicit.
-They do not introduce implicit deep immutability or implicit object copying.
+Copying ordinary values does not create shared mutation. Use let for readonly bindings, var for local updates and inout for explicit caller writeback.
 
-| Operation | Contract |
+## Contract and interface
+
+Ordinary records, arrays, maps, and enums have value semantics. `let` holds a
+readonly value; `var` permits local updates, including fields and nested containers.
+Assignment, arguments, and return values do not introduce observable shared mutation.
+
+| Form | Meaning |
 | --- | --- |
-| `let name = value` | The binding cannot be assigned again. Referenced fields/elements may be changed. |
-| `var name = value` | The binding may be assigned a value of the same static type. |
-| Function parameter | Immutable binding; an object argument is shared with the caller. |
-| Assignment / argument passing | Scalar value copied; object reference shared. Rebinding a local does not rebind the caller's name. |
-| Field / index update | All aliases observe the changed object. Bounds/type checks still apply. |
-| `collections.Copy(values)` | Fresh outer array, shared elements. Copying an array of records does not copy records. |
-| Independent records | Construct a new record; explicitly copy nested objects that must be independent. |
-| Scalar equality | Matching int, float64, bool and string types compare by value, without numeric coercion. |
-| Object equality | Arrays, maps, records, enums, JSON and functions are not equality-comparable. Compare intended fields explicitly. |
-| Iteration | Shallow snapshot of the outer collection at entry; nested objects remain shared. |
-| Closures | Capture bindings; sibling closures share captured mutable cells. Each declaration/iteration creates fresh bindings. |
-| Recoverable failure | Earlier mutations remain visible. Catch does not roll back a transaction. |
-| Replay | Restores historical object identities and mutations; observing a past state does not rerun external writes. |
-
-Example: sharing and shallow copying
+| `let values = [1]` | No reassignment or element updates. |
+| `var values = [1]` | Reassignment, element updates, and `values.append(2)` are allowed. |
+| `var copy = original` | Updating copy preserves original. |
+| `item with { count: 2 }` | A new record of the same type; unspecified fields are preserved. |
+| Ordinary parameters | Readonly; assign to a local var to edit a copy. |
+| `values: inout [int]` | Explicit caller writeback, called as `sort(&values)`. |
+| Closure captures | Readonly values captured at creation. |
+| Historical snapshots | Later changes preserve old values; replay does not repeat external writes. |
 
 ```pixellang
-import "std/collections.pxl" as collections
-record Item { amount: int }
-fn change(item: Item) { item.amount = 9 }
-fn main() {
-    let original = [Item{amount: 1}]
-    let copied = collections.Copy(original)
-    change(copied[0])
-    print(original[0].amount) // 9: the Item is shared
-    copied[0] = Item{amount: 2}
-    print(original[0].amount) // 9: the arrays themselves are independent
+record Item { values: [int] }
+effect fn main() {
+    let original = Item{values: [1]}
+    var edited = original
+    edited.values.append(2)
+    let replaced = original with { values: [3] }
+    print(original.values) // [1]
+    print(edited.values)   // [1, 2]
+    print(replaced.values) // [3]
 }
 ```
 
-Design tradeoff: binding mutability is simple and supports existing imperative
-algorithms. It cannot promise deep immutability. Automatic deep copy would hide
-costs and needs explicit cycle/closure policies; it is not the meaning of ordinary
-assignment or Copy. Structural equality would similarly need recursive identity
-and cycle rules. Use explicit domain comparisons rather than
-silently choosing an object equality meaning.
+The implementation may share storage. Value isolation does not require a deep copy
+on every assignment or guarantee allocation-free updates. Array and map updates
+copy affected storage paths; resource limits and cancellation still apply.
 
-Executable evidence: tests/test_data_semantics_v8.py plus the current closure,
-collection callback and capture-cell suites.
+Values and runtime identity are distinct. Space snapshots are values; entities,
+links, and live flow instances have explicit identities. Copying a flow handle
+does not create an independent instance; create that instance explicitly.
+
+These value semantics are implemented in the bundled development compiler and runtime.
+The legacy `mut`/`Frozen` type wrappers and `freeze`/`thaw` builtin conversions have
+been removed; same-name user declarations follow ordinary name resolution.
+
+Recoverable failure uses `Result` and explicit `?` propagation; see [errors](errors.md).
+
+## Structural equality
+
+This contract is implemented in the runtime, self-hosted checker and bundled
+development compiler, with targeted source and program PNG round-trip verification.
+See [self-hosting verification](../../internals/self-hosting.md) for the current development artifact’s acceptance scope. `==` and `!=` require identical static operand types. Integers,
+float64, booleans, strings, and Point3/Vec3 in the same frame are comparable. Arrays,
+typed maps, records and enums are comparable when all their element or field
+types are comparable, including inactive enum variants and empty container element
+types. Unconstrained type parameters, functions, JSON, Flow, Space, Entity, Link and
+Transform3 do not support direct equality.
+
+Arrays compare order and elements; maps compare key sets and corresponding values
+without regard to insertion order; records compare fields of the same nominal
+type; enums compare the variant and payload of the same nominal type. Source
+locations, allocation addresses and internal sharing topology do not affect value
+equality. Ordinary values do not provide mutable reference cycles; spatial graphs
+express cycles through explicit entity and link identities. Comparison does not
+mutate objects or allocate VM heap values.
+Runtime traversal has an independent work budget and supports cancellation.
+Float64 equality is exact; geometric proximity requires an explicit tolerance.
+
+State initializer comparisons must have the same content semantics, including
+independence from field spelling order and map insertion order. Runtime tests are
+in `tests/test_value_equality.py`; native compilation and PNG round-trip tests are
+in `tests/test_native_equality.py`.
+
+Value update and isolation tests: `tests/test_native_value_assignment.py`,
+`tests/test_native_value_captures.py`, and `tests/test_native_collection_methods.py`.
+
+## Unicode categories
+
+`unicodeCategory(text)` accepts one character and returns its two-letter Unicode general category, such as `Lu`, `Ll`, or `Lo`. Classification uses the bundled Unicode **15.1.0** table in both the reference runtime and native backend; it does not depend on the host Python Unicode version. Empty or multi-character input is rejected.
+
+## Further reading
+
+- [Documentation index](../../README.md)
+- [Language overview](overview.md)

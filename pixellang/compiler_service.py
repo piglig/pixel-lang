@@ -8,8 +8,6 @@ from dataclasses import dataclass
 import hashlib
 import json
 import math
-import posixpath
-import re
 import pickle
 from dataclasses import asdict
 from pathlib import Path
@@ -19,10 +17,26 @@ import time
 from .bootstrap import normalized, read_bytecode_stream
 from .fileaccess import FileAccess
 from .model import PixelError
-from .image_workspace import read_parsed, stage_parsed
+from .image_transport import read_parsed
 from .vm import VM
+from .code_image import CodeImage
+from .compiler_protocol import check_native_output
 
 PROTOCOL_VERSION = 1
+
+
+def read_debug_document(event):
+    """Decode JSON-valued metadata from a typed compiler output document.
+
+    Pixel/link records travel under the compiler output budget, independently of
+    the language's limit on any single JSON value. VM printing serializes each
+    metadata value to JSON text; decode only these explicitly typed fields.
+    """
+    source = event['source']
+    for document in (source, *source.get('bundle', {}).get('modules', {}).values()):
+        document['metadata'] = {name: json.loads(value)
+                                for name, value in document['metadata'].items()}
+    return event
 
 
 @dataclass(frozen=True)
@@ -47,103 +61,122 @@ class Limits:
 
 class CompilerService:
     """One sequential execution lane; callers supervise concurrency/cancellation."""
-    def __init__(self, bytecode, *, limits=None):
+    def __init__(self, bytecode, *, limits=None, native_executable=None):
         self.limits=limits or Limits()
-        self.compiler_sha256=hashlib.sha256(normalized(bytecode).encode()).hexdigest()
-        self.vm=VM(bytecode,max_steps=self.limits.steps,max_depth=1024,
-                   max_heap_items=self.limits.heap_items,max_heap_objects=self.limits.heap_objects,
-                   max_output_chars=self.limits.output_chars)
-        self.initial=self.vm.checkpoint()
-        self.parses=OrderedDict()
-        self.parse_bytes=0
+        self.compiler_sha256=hashlib.sha256(normalized(bytecode.data if isinstance(bytecode, CodeImage) else bytecode).encode('utf-8',errors='surrogatepass')).hexdigest()
+        self.native=None
+        self.resident=False
+        self.session_revision=0
+        self.session_nodes=0
+        if native_executable is not None:
+            from .native_execution import NativeExecution
+            executable=Path(native_executable).resolve(strict=True)
+            mapping=json.loads(executable.with_name(executable.name+'.map.json').read_text())
+            from .native_bundle import validate_source_map
+            validate_source_map(mapping,bytecode.data if isinstance(bytecode,CodeImage) else bytecode)
+            if (mapping.get('bytecodeSha256')!=self.compiler_sha256 or
+                mapping.get('executableSha256')!=hashlib.sha256(executable.read_bytes()).hexdigest()):
+                raise ValueError('Native compiler does not match its bytecode and executable manifest')
+            if (self.limits.heap_items,self.limits.heap_objects)!=(64_000_000,2_000_000):
+                raise ValueError('Native compiler uses fixed byte allocation budgets; custom VM heap limits are unsupported')
+            if mapping.get('session') is not None:
+                from .native_session import NativeSessionExecution
+                self.native=NativeSessionExecution(executable)
+                self.resident=True
+            else:
+                self.native=NativeExecution(executable)
+            self.vm=None
+            self.initial=None
+        else:
+            self.vm=VM(bytecode,max_steps=self.limits.steps,max_depth=1024,
+                       max_heap_items=self.limits.heap_items,max_heap_objects=self.limits.heap_objects,
+                       max_output_chars=self.limits.output_chars)
+            self.initial=self.vm.checkpoint()
         self.work_steps=0
         self.parse_hits=0
         self.parsed_modules=0
-        self.analysis=None
         self.artifacts=OrderedDict()
         self.artifact_bytes=0
-        self.ir_cache=None
+        self.binding_hits=0
+        self.bound_declarations=0
+        self.type_hits=0
+        self.typed_declarations=0
+        self.semantic_hits=0
+        self.semantic_checked=0
+        self.ir_nodes=0
         self.ir_hits=0
         self.ir_relocated=0
 
-    def _stage_ir_cache(self, files, entry, root):
-        if posixpath.normpath(entry)!=entry or any(posixpath.normpath(p)!=p for p in files):
-            # Project normalization may merge or rename keys. Until the host has
-            # the compiler's canonical graph, do not infer dependency identity.
-            return None
-        # Cache source identity and transitive interface identity separately:
-        # changing an imported body need not invalidate its callers' lowering.
-        stamps={}
-        for path,text in files.items():
-            dependencies=set()
-            pending=[path]
-            while pending:
-                target=pending.pop()
-                if target in dependencies:continue
-                dependencies.add(target)
-                pending.extend(self.source_info.get(target,{}).get('imports',[]))
-            identity=[text,{p:self.source_info.get(p) for p in sorted(dependencies)}]
-            stamps[path]=hashlib.sha256(json.dumps(identity,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
-        limit=min(8_000_000,self.limits.file_bytes//8)
-        if limit<1_000_000:return None
-        environment=hashlib.sha256(json.dumps([self.compiler_sha256,entry,asdict(self.limits)],sort_keys=True).encode()).hexdigest()
-        request=dict(outputPath='ir-index-out.json',environment=environment,stamps=stamps,byteLimit=limit)
-        if self.ir_cache is not None:
-            index=json.loads(self.ir_cache['ir-index-in.json'])
-            # Keep prior payloads in a disjoint namespace. A new function may
-            # take an old numeric ID while another function retains its bytes.
-            for key,name in list(index['functions'].items()):
-                staged='prior-ir-function-'+key+'.json'
-                (root/staged).write_bytes(self.ir_cache[name])
-                index['functions'][key]=staged
-            (root/'ir-index-in.json').write_text(json.dumps(index,ensure_ascii=False))
-            request['priorPath']='ir-index-in.json'
-        return request
+    def close(self):
+        close = getattr(self.native, 'close', None)
+        if close is not None:
+            close()
 
-    def _retain_ir_cache(self,root):
-        path=root/'ir-index-out.json'
-        if not path.is_file():return
-        try:
-            data=path.read_bytes()
-            index=json.loads(data)
-            if not isinstance(index,dict) or not isinstance(index.get('functions'),dict):return
-            retained={'ir-index-in.json':data}
-            size=len(data)
-            if size>min(8_000_000,self.limits.file_bytes//8):return
-            for key,name in index['functions'].items():
-                if (not isinstance(key,str) or not key.isdecimal() or not isinstance(name,str)
-                    or re.fullmatch(r'(?:prior-)?ir-function-[0-9]+\.json',name) is None):return
-                payload=(root/name).read_bytes()
-                size+=len(payload)
-                if size>min(8_000_000,self.limits.file_bytes//8):return
-                retained[name]=payload
-            if any(type(index[k]) is not int or index[k]<0 for k in ('hits','relocated')):return
-            return retained,index['hits'],index['relocated']
-        except (OSError,ValueError,KeyError,TypeError):
-            # Optional cache publication cannot turn a successful compilation
-            # into a failure. No partial index is ever installed.
-            return
+    @classmethod
+    def from_bundle(cls, folder, *, limits=None):
+        from .native_bundle import load_bundle
+        code,executable,_=load_bundle(folder)
+        return cls(code,limits=limits,native_executable=executable)
 
     @classmethod
     def installed(cls, *, limits=None):
-        folder=Path(__file__).parent/'artifacts'
-        manifest=json.loads((folder/'compiler-manifest.json').read_text())
-        data=(folder/'compiler.json').read_bytes()
-        if manifest.get('protocolVersion') != PROTOCOL_VERSION or hashlib.sha256(data).hexdigest()!=manifest.get('sha256'):
-            raise ValueError('Installed compiler artifact does not match its manifest')
-        return cls(json.loads(data),limits=limits)
+        return cls.from_bundle(Path(__file__).parent/'artifacts',limits=limits)
 
     def _execute(self, request, root, cancelled, deadline):
+        if self.resident:
+            request={**request,'resident':True}
         text=json.dumps(request,ensure_ascii=False)
         if len(text)>1_000_000:
             raise PixelError('service','Compiler request exceeds VM input limit',code='service.input-limit')
         if self.work_steps>=self.limits.steps:
             raise PixelError("service","Compilation instruction budget exceeded",code="service.steps")
+        if self.native is not None:
+            execution = self.native
+            isolated = self.resident and request.get('incremental', True) is False
+            if isolated:
+                from .native_session import NativeSessionExecution
+                execution = NativeSessionExecution(self.native.executable)
+                execution.profile_memory = self.native.profile_memory
+            try:
+                events=execution.execute(text,root=root,steps=self.limits.steps-self.work_steps,
+                    output_chars=self.limits.output_chars,file_bytes=self.limits.file_bytes,
+                    cancelled=cancelled,deadline=deadline)
+                if self.resident:
+                    if cancelled() or time.monotonic()>=deadline:
+                        execution.close()
+                        code='service.cancelled' if cancelled() else 'service.timeout'
+                        raise PixelError('service','Compilation interrupted before response acceptance',code=code)
+                    if (not events or not isinstance(events[-1],dict)
+                        or events[-1].get('kind')!='compiler-session'):
+                        execution.close()
+                        raise PixelError('service','Missing compiler session statistics',code='service.invalid-response')
+                    stats=events.pop()
+                    names=('bindingHits','boundDeclarations','typeHits','typedDeclarations','parsed','parseHits','checkedFunctions','semanticHits','revision','retainedNodes','irHits','irRelocated','irNodes')
+                    if any(type(stats.get(name)) is not int or stats[name]<0 for name in names):
+                        execution.close()
+                        raise PixelError('service','Invalid compiler session statistics',code='service.invalid-response')
+                    self.parsed_modules+=stats['parsed']; self.parse_hits+=stats['parseHits']
+                    self.binding_hits+=stats['bindingHits']; self.bound_declarations+=stats['boundDeclarations']
+                    self.type_hits+=stats['typeHits']; self.typed_declarations+=stats['typedDeclarations']
+                    self.semantic_checked+=stats['checkedFunctions']; self.semantic_hits+=stats['semanticHits']
+                    if not isolated:
+                        self.session_revision=stats['revision']; self.session_nodes=stats['retainedNodes']
+                        self.ir_nodes=stats['irNodes']
+                    self.ir_hits+=stats['irHits']; self.ir_relocated+=stats['irRelocated']
+                check_native_output(events)
+                return events
+            finally:
+                self.work_steps+=execution.steps
+                if isolated:
+                    execution.close()
+                if not isolated and self.resident and execution.process is None:
+                    self.session_revision=0; self.session_nodes=0; self.ir_nodes=0
         vm=self.vm
         vm.restore_checkpoint(self.initial)
         vm.max_steps=max(1,self.limits.steps-self.work_steps)
         vm.input_text=text
-        vm.file_access=FileAccess(read_root=root,write_root=root,budget=self.limits.file_bytes)
+        vm.file_access=FileAccess(read_root=root,write_root=root,budget=self.limits.file_bytes,
+                                  record=False,limit_total=True)
         try:
             while not vm.halted:
                 if vm.steps % 1000 == 0:
@@ -156,54 +189,16 @@ class CompilerService:
                 raise PixelError('service','Compilation cancelled',code='service.cancelled')
             if time.monotonic()>=deadline:
                 raise PixelError('service','Compilation deadline exceeded',code='service.timeout')
+            check_native_output(vm.output)
             return vm.output
         finally:
             self.work_steps += vm.steps
-
-    def _prepare(self, files, root, cancelled, deadline):
-        paths={}
-        self.source_info={}
-        for index, (path, text) in enumerate(files.items()):
-            key=hashlib.sha256(json.dumps([self.compiler_sha256,path,text],ensure_ascii=False).encode()).hexdigest()
-            encoded=self.parses.pop(key,None)
-            if encoded is None:
-                events=self._execute(dict(operation="parse-stream",source=path,text=text),root,cancelled,deadline)
-                parsed=read_parsed(events[:-1])
-                parsed["info"]=events[-1]
-                encoded=json.dumps(parsed,ensure_ascii=False).encode()
-                self.parsed_modules+=1
-                if len(encoded)<=32_000_000:
-                    while self.parses and (self.parse_bytes+len(encoded)>32_000_000 or len(self.parses)>=128):
-                        _, old=self.parses.popitem(last=False); self.parse_bytes-=len(old)
-                    self.parses[key]=encoded; self.parse_bytes+=len(encoded)
-            else:
-                self.parses[key]=encoded
-                parsed=json.loads(encoded)
-                self.parse_hits+=1
-            self.source_info[path]=parsed["info"]
-            paths[path]=stage_parsed(root,str(index),parsed)
-        return paths
-
-    def _selected_modules(self, files, entry):
-        if any(posixpath.normpath(path)!=path for path in files):
-            return None,None
-        previous=self.analysis
-        hashes={p:hashlib.sha256(t.encode()).hexdigest() for p,t in files.items()}
-        current=dict(entry=entry,hashes=hashes,info=self.source_info)
-        if previous is None or previous['entry']!=entry:
-            return set(files),current
-        changed={p for p in hashes.keys()|previous['hashes'].keys() if hashes.get(p)!=previous['hashes'].get(p)}
-        old=previous['info']; new=current['info']
-        interfaces={p for p in new.keys()|old.keys() if new.get(p,{}).get('interface')!=old.get(p,{}).get('interface')}
-        reverse={}
-        for graph in (old,new):
-            for path,info in graph.items():
-                for target in info['imports']: reverse.setdefault(target,set()).add(path)
-        pending=list(interfaces); invalid=set(interfaces)
-        while pending:
-            for path in reverse.get(pending.pop(),()):
-                if path not in invalid: invalid.add(path); pending.append(path)
-        return (changed|invalid)&files.keys(),current
+            # Printed events are materialized values, independent of the heap.
+            # Release request state before decoding those events into another
+            # compiler-sized object graph, including on cancellation/failure.
+            vm.restore_checkpoint(self.initial)
+            vm.input_text = ""
+            vm.file_access = None
 
     def request(self, request, *, cancelled=lambda: False):
         start=time.monotonic()
@@ -212,8 +207,12 @@ class CompilerService:
         self.parsed_modules=0
         self.ir_hits=0
         self.ir_relocated=0
-        analysis=None
-        selected=None
+        self.binding_hits=0
+        self.bound_declarations=0
+        self.type_hits=0
+        self.typed_declarations=0
+        self.semantic_hits=0
+        self.semantic_checked=0
         artifact_key=None
         response={'version':PROTOCOL_VERSION,'id':None,'revision':None,
                   'compilerSha256':self.compiler_sha256,'diagnostics':[]}
@@ -224,14 +223,19 @@ class CompilerService:
             if type(request.get('version')) is not int or request['version']!=PROTOCOL_VERSION:
                 raise ValueError('Unsupported compiler protocol version')
             operation=request.get('operation')
-            if type(request.get('reuseIR',True)) is not bool:
-                raise ValueError('reuseIR must be a boolean')
-            if operation not in ('check','compile','pixels','export-png','compile-png','recover-png','module-info','debug-compile','debug-pixels','export-debug-png','inspect-ir','debug-bundle'):
+            if 'reuseSemantic' in request or 'reuseIR' in request:
+                raise ValueError('Per-stage cache switches were removed; use incremental to control session reuse')
+            if type(request.get('incremental',True)) is not bool:
+                raise ValueError('incremental must be a boolean')
+            if operation not in ('check','compile','compile-pixels','recover-pixels','export-pixel-png','normalize-pixels','pixels','export-png','compile-png','recover-png','module-info','debug-compile','debug-pixels','export-debug-png','inspect-ir','debug-bundle','native-graphs','editor-index','format'):
                 raise ValueError('Unknown compiler operation')
             source=request.get('entry','main.pxl')
             if not isinstance(source,str):
                 raise ValueError('entry must be a string')
-            if operation=='debug-bundle' and request.get('incremental',True) and request.get('reuseArtifacts',True):
+            if 'entryFunction' in request:
+                if operation != 'compile' or not isinstance(request['entryFunction'], str) or not request['entryFunction']:
+                    raise ValueError('entryFunction requires a nonempty function name and the compile operation')
+            if operation in ('debug-compile','debug-bundle') and request.get('incremental',True) and request.get('reuseArtifacts',True):
                 # Validate before canonical JSON encoding: JSON coerces integer map
                 # keys to strings, which must never let malformed inputs hit a cache.
                 files=request.get('files')
@@ -253,7 +257,21 @@ class CompilerService:
             with TemporaryDirectory(prefix='pixellang-service-') as directory:
                 root=Path(directory)
                 args=dict(source=source,text='')
-                if operation in ('compile-png','recover-png'):
+                if self.resident:args['incremental']=request.get('incremental',True)
+                if 'entryFunction' in request: args['entryFunction']=request['entryFunction']
+                if operation in ('compile-pixels','recover-pixels','export-pixel-png','normalize-pixels'):
+                    document=request.get('document')
+                    if not isinstance(document,dict):
+                        raise ValueError('document must be a pixel document object')
+                    encoded=json.dumps(document,ensure_ascii=False,allow_nan=False).encode('utf-8')
+                    if len(encoded)>self.limits.file_bytes:
+                        raise ValueError('Pixel document exceeds the file budget')
+                    args.update(operation={'compile-pixels':'pixel-document-bytecode-stream',
+                                           'recover-pixels':'pixel-document-source',
+                                           'export-pixel-png':'pixel-document-png-file',
+                                           'normalize-pixels':'pixel-document-normalize'}[operation],native=document)
+                    if operation=='export-pixel-png': args.update(file='output.png',scale=request.get('scale',8))
+                elif operation in ('compile-png','recover-png'):
                     image=request.get('image')
                     if not isinstance(image,bytes) or len(image)>self.limits.file_bytes:
                         raise ValueError('image must be PNG bytes within the file budget')
@@ -267,31 +285,31 @@ class CompilerService:
                     if len(files)>128:
                         raise ValueError('Project exceeds 128 files')
                     args['files']=files
-                    if operation!='module-info' and request.get('incremental',True):
-                        args['parsedFiles']=self._prepare(files,root,cancelled,start+self.limits.seconds)
-                        if operation=='check':
-                            selected,analysis=self._selected_modules(files,source)
-                            if selected is not None:
-                                args['checkModules']=sorted(selected)
+                    if operation=='editor-index':
+                        editor_roots=request.get('editorRoots', sorted(files))
+                        if (not isinstance(editor_roots,list) or len(editor_roots)>128
+                            or not all(isinstance(path,str) and path in files for path in editor_roots)):
+                            raise ValueError('editorRoots must list supplied source paths')
+                        args['editorRoots']=sorted(set(editor_roots))
                     args['operation']={'check':'check-summary','compile':'bytecode-stream',
-                                       'pixels':'pixels','export-png':'png-file','module-info':'parse-stream','debug-compile':'studio-bytecode-stream','debug-pixels':'studio-pixels','export-debug-png':'studio-png-file','inspect-ir':'ir','debug-bundle':'studio-bundle'}[operation]
+                                       'pixels':'pixels','export-png':'png-file','module-info':'parse-stream','debug-compile':'studio-bytecode-stream','debug-pixels':'studio-pixels','export-debug-png':'studio-png-file','inspect-ir':'ir','debug-bundle':'studio-bundle','native-graphs':'native-graphs','editor-index':'editor-index','format':'format'}[operation]
                     if operation=='debug-bundle':
                         if type(request.get('includeIR',False)) is not bool or type(request.get('includePNG',False)) is not bool:
                             raise ValueError('includeIR and includePNG must be booleans')
                         args['includeIR']=request.get('includeIR',False)
                         if request.get('includePNG',False):
                             args.update(file='output.png',scale=request.get('scale',8))
-                    if operation=='module-info':
+                    if operation in ('module-info','format'):
+                        if source not in files: raise ValueError('Entry must name a supplied source file')
                         args['text']=files[source]
+                        if operation=='format': del args['files']
                     if operation in ('export-png','export-debug-png'):
                         args.update(file='output.png',scale=request.get('scale',4))
-                if (operation in ('compile','debug-compile','inspect-ir','debug-bundle')
-                    and request.get('incremental',True) and request.get('reuseIR',True)):
-                    cache_request=self._stage_ir_cache(files,source,root)
-                    if cache_request is not None:args['irCache']=cache_request
                 events=self._execute(args,root,cancelled,start+self.limits.seconds)
-                if operation in ('debug-pixels','inspect-ir','recover-png'):
+                if operation in ('inspect-ir','recover-png','recover-pixels','editor-index','format'):
                     events=[json.loads(events[0])]
+                if operation=='debug-pixels':
+                    events=[read_debug_document(events[0])]
                 if operation=='debug-bundle':
                     end=next((i+1 for i,event in enumerate(events) if isinstance(event,str) and json.loads(event).get('kind')=='end'),None)
                     if end is None:raise ValueError('Missing debug bundle bytecode stream end')
@@ -300,7 +318,7 @@ class CompilerService:
                     if not built['diagnostics']:
                         expected=end+2+int(request.get('includeIR',False))
                         if len(events)!=expected:raise ValueError('Invalid debug bundle event count')
-                        mapped=json.loads(events[end+1])
+                        mapped=read_debug_document(events[end+1])
                         built['diagnostics']=mapped['diagnostics']
                         if not built['diagnostics']:
                             result=dict(bytecode=built['bytecode'],debug=events[end],document=mapped['source'])
@@ -309,8 +327,8 @@ class CompilerService:
                 elif operation=='module-info':
                     parsed=read_parsed(events[:-1])
                     built={'diagnostics':parsed['syntax']['diagnostics']}
-                    result={'imports':events[-1]['imports']}
-                elif operation in ('compile','compile-png','debug-compile'):
+                    result={key:events[-1][key] for key in ('imports','tests','hasMain')}
+                elif operation in ('compile','compile-png','compile-pixels','debug-compile'):
                     built=read_bytecode_stream(events[:-1] if operation=='debug-compile' else events)
                     result={'bytecode':built['bytecode']} if not built['diagnostics'] else None
                     if operation=='debug-compile' and result is not None:
@@ -319,30 +337,17 @@ class CompilerService:
                     if len(events)!=1 or not isinstance(events[0],dict):
                         raise ValueError('Invalid compiler response')
                     built=events[0]
-                    result=({'document':built['source']} if operation in ('pixels','debug-pixels') and not built['diagnostics']
-                            else {'image':(root/'output.png').read_bytes()} if operation in ('export-png','export-debug-png') and not built['diagnostics']
+                    result=({'index':built} if operation=='editor-index' else {'projection':built['projection']} if operation=='native-graphs' else {'document':built['source']} if operation in ('pixels','debug-pixels','normalize-pixels') and not built['diagnostics']
+                            else {'image':(root/'output.png').read_bytes()} if operation in ('export-png','export-debug-png','export-pixel-png') and not built['diagnostics']
+                            else {'text':built['text']} if operation=='format' and not built['diagnostics']
                             else {'ir':built['ir']} if operation=='inspect-ir' and not built['diagnostics']
-                            else {'files':built['files'],'entry':built['entry']} if operation=='recover-png' and not built['diagnostics'] else {})
+                            else {'files':built['files'],'entry':built['entry']} if operation in ('recover-png','recover-pixels') and not built['diagnostics'] else {})
                 if operation=='check':
-                    if analysis is not None and not built['globalFailure']:
-                        retained=[d for d in (self.analysis or {}).get('diagnostics',[]) if d['source'] not in selected and d['source'] in files]
-                        built['diagnostics']=retained+built['diagnostics']
-                        built['diagnostics'].sort(key=lambda d:(d['source'],d['start'],d['phase'],d['message']))
-                        analysis['diagnostics']=built['diagnostics']
-                        self.analysis=analysis
-                    else:
-                        self.analysis=None
-                        built['diagnostics'].sort(key=lambda d:(d['source'],d['start'],d['phase'],d['message']))
+                    built['diagnostics'].sort(key=lambda d:(d['source'],d['start'],d['phase'],d['message']))
                     result={'checkedModules':built['checkedModules'],'globalFailure':built['globalFailure']}
                 response['diagnostics']=built['diagnostics']
-                response['status']='diagnostics' if built['diagnostics'] else 'ok'
+                response['status']='diagnostics' if built['diagnostics'] and operation!='editor-index' else 'ok'
                 response['result']=result
-                if response['status']=='ok' and 'irCache' in args:
-                    retained=self._retain_ir_cache(root)
-                    if cancelled():raise PixelError('service','Compilation cancelled',code='service.cancelled')
-                    if time.monotonic()>=start+self.limits.seconds:raise PixelError('service','Compilation deadline exceeded',code='service.timeout')
-                    if retained is not None:
-                        self.ir_cache,self.ir_hits,self.ir_relocated=retained
         except PixelError as error:
             response.pop('result',None)
             response.update(status={'service.cancelled':'cancelled','service.timeout':'timeout'}.get(error.code,'error'),error=error.to_dict())
@@ -358,8 +363,12 @@ class CompilerService:
 
     def _finish(self,response,start,artifact_hit=False):
         response['metrics']={'seconds':time.monotonic()-start,'steps':self.work_steps,
-                             'parseHits':self.parse_hits,'parsedModules':self.parsed_modules,'parseCacheBytes':self.parse_bytes,
+                             'parseHits':self.parse_hits,'parsedModules':self.parsed_modules,
                              'artifactCacheHit':artifact_hit,'artifactCacheBytes':self.artifact_bytes}
+        response['metrics'].update(bindingCacheHits=self.binding_hits,bindingCheckedDeclarations=self.bound_declarations,
+            typeCacheHits=self.type_hits,typeCheckedDeclarations=self.typed_declarations)
+        response['metrics'].update(semanticCacheHits=self.semantic_hits,semanticCheckedFunctions=self.semantic_checked,
+            sessionRevision=self.session_revision,residentCacheNodes=self.session_nodes)
         response['metrics'].update(irCacheHits=self.ir_hits,irCacheRelocated=self.ir_relocated,
-            irCacheBytes=sum(map(len,self.ir_cache.values())) if self.ir_cache else 0)
+            residentIRNodes=self.ir_nodes)
         return response

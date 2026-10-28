@@ -1,0 +1,99 @@
+import "model.pxl" as model
+
+// Dependency edges retain source AST and resolved binding identities. Expression
+// syntax is never translated into a second port-wiring language.
+record Context { module: int, syntax: model.Parsed, references: map[string, int], roots: map[string, bool], names: map[string, int], plan: model.FlowShape }
+
+fn Report(index: int, message: string, bound: model.BoundProject, c: inout Context) {
+    let node = c.syntax.nodes[index]
+    var line = 1
+    var column = 1
+    for token in c.syntax.tokens { if token.start >= node.start { line = token.line; column = token.column; break } }
+    c.plan.diagnostics.append(model.Diagnostic{source: bound.project.modules[c.module].path, phase: "flow", message, start: node.start, end: node.end, line, column})
+}
+
+fn Dependencies(index: int, target: int, c: inout Context) {
+    if c.references.has(string(index)) {
+        let root = c.references[string(index)]
+        if c.roots.has(string(root)) {
+            c.plan.dependencies.append(model.FlowDependency{source: root, target, reference: index})
+        }
+    }
+    for child in c.syntax.nodes[index].children { Dependencies(child, target, &c) }
+}
+
+export fn Analyze(module: int, declaration: int, bound: model.BoundProject) -> model.FlowShape {
+    let syntax = bound.project.modules[module].syntax
+    let plan = model.FlowShape{declaration, values: [], dependencies: [], instances: [], states: [], updates: [], output: -1, order: [], diagnostics: bound.diagnostics}
+    if len(plan.diagnostics) > 0 { return plan }
+    var c = Context{module, syntax, references: map[string, int]{}, roots: map[string, bool]{}, names: map[string, int]{}, plan}
+    let node = syntax.nodes[declaration]
+    if node.kind != "flow" { Report(declaration, "Expected a flow declaration", bound, &c); return c.plan }
+    for reference in bound.references {
+        if reference.module != module { continue }
+        let symbol = bound.symbols[reference.symbol]
+        if symbol.module == module { c.references[string(reference.node)] = symbol.node }
+    }
+    var body = -1
+    for child in node.children {
+        let item = syntax.nodes[child]
+        if item.kind == "parameter" || item.kind == "initial_parameter" { c.roots[string(child)] = true; c.names[item.text] = child }
+        if item.kind == "flow_body" { body = child }
+    }
+    if body < 0 { Report(declaration, "Missing flow body", bound, &c); return c.plan }
+    for child in syntax.nodes[body].children {
+        let item = syntax.nodes[child]
+        if item.kind == "flow_value" || item.kind == "flow_instance" || item.kind == "flow_state" {
+            c.names[item.text] = child
+            c.roots[string(child)] = true
+        }
+        if item.kind == "flow_value" { c.plan.values.append(child) }
+        if item.kind == "flow_instance" { c.plan.instances.append(child) }
+        if item.kind == "flow_state" { c.plan.states.append(child) }
+        if item.kind == "flow_next" { c.plan.updates.append(child) }
+        if item.kind == "flow_output" {
+            if c.plan.output >= 0 { Report(child, "A flow requires exactly one output", bound, &c) }
+            c.plan.output = child
+        }
+    }
+    if c.plan.output < 0 { Report(declaration, "A flow requires exactly one output", bound, &c) }
+    var updated: map[string, bool] = map[string, bool]{}
+    for update in c.plan.updates {
+        let item = syntax.nodes[update]
+        if !c.names.has(item.text) || syntax.nodes[c.names[item.text]].kind != "flow_state" {
+            Report(update, "Next target must be a declared state cell", bound, &c)
+        }
+        if updated.has(item.text) { Report(update, "Multiple next values for state: " + item.text, bound, &c) }
+        updated[item.text] = true
+    }
+    for child in syntax.nodes[body].children {
+        let item = syntax.nodes[child]
+        if item.kind == "flow_value" || item.kind == "flow_next" || item.kind == "flow_output" {
+            Dependencies(item.children[len(item.children) - 1], child, &c)
+        }
+    }
+    if len(c.plan.diagnostics) > 0 { return c.plan }
+    var pending: map[string, [int]] = map[string, [int]]{}
+    for value in c.plan.values { pending[string(value)] = [] }
+    for edge in c.plan.dependencies {
+        if pending.has(string(edge.target)) && pending.has(string(edge.source)) {
+            pending[string(edge.target)].append(edge.source)
+        }
+    }
+    var completed: map[string, bool] = map[string, bool]{}
+    while len(c.plan.order) < len(c.plan.values) {
+        var selected = -1
+        for value in c.plan.values {
+            if completed.has(string(value)) { continue }
+            var ready = true
+            for dependency in pending[string(value)] {
+                if !completed.has(string(dependency)) { ready = false; break }
+            }
+            if ready { selected = value; break }
+        }
+        if selected < 0 { Report(declaration, "Combinational cycle in flow; feedback requires a state cell", bound, &c); return c.plan }
+        completed[string(selected)] = true
+        c.plan.order.append(selected)
+    }
+    return c.plan
+}

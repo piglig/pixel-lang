@@ -7,19 +7,26 @@ from unittest.mock import patch
 
 from PIL import Image
 
+from tests.native_compiler import compile_native_sources
 from pixellang.bootstrap import compile_with, read_bytecode_stream
 from pixellang.picture import decode_picture
-from pixellang.project import compile_project
 from pixellang.vm import VM
+from pixellang.model import PixelError
 from tests.selfhost_runtime import SELFHOST_HEAP_LIMITS
 
 ROOT = Path(__file__).resolve().parents[1]
 DRIVER = '''import "picture.pxl" as picture
 import "spatial_layout.pxl" as layout
-record Request { root: layout.Source, modules: map[layout.Source], scale: int }
-fn main() {
-    let request = jsonDecode[Request](input())
-    print(picture.Encode(request.root, request.modules, "main.pxl", request.scale))
+record Request { root: layout.Source, modules: map[string, layout.Source], scale: int }
+effect fn main() {
+    match jsonDecode::[Request](input()) {
+        .Ok(request) => {
+            match picture.Encode(request.root, request.modules, "main.pxl", request.scale) {
+                .Ok(bytes) => print(bytes), .Err(error) => print(error)
+            }
+        },
+        .Err(error) => print(error)
+    }
 }'''
 
 
@@ -27,9 +34,16 @@ class SelfHostedPictureTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.files = {p.name: p.read_text() for p in (ROOT / 'selfhost').glob('*.pxl')}
-        cls.compiler = compile_project(cls.files)[1].bytecode
+        cls.compiler = compile_native_sources(cls.files)
         cls.driver_files = dict(cls.files, **{'main.pxl': DRIVER})
-        cls.encoder = compile_project(cls.driver_files)[1].bytecode
+        cls.encoder = compile_native_sources(cls.driver_files)
+
+    def pixels(self, files):
+        result = VM(self.compiler, **SELFHOST_HEAP_LIMITS, input_text=json.dumps(dict(
+            source='main.pxl', text='', operation='pixels', files=files)),
+            max_steps=100_000_000, max_depth=1024).run()[0]
+        self.assertEqual(result['diagnostics'], [])
+        return result['source']
 
     def encode(self, document, encoder=None, scale=4):
         root = dict(document)
@@ -46,10 +60,7 @@ class SelfHostedPictureTests(unittest.TestCase):
         modules = root.pop('bundle')['modules']
         with patch('pixellang.text.parse_text', side_effect=AssertionError('host text')), patch(
             'pixellang.parser.parse', side_effect=AssertionError('host pixel')), patch(
-            'pixellang.spatial.analyze', side_effect=AssertionError('host spatial')), patch(
-            'pixellang.semantics.Checker.check', side_effect=AssertionError('host check')), patch(
-            'pixellang.backend.lower', side_effect=AssertionError('host lower')), patch(
-            'pixellang.backend.assemble', side_effect=AssertionError('host assembly')):
+            'pixellang.spatial.analyze', side_effect=AssertionError('host spatial')):
             events = VM(self.compiler, **SELFHOST_HEAP_LIMITS, input_text=json.dumps(dict(
                 source='program.png', text='', operation='pixel-bytecode-stream', document=root, modules=modules)),
                 max_steps=100000000, max_depth=1024).run()
@@ -60,43 +71,47 @@ class SelfHostedPictureTests(unittest.TestCase):
     def run_link_driver(self, body):
         files = dict(self.files)
         files['main.pxl'] = ('import "picture.pxl" as picture\n'
-                             'import "spatial_layout.pxl" as layout\nfn main() {\n' + body + '\n}')
-        code = compile_project(files)[1].bytecode
+                             'import "spatial_layout.pxl" as layout\n'
+                             'effect fn main() { match Run() { .Ok(value) => {}, .Err(error) => print(error) } }\n'
+                             'effect fn Run() -> Result[int, Error] {\n' + body + '\nreturn .Ok(0)\n}')
+        code = compile_native_sources(files)
         return VM(code, **SELFHOST_HEAP_LIMITS, max_steps=100000000).run()
 
     def test_link_chunks_exceed_generic_json_budget_without_raising_it(self):
-        output = self.run_link_driver('''let links: [layout.Link] = []
+        links = """var links: [layout.PixelLink] = []
     var i = 0
     while i < 14000 {
-        append(links, layout.Link{kind: "next", from: [i, 0], to: [i + 1, 0]})
+        links.append(layout.PixelLink{kind: "next", from: [i, 0], to: [i + 1, 0]})
         i += 1
     }
-    var rejected = false
-    try { let oversized = jsonFrom(links) }
-    catch error { rejected = error.message == "JSON structure budget exceeded" }
-    print(rejected)
-    let chunks = picture.PackLinks(links)
-    let transported = jsonDecode[[string]](jsonStringify(jsonFrom(chunks)))
-    let restored = picture.UnpackLinks(transported)
+"""
+        # JSON resource exhaustion is a terminal VM fault, not a catchable Result.
+        with self.assertRaisesRegex(PixelError, 'JSON structure budget exceeded'):
+            self.run_link_driver(links + 'print(jsonFrom(links))')
+        output = self.run_link_driver(links + """
+    let chunks = picture.PackLinks(links)?
+    let transported = jsonDecode::[[string]](jsonStringify(jsonFrom(chunks)))?
+    let restored = picture.UnpackLinks(transported)?
     assert(len(restored) == len(links))
     for index, link in restored {
         assert(link.kind == links[index].kind && link.from[0] == index && link.from[1] == 0 && link.to[0] == index + 1 && link.to[1] == 0)
     }
-    print(len(restored))''')
-        self.assertEqual(output, [True, 14000])
+    print(len(restored))""")
+        self.assertEqual(output, [14000])
 
     def test_link_chunks_reject_malformed_and_oversized_payloads(self):
         output = self.run_link_driver('''let invalid = ["", "0", "zz", "0000"]
     for chunk in invalid {
-        var rejected = false
-        try { let links = picture.UnpackLinks([chunk]) }
-        catch error { rejected = true }
-        print(rejected)
+        match picture.UnpackLinks([chunk]) {
+            .Ok(links) => print(false), .Err(error) => print(true)
+        }
     }
     let oversized = arrayRepeat(["00"], 1955)
-    try { let links = picture.UnpackLinks(oversized); print(false) }
-    catch error { print(error.message == "Picture exceeds link chunk limit") }
-    print(len(picture.UnpackLinks(picture.PackLinks([]))))''')
+    match picture.UnpackLinks(oversized) {
+        .Ok(links) => print(false),
+        .Err(error) => print(error.message == "Picture exceeds link chunk limit")
+    }
+    print(len(picture.UnpackLinks(picture.PackLinks([])?)?))''')
         self.assertEqual(output, [True, True, True, True, True, 0])
 
     def test_link_chunks_enforce_expansion_count_and_zlib_boundaries(self):
@@ -111,16 +126,15 @@ class SelfHostedPictureTests(unittest.TestCase):
         invalid = json.dumps([data.hex() for data in payloads])
         output = self.run_link_driver('let invalid = ' + invalid + '''
     for chunk in invalid {
-        var rejected = false
-        try { let links = picture.UnpackLinks([chunk]) }
-        catch error { rejected = true }
-        print(rejected)
+        match picture.UnpackLinks([chunk]) {
+            .Ok(links) => print(false), .Err(error) => print(true)
+        }
     }''')
         self.assertEqual(output, [True] * len(payloads))
 
     def test_picture_pixels_survive_metadata_free_resave_and_execute(self):
-        source = compile_project({'main.pxl': 'import "lib.pxl" as lib\nfn main() { print(lib.twice(21)) }',
-                                  'lib.pxl': 'export fn twice(n: int) -> int = n * 2'})[0]
+        source = self.pixels({'main.pxl': 'import "lib.pxl" as lib\neffect fn main() { print(lib.twice(21)) }',
+                                  'lib.pxl': 'export fn twice(n: int) -> int = n * 2'})
         data = self.encode(source)
         with Image.open(io.BytesIO(data)) as image:
             decoded = decode_picture(image)
@@ -133,7 +147,7 @@ class SelfHostedPictureTests(unittest.TestCase):
         self.assertEqual(self.execute(decoded), [42])
 
     def test_bulk_array_builtins_survive_semantic_pixels(self):
-        document = compile_project({'main.pxl': 'fn main() { let a = arrayRepeat([1, 2], 2); extend(a, a); print(a) }'})[0]
+        document = self.pixels({'main.pxl': 'effect fn main() { var a = arrayRepeat([1, 2], 2); a.extend(a); print(a) }'})
         with Image.open(io.BytesIO(self.encode(document))) as image:
             decoded = decode_picture(image)
         self.assertEqual(self.execute(decoded), [[1, 2, 1, 2, 1, 2, 1, 2]])
@@ -141,9 +155,9 @@ class SelfHostedPictureTests(unittest.TestCase):
     def test_pixellang_compiles_picture_encoder(self):
         # Only pass reachable encoder modules to avoid unrelated compiler source roots.
         files = {name: self.driver_files[name] for name in (
-            'main.pxl', 'picture.pxl', 'picture_colors.pxl', 'picture_layout.pxl', 'png.pxl', 'spatial_layout.pxl', 'pixel_decode.pxl', 'pixel_tokens.pxl')}
+            'main.pxl', 'picture.pxl', 'picture_colors.pxl', 'picture_layout.pxl', 'png.pxl', 'spatial_layout.pxl', 'pixel_decode.pxl', 'pixel_tokens.pxl', 'failures.pxl')}
         encoder, _ = compile_with(self.compiler, files)
-        source = compile_project({'main.pxl': 'fn main() { print(42) }'})[0]
+        source = self.pixels({'main.pxl': 'effect fn main() { print(42) }'})
         with Image.open(io.BytesIO(self.encode(source, encoder))) as image:
             decoded = decode_picture(image)
         self.assertEqual(self.execute(decoded), [42])
@@ -153,10 +167,7 @@ class SelfHostedPictureTests(unittest.TestCase):
             'pixellang.picture.decode_picture', side_effect=AssertionError('host picture reader')), patch(
             'pixellang.text.parse_text', side_effect=AssertionError('host text')), patch(
             'pixellang.parser.parse', side_effect=AssertionError('host pixel')), patch(
-            'pixellang.spatial.analyze', side_effect=AssertionError('host spatial')), patch(
-            'pixellang.semantics.Checker.check', side_effect=AssertionError('host check')), patch(
-            'pixellang.backend.lower', side_effect=AssertionError('host lower')), patch(
-            'pixellang.backend.assemble', side_effect=AssertionError('host assembly')):
+            'pixellang.spatial.analyze', side_effect=AssertionError('host spatial')):
             events = VM(self.compiler, **SELFHOST_HEAP_LIMITS, file_access=access,
                         input_text=json.dumps(dict(source=path, text='', operation='png-file-bytecode-stream', file=path)),
                         max_steps=100000000, max_depth=1024).run()
@@ -165,8 +176,8 @@ class SelfHostedPictureTests(unittest.TestCase):
     def test_native_picture_file_compilation_and_replay(self):
         import tempfile
         from pixellang.fileaccess import FileAccess
-        source = compile_project({'main.pxl': 'import "lib.pxl" as lib\nfn main() { print(lib.twice(21)) }',
-                                  'lib.pxl': 'export fn twice(n: int) -> int = n * 2'})[0]
+        source = self.pixels({'main.pxl': 'import "lib.pxl" as lib\neffect fn main() { print(lib.twice(21)) }',
+                                  'lib.pxl': 'export fn twice(n: int) -> int = n * 2'})
         data = self.encode(source)
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, 'program.png').write_bytes(data)
@@ -181,7 +192,7 @@ class SelfHostedPictureTests(unittest.TestCase):
         import tempfile
         from pixellang.fileaccess import FileAccess
         from pixellang.picture import encode_picture
-        source = compile_project({'main.pxl': 'fn main() { print(42) }'})[0]
+        source = self.pixels({'main.pxl': 'effect fn main() { print(42) }'})
         image = encode_picture(source, scale=4)
         # Only fixture construction uses the independent host image implementation.
         import struct
@@ -216,31 +227,32 @@ class SelfHostedPictureTests(unittest.TestCase):
         from pixellang.picture import encode_picture
         files = dict(self.files)
         files['main.pxl'] = '''import "picture_reader.pxl" as reader
-fn main() {
-    let document = reader.Decode(jsonDecode[[int]](input()), 1000000)
+effect fn main() { match Read() { .Ok(value) => {}, .Err(error) => print(error) } }
+effect fn Read() -> Result[int, Error] {
+    let document = reader.Decode(jsonDecode::[[int]](input())?, 1000000)?
     print(document.root)
     print(document.modules)
+    return .Ok(0)
 }'''
         reader, _ = compile_with(self.compiler, files)
-        source = compile_project({'main.pxl': 'fn main() { print(42) }'})[0]
+        source = self.pixels({'main.pxl': 'effect fn main() { print(42) }'})
         buffer = io.BytesIO()
         encode_picture(source, scale=4).save(buffer, format='PNG')
         with patch('PIL.Image.open', side_effect=AssertionError('host image')), patch(
             'pixellang.picture.decode_picture', side_effect=AssertionError('host picture')):
             output = VM(reader, **SELFHOST_HEAP_LIMITS, input_text=json.dumps(list(buffer.getvalue())),
                         max_steps=100000000, max_depth=1024).run()
-        decoded = dict(output[0], bundle=dict(version='0.8', entry='main.pxl', modules=output[1]))
+        decoded = dict(output[0], bundle=dict(version='0.9', entry='main.pxl', modules=output[1]))
         self.assertEqual(self.execute(decoded), [42])
 
     def test_text_to_png_file_to_execution_uses_only_pixellang_frontends(self):
         import tempfile
         from pixellang.fileaccess import FileAccess
-        files = {'main.pxl': 'import "lib.pxl" as lib\nfn main() { print(lib.twice(21)) }',
+        files = {'main.pxl': 'import "lib.pxl" as lib\neffect fn main() { print(lib.twice(21)) }',
                  'lib.pxl': 'export fn twice(n: int) -> int = n * 2'}
         with tempfile.TemporaryDirectory() as directory:
             access = FileAccess(read_root=directory, write_root=directory)
             with patch('pixellang.text.parse_text', side_effect=AssertionError('host text')), patch(
-                'pixellang.semantics.Checker.check', side_effect=AssertionError('host checker')), patch(
                 'pixellang.picture.encode_picture', side_effect=AssertionError('host picture')), patch(
                 'PIL.Image.Image.save', side_effect=AssertionError('host PNG encoder')):
                 output = VM(self.compiler, **SELFHOST_HEAP_LIMITS, file_access=access,
@@ -259,7 +271,7 @@ fn main() {
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory, 'program.png')
             path.write_bytes(b'existing')
-            for text, scale in (('fn main() { print(missing) }', 4), ('fn main() { print(42) }', 3)):
+            for text, scale in (('effect fn main() { print(missing) }', 4), ('effect fn main() { print(42) }', 3)):
                 output = VM(self.compiler, **SELFHOST_HEAP_LIMITS,
                             file_access=FileAccess(write_root=directory),
                             input_text=json.dumps(dict(source='main.pxl', text='', files={'main.pxl': text},

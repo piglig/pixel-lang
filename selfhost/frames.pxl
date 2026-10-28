@@ -1,88 +1,105 @@
 import "model.pxl" as model
 import "types.pxl" as types
+import "frame_cache.pxl" as cache
 
-record Index { signatures: map[int], bindings: map[[int]], captures: map[[int]] }
+record Index { signatures: map[string, int], bindings: map[string, [int]] }
 fn Key(module: int, node: int) -> string = string(module) + ":" + string(node)
 
-fn Report(result: model.FramePlan, resolved: model.ResolvedTypes, frame: model.FunctionFrame, message: string) {
+fn Report(frame: model.FunctionFrame, message: string, resolved: model.ResolvedTypes, result: inout model.FramePlan) {
     let source = resolved.bound.project.modules[frame.module]
     let node = source.syntax.nodes[frame.node]
     var line = 1
     var column = 1
     for token in source.syntax.tokens { if token.start >= node.start { line = token.line; column = token.column; break } }
-    append(result.diagnostics, model.Diagnostic{source: source.path, phase: "frames", message, start: node.start, end: node.end, line, column})
+    result.diagnostics.append(model.Diagnostic{source: source.path, phase: "frames", message, start: node.start, end: node.end, line, column})
 }
-fn Add(result: model.FramePlan, resolved: model.ResolvedTypes, frame: model.FunctionFrame, symbol: int, typeId: int, kind: string, seen: map[bool]) {
-    if !types.Concrete(resolved, typeId, 0) { Report(result, resolved, frame, "Binding type is not concrete: " + resolved.bound.symbols[symbol].name); return }
+fn Add(symbol: int, typeId: int, kind: string, resolved: model.ResolvedTypes, result: inout model.FramePlan, frame: inout model.FunctionFrame, seen: inout map[string, bool]) {
+    if !types.Concrete(typeId, 0, resolved) { Report(frame, "Binding type is not concrete: " + resolved.bound.symbols[symbol].name, resolved, &result); return }
     let key = string(symbol)
-    if has(seen, key) { Report(result, resolved, frame, "Duplicate binding slot"); return }
+    if seen.has(key) { Report(frame, "Duplicate binding slot", resolved, &result); return }
     seen[key] = true
-    append(frame.slots, model.BindingSlot{symbol, typeId, kind, mutable: resolved.bound.symbols[symbol].mutable})
+    frame.slots.append(model.BindingSlot{symbol, typeId, kind, mutable: kind != "capture" && resolved.bound.symbols[symbol].mutable})
 }
-fn Layout(result: model.FramePlan, planned: model.ClosurePlan, owner: int, closure: int, module: int, node: int, typeId: int, captures: [model.CaptureSlot], indexData: Index) {
-    let resolved = planned.named.checked.resolved
+fn Layout(owner: int, closure: int, module: int, node: int, typeId: int, captures: [model.CaptureSlot], indexData: Index, result: inout model.FramePlan, planned: inout model.ClosurePlan, reuse: inout Option[cache.Reuse]) {
+    match reuse {
+        .Some(previous) => {
+            var query = previous
+            let found = cache.Take(owner, closure, module, node, typeId, &planned, &query)
+            reuse = .Some(query)
+            match found { .Some(frame) => { result.functions.append(frame); return }, .None => {} }
+        },
+        .None => {}
+    }
+    let diagnosticCount = len(result.diagnostics)
+
     let instance = planned.named.instances[owner]
-    let source = resolved.bound.symbols[instance.symbol]
-    let parameters = resolved.signatures[indexData.signatures[Key(source.module, source.node)]].parameters
+    let source = planned.named.checked.resolved.bound.symbols[instance.symbol]
+    let parameters = planned.named.checked.resolved.signatures[indexData.signatures[Key(source.module, source.node)]].parameters
     let bindings = indexData.bindings[Key(module, node)]
-    let seen = map[bool]{}
-    let frame = model.FunctionFrame{owner, closure, module, node, typeId, parameters: 0, captures: 0, slots: []}
-    let signature = resolved.types[typeId]
+    var seen: map[string, bool] = map[string, bool]{}
+    var frame: model.FunctionFrame = model.FunctionFrame{owner, closure, module, node, typeId, parameters: 0, captures: 0, slots: []}
+    let signature = planned.named.checked.resolved.types[typeId]
     // Parameter order follows declaration order in the binding arena.
     for index in bindings {
-        let symbol = resolved.bound.symbols[index]
+        let symbol = planned.named.checked.resolved.bound.symbols[index]
         if symbol.kind != "parameter" { continue }
-        let concrete = types.Substitute(resolved, symbol.typeId, parameters, instance.arguments)
-        if frame.parameters >= len(signature.arguments) - 1 { Report(result, resolved, frame, "Too many parameter bindings"); break }
-        if concrete != signature.arguments[frame.parameters] { Report(result, resolved, frame, "Parameter binding disagrees with function signature") }
-        Add(result, resolved, frame, index, concrete, "parameter", seen)
+        let concrete = types.Substitute(symbol.typeId, parameters, instance.arguments, &planned.named.checked.resolved)
+        if frame.parameters >= len(signature.arguments) - 1 { Report(frame, "Too many parameter bindings", planned.named.checked.resolved, &result); break }
+        var expected = signature.arguments[frame.parameters]
+        if planned.named.checked.resolved.types[expected].kind == "inout" { expected = planned.named.checked.resolved.types[expected].arguments[0] }
+        if concrete != expected { Report(frame, "Parameter binding disagrees with function signature", planned.named.checked.resolved, &result) }
+        Add(index, concrete, "parameter", planned.named.checked.resolved, &result, &frame, &seen)
         frame.parameters += 1
     }
-    if frame.parameters != len(signature.arguments) - 1 { Report(result, resolved, frame, "Parameter binding count disagrees with function signature") }
+    if frame.parameters != len(signature.arguments) - 1 { Report(frame, "Parameter binding count disagrees with function signature", planned.named.checked.resolved, &result) }
     for capture in captures {
-        Add(result, resolved, frame, capture.symbol, capture.typeId, "capture", seen)
+        Add(capture.symbol, capture.typeId, "capture", planned.named.checked.resolved, &result, &frame, &seen)
         frame.captures += 1
     }
     for index in bindings {
-        let symbol = resolved.bound.symbols[index]
-        if symbol.kind != "let" && symbol.kind != "var" && symbol.kind != "binding" && symbol.kind != "catch" && symbol.kind != "fn" { continue }
-        let concrete = types.Substitute(resolved, symbol.typeId, parameters, instance.arguments)
-        Add(result, resolved, frame, index, concrete, "local", seen)
+        let symbol = planned.named.checked.resolved.bound.symbols[index]
+        if symbol.kind != "let" && symbol.kind != "var" && symbol.kind != "binding" && symbol.kind != "flow_value" && symbol.kind != "flow_state" && symbol.kind != "initial_parameter" && !model.NamedCallable(symbol.kind) { continue }
+        let concrete = types.Substitute(symbol.typeId, parameters, instance.arguments, &planned.named.checked.resolved)
+        Add(index, concrete, "local", planned.named.checked.resolved, &result, &frame, &seen)
     }
-    append(result.functions, frame)
+    if len(result.diagnostics) == diagnosticCount {
+        match reuse {
+            .Some(previous) => { var query = previous; cache.Save(frame, planned, &query); reuse = .Some(query) },
+            .None => {}
+        }
+    }
+    result.functions.append(frame)
 }
-export fn Build(planned: model.ClosurePlan) -> model.FramePlan {
-    let result = model.FramePlan{functions: [], entry: planned.named.entry, diagnostics: slice(planned.diagnostics, 0, len(planned.diagnostics))}
+export fn Build(planned: inout model.ClosurePlan) -> model.FramePlan {
+    var reuse: Option[cache.Reuse] = .None
+    return BuildQueries(&planned, &reuse)
+}
+export fn BuildCached(planned: inout model.ClosurePlan, reuse: inout cache.Reuse) -> model.FramePlan {
+    var query: Option[cache.Reuse] = .Some(reuse)
+    let result = BuildQueries(&planned, &query)
+    match query { .Some(current) => { reuse = current }, .None => {} }
+    return result
+}
+fn BuildQueries(planned: inout model.ClosurePlan, reuse: inout Option[cache.Reuse]) -> model.FramePlan {
+    var result: model.FramePlan = model.FramePlan{functions: [], entry: planned.named.entry, diagnostics: planned.diagnostics}
     if len(result.diagnostics) > 0 { return result }
-    let resolved = planned.named.checked.resolved
+
     // Scope ownership distinguishes lambdas from their enclosing named function.
     // Preserve symbol-arena order within each frame for deterministic slot IDs.
-    let indexData = Index{signatures: map[int]{}, bindings: map[[int]]{}, captures: map[[int]]{}}
-    for index, signature in resolved.signatures {
+    var indexData: Index = Index{signatures: map[string, int]{}, bindings: map[string, [int]]{}}
+    for index, signature in planned.named.checked.resolved.signatures {
         let key = Key(signature.module, signature.node)
-        indexData.signatures[key] = index; indexData.bindings[key] = []; indexData.captures[key] = []
+        indexData.signatures[key] = index; indexData.bindings[key] = []
     }
-    for index, symbol in resolved.bound.symbols {
+    for index, symbol in planned.named.checked.resolved.bound.symbols {
         if symbol.module < 0 || symbol.scope < 0 { continue }
-        let key = Key(symbol.module, resolved.bound.scopes[symbol.scope].owner)
-        if has(indexData.bindings, key) { append(indexData.bindings[key], index) }
-    }
-    for index, capture in resolved.bound.captures {
-        let key = Key(capture.module, capture.function)
-        if has(indexData.captures, key) { append(indexData.captures[key], index) }
+        let key = Key(symbol.module, planned.named.checked.resolved.bound.scopes[symbol.scope].owner)
+        if indexData.bindings.has(key) { indexData.bindings[key].append(index) }
     }
     for owner, instance in planned.named.instances {
-        let symbol = resolved.bound.symbols[instance.symbol]
-        let captures: [model.CaptureSlot] = []
-        for captureIndex in indexData.captures[Key(symbol.module, symbol.node)] {
-            let capture = resolved.bound.captures[captureIndex]
-            // Named nested generic environments are not yet represented by the
-            // instance planner; unresolved captures fail rather than lose type data.
-            let captured = resolved.bound.symbols[capture.symbol]
-            append(captures, model.CaptureSlot{symbol: capture.symbol, typeId: captured.typeId, mutable: captured.mutable})
-        }
-        Layout(result, planned, owner, -1, symbol.module, symbol.node, instance.typeId, captures, indexData)
+        let symbol = planned.named.checked.resolved.bound.symbols[instance.symbol]
+        Layout(owner, -1, symbol.module, symbol.node, instance.typeId, [], indexData, &result, &planned, &reuse)
     }
-    for index, closure in planned.closures { Layout(result, planned, closure.owner, index, closure.module, closure.node, closure.typeId, closure.captures, indexData) }
+    for index, closure in planned.closures { Layout(closure.owner, index, closure.module, closure.node, closure.typeId, closure.captures, indexData, &result, &planned, &reuse) }
     return result
 }

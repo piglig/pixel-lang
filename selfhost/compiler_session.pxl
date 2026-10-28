@@ -1,0 +1,76 @@
+import "source_identity.pxl" as sourceIdentity
+import "model.pxl" as model
+import "project.pxl" as project
+import "bindings.pxl" as bindings
+import "type_queries.pxl" as typeQueries
+import "checker.pxl" as checker
+import "semantic_cache.pxl" as semantic
+import "ir_cache.pxl" as irCache
+
+// Owned by one compiler session. Syntax and semantic results remain native
+// values; requests do not serialize these values or persist arena indices.
+export record Source { text: string, syntax: model.Parsed }
+export record Statistics { typeHits: int, typedDeclarations: int, bindingHits: int, boundDeclarations: int, parsed: int, parseHits: int, checkedFunctions: int, semanticHits: int, irHits: int, irRelocated: int }
+export fn NoStatistics() -> Statistics = Statistics{typeHits: 0, typedDeclarations: 0, bindingHits: 0, boundDeclarations: 0, parsed: 0, parseHits: 0, checkedFunctions: 0, semanticHits: 0, irHits: 0, irRelocated: 0}
+export record Session { typeQueries: typeQueries.Snapshot, binding: bindings.Snapshot, sources: map[string, Source], semantic: semantic.Snapshot, ir: irCache.Snapshot, revision: int, retainedNodes: int, statistics: Statistics }
+export record Output { checked: model.ExpressionCheck, parsed: int, parseHits: int, checkedFunctions: int, semanticHits: int, retained: bool }
+export fn Empty() -> Session = Session{typeQueries: typeQueries.Empty(), binding: bindings.Empty(), sources: map[string, Source]{}, semantic: semantic.Empty(), ir: irCache.Empty("", map[string, irCache.Stamp]{}), revision: 0, retainedNodes: 0, statistics: NoStatistics()}
+
+fn QueryAddresses(project: model.Project, previous: Session) -> sourceIdentity.Index {
+    var wanted: map[string, bool] = map[string, bool]{}
+    typeQueries.WantLocations(previous.typeQueries, &wanted)
+    semantic.WantLocations(previous.semantic, &wanted)
+    return sourceIdentity.ForLocations(project, wanted)
+}
+
+export fn Check(files: map[string, string], entry: string, nodeLimit: int, session: inout Session) -> Output {
+    var parsed: map[string, model.Parsed] = map[string, model.Parsed]{}
+    for path, source in session.sources {
+        if files.has(path) && files[path] == source.text { parsed[path] = source.syntax }
+    }
+    let built = project.BuildParsed(files, entry, parsed)
+    var binding = bindings.Begin(session.binding)
+    var unchanged = map[string, bool]{}
+    for path, syntax in parsed { unchanged[path] = true }
+    let bound = bindings.BindQueries(built, true, unchanged, &binding)
+    let addresses = QueryAddresses(built, session)
+    var typed = typeQueries.Analyze(bound, session.typeQueries, addresses, unchanged)
+    var reuse = semantic.Begin(session.semantic, typed.resolved, addresses)
+    let checked = checker.CheckQueries(map[string, bool]{}, true, &typed.resolved, true, &reuse)
+    var hits = 0
+    var size = 0
+    var sources: map[string, Source] = map[string, Source]{}
+    for module in built.modules {
+        if parsed.has(module.path) { hits += 1 }
+        size += len(module.syntax.nodes) + len(module.syntax.tokens)
+        if files.has(module.path) { sources[module.path] = Source{text: files[module.path], syntax: module.syntax} }
+    }
+    for key, contract in reuse.current.contracts { size += 1 + len(contract) }
+    for key, cached in reuse.current.entries {
+        for plan in cached.plans { size += semantic.PlanSize(plan) }
+        size += len(cached.fingerprint) + len(cached.dependencies) + len(cached.types) + len(cached.expressions) + len(cached.symbols) + len(cached.calls)
+    }
+    size += bindings.Size(binding.current) + typeQueries.Size(typed.snapshot)
+    let retained = len(checked.diagnostics) == 0 && nodeLimit > 0 && size <= nodeLimit
+    if retained {
+        session.typeQueries = typed.snapshot
+        session.binding = binding.current
+        session.sources = sources
+        session.semantic = reuse.current
+        session.retainedNodes = size
+        if size + irCache.Size(session.ir) > nodeLimit {
+            session.ir = irCache.Empty("", map[string, irCache.Stamp]{})
+        }
+        session.revision += 1
+    } else if len(checked.diagnostics) == 0 {
+        // Capacity pressure discards acceleration, never the compilation result.
+        let revision = session.revision + 1
+        session = Empty()
+        session.revision = revision
+    }
+    // Failed requests leave the last successful snapshot intact. The caller may
+    // discard the whole session on cancellation or execution failure.
+    session.statistics = Statistics{typeHits: typed.hits, typedDeclarations: typed.checked, bindingHits: binding.hits, boundDeclarations: binding.checked, parsed: len(built.modules) - hits, parseHits: hits, checkedFunctions: reuse.checked, semanticHits: reuse.hits, irHits: 0, irRelocated: 0}
+    return Output{checked, parsed: len(built.modules) - hits, parseHits: hits,
+                  checkedFunctions: reuse.checked, semanticHits: reuse.hits, retained}
+}

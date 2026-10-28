@@ -26,7 +26,7 @@ def fingerprint(root):
         if base.exists():
             paths.extend(path for path in base.rglob('*') if path.is_file()
                          and '__pycache__' not in path.parts and path.suffix != '.pyc')
-    paths.extend(path for path in (root / 'pyproject.toml', root / 'setup.cfg') if path.is_file())
+    paths.extend(path for path in (root / 'pyproject.toml', root / 'setup.cfg', root / 'setup.py') if path.is_file())
     return {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in sorted(paths)}
 

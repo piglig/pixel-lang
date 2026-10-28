@@ -5,16 +5,23 @@ from pathlib import Path
 
 from pixellang.fileaccess import FileAccess
 from pixellang.model import PixelError
-from pixellang.project import compile_project
+from pixellang.compiler_client import CompilerClient
 from pixellang.vm import VM
 
 
 class BinaryFileTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.compiler = CompilerClient()
+        cls.addClassCleanup(cls.compiler.close)
+
     def compile(self, body):
-        return compile_project({'main.pxl': 'fn main() { ' + body + ' }'})[1].bytecode
+        response = self.compiler.request('compile', files={'main.pxl': 'effect fn main() { ' + body + ' }'})
+        self.assertEqual(response['status'], 'ok', response)
+        return response['result']['bytecode']
 
     def test_raw_bytes_mutation_and_replay(self):
-        code = self.compile('writeBytes("image.bin", [0, 255, 192, 128]); let data = readBytes("image.bin", 20); data[0] = 10; print(data)')
+        code = self.compile('match writeBytes("image.bin", [0, 255, 192, 128]) { .Err(error) => { print(error.code); return }, .Ok(_) => {} }; match readBytes("image.bin", 20) { .Ok(value) => { var data=value; data[0]=10; print(data) }, .Err(error) => { print(error.code) } }')
         with tempfile.TemporaryDirectory() as directory:
             access = FileAccess(read_root=directory, write_root=directory)
             self.assertEqual(VM(code, file_access=access).run(), [[10, 255, 192, 128]])
@@ -37,11 +44,11 @@ class BinaryFileTests(unittest.TestCase):
                 ('readBytes("data", -1)', 'bytes.limit'),
                 ('writeBytes("out", [256])', 'bytes.range'),
             ):
-                code = self.compile('try { ' + expression + ' } catch err { print(err.code) }')
+                code = self.compile('match ' + expression + ' { .Ok(_) => {}, .Err(err) => { print(err.code) } }')
                 access = FileAccess(read_root=directory, write_root=directory)
                 with self.subTest(expression=expression):
                     self.assertEqual(VM(code, file_access=access).run(), [expected])
-            code = self.compile('try { readBytes("data", 10) } catch err { print(err.code) }; try { writeBytes("out", [1]) } catch err { print(err.code) }')
+            code = self.compile('match readBytes("data", 10) { .Ok(_) => {}, .Err(err) => { print(err.code) } }; match writeBytes("out", [1]) { .Ok(_) => {}, .Err(err) => { print(err.code) } }')
             self.assertEqual(VM(code).run(), ['io.access_denied', 'io.access_denied'])
 
     def test_restore_rejects_invalid_bytes_and_budget(self):

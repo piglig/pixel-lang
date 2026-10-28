@@ -1,13 +1,20 @@
 import unittest
 
 from pixellang.model import PixelError
-from pixellang.project import compile_project
+from pixellang.compiler_client import CompilerClient
 from pixellang.vm import VM
 
 
 class HeapLimitTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.compiler = CompilerClient()
+        cls.addClassCleanup(cls.compiler.close)
+
     def bytecode(self, body):
-        return compile_project({'main.pxl': 'fn main() { ' + body + ' }'})[1].bytecode
+        response = self.compiler.request('compile', files={'main.pxl': 'effect fn main() { ' + body + ' }'})
+        self.assertEqual(response['status'], 'ok', response)
+        return response['result']['bytecode']
 
     def test_invalid_limits(self):
         bytecode = self.bytecode('')
@@ -33,15 +40,16 @@ class HeapLimitTests(unittest.TestCase):
         self.assertEqual(VM(bytecode, max_heap_objects=2).run(), [[1], [2]])
 
     def test_growth_and_split_obey_item_limit(self):
-        for body in (
-            'let a = [1]; append(a, 2); print(a)',
-            'let a = map[int]{"x": 1}; a["y"] = 2; print(a)',
-            'print(split("a,b", ","))',
+        # Value updates retain the old root until the replacement is published.
+        for body, peak in (
+            ('var a: [int] = [1]; a.append(2); print(a)', 3),
+            ('var a: map[string, int] = map[string, int]{"x": 1}; a["y"] = 2; print(a)', 3),
+            ('print(split("a,b", ","))', 2),
         ):
             with self.subTest(body=body):
                 with self.assertRaisesRegex(PixelError, 'Heap budget exceeded'):
-                    VM(self.bytecode(body), max_heap_items=1).run()
-                VM(self.bytecode(body), max_heap_items=2).run()
+                    VM(self.bytecode(body), max_heap_items=peak-1).run()
+                VM(self.bytecode(body), max_heap_items=peak).run()
 
     def test_gc_reclaims_unreachable_objects_under_custom_limit(self):
         vm = VM(self.bytecode('print([1]); print([2])'), max_heap_objects=1)
@@ -49,13 +57,13 @@ class HeapLimitTests(unittest.TestCase):
         self.assertGreater(vm.collections, 0)
 
     def test_growing_live_graph_does_not_trigger_constant_interval_full_scans(self):
-        vm = VM(self.bytecode('let retained: [[int]] = []; var i = 0; while i < 4096 { append(retained, [i]); i++ }; print(retained[4095][0])'))
+        vm = VM(self.bytecode('var retained: [[int]] = []; var i = 0; while i < 4096 { retained.append([i]); i+=1 }; print(retained[4095][0])'))
         self.assertEqual(vm.run(), [4095])
         self.assertLess(vm.collections, 20)
         self.assertGreater(vm.collections, 0)
 
     def test_large_graph_checkpoint_replays_gc_deterministically(self):
-        vm = VM(self.bytecode('let retained: [[int]] = []; var i = 0; while i < 300 { append(retained, [i]); i++ }; print(len(retained))'))
+        vm = VM(self.bytecode('var retained: [[int]] = []; var i = 0; while i < 300 { retained.append([i]); i+=1 }; print(len(retained))'))
         for _ in range(500):
             vm.step(snapshot=False)
         checkpoint = vm.checkpoint()

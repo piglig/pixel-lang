@@ -1,0 +1,34 @@
+import "error.pxl" as errors
+// Portable paths relative to an explicitly granted filesystem root.
+export fn Clean(value: string) -> Result[string, Error] {
+    if len(value) > 1024 || (len(value) > 0 && value[0] == "/") || len(split(value, "\\")) > 1 { return .Err(errors.New("path.invalid_path", "Expected a relative POSIX path of at most 1024 characters", "Clean", value)) }
+    if len(split(value, "\u0000")) > 1 { return .Err(errors.New("path.null_character", "Path contains a null character", "Clean", value)) }
+    var parts: [string] = []
+    for part in split(value, "/") {
+        if part == "" || part == "." { continue }
+        if part == ".." {
+            if len(parts) == 0 { return .Err(errors.New("path.escapes_root", "Path escapes its root", "Clean", value)) }
+            parts.pop()
+        } else { parts.append(part) }
+    }
+    return .Ok(join(parts, "/"))
+}
+export fn Join(left: string, right: string) -> Result[string, Error] {
+    if len(right) > 0 && right[0] == "/" { return .Err(errors.New("path.absolute_join", "Joined path must be relative", "Join", right)) }
+    if len(left) == 0 { return Clean(right) }
+    return Clean(left + "/" + right)
+}
+export fn Base(value: string) -> Result[string, Error] {
+    let parts = split(Clean(value)?, "/")
+    return .Ok(parts[len(parts) - 1])
+}
+export fn Dir(value: string) -> Result[string, Error] {
+    let parts = split(Clean(value)?, "/")
+    return .Ok(join(slice(parts, 0, len(parts) - 1), "/"))
+}
+export fn Extension(value: string) -> Result[string, Error] {
+    let name = Base(value)?
+    let parts = split(name, ".")
+    if len(parts) < 2 || (len(parts) == 2 && parts[0] == "") { return .Ok("") }
+    return .Ok("." + parts[len(parts) - 1])
+}

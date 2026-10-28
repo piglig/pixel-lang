@@ -28,6 +28,7 @@ def token(value):
 class Grid:
     def __init__(self):
         self.pixels, self.links, self.y = [], [], 0
+        self.rows = []
 
     def row(self, *values, indent=0, x=None, y=None):
         x = indent * 2 if x is None else x
@@ -35,6 +36,8 @@ class Grid:
         for i, value in enumerate(values):
             k, v = token(value)
             self.pixels.append({"position": [x + i * 2, y], "rgba": rgba(k, v)})
+        if values:
+            self.rows.append((indent, [(x + i * 2, y) for i in range(len(values))]))
         self.y = max(self.y, y + 2)
         return self
 
@@ -43,9 +46,24 @@ class Grid:
         return self
 
     def build(self):
+        # The builder's logical nesting is emitted as source links. Physical
+        # coordinates never supply scope to the pixel reader.
+        links = self.links.copy()
+        explicit_children = {tuple(link['to']) for link in links if link['kind'] == 'child'}
+        incoming = {tuple(link['to']) for link in links if link['kind'] == 'next'}
+        parents = []
+        for depth, positions in self.rows:
+            starts = [position for position in positions if position not in incoming]
+            head = starts[0] if len(starts) == 1 else positions[0]
+            links.append(dict(kind='region', **{'from': list(head), 'to': list(head)}))
+            while parents and parents[-1][0] >= depth:
+                parents.pop()
+            if parents and not explicit_children.intersection(positions):
+                links.append(dict(kind='child', **{'from': list(parents[-1][1]), 'to': list(head)}))
+            parents.append((depth, head))
         return new_source(
             max((p["position"][0] + 1 for p in self.pixels), default=1),
             max(1, self.y - 1),
             self.pixels.copy(),
-            self.links.copy(),
+            links,
         )

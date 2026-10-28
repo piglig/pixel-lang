@@ -11,7 +11,7 @@ ROOT = Path(__file__).parent
 def examples():
     addition = (
         Grid()
-        .row("entry", "fn", I(99), "(", ")", "->", "unit")
+        .row("entry", "effect_fn", I(99), "(", ")", "->", "unit")
         .row("print", 10, "+", 20, indent=1)
         .build()
     )
@@ -22,13 +22,13 @@ def examples():
         .row("return", 1, indent=2)
         .row("else", indent=1)
         .row("return", I(0), "*", I(1), "(", I(0), "-", 1, ")", indent=2)
-        .row("entry", "fn", I(99), "(", ")", "->", "unit")
+        .row("entry", "effect_fn", I(99), "(", ")", "->", "unit")
         .row("print", I(1), "(", 6, ")", indent=1)
         .build()
     )
     loop = (
         Grid()
-        .row("entry", "fn", I(99), "(", ")", "->", "unit")
+        .row("entry", "effect_fn", I(99), "(", ")", "->", "unit")
         .row("var", I(0), ":", "int", "=", 0, indent=1)
         .row("var", I(1), ":", "int", "=", 0, indent=1)
         .row("while", I(0), "<", 5, indent=1)
@@ -46,13 +46,14 @@ def examples():
     imported = (
         Grid()
         .row("import", I(7))
-        .row("entry", "fn", I(99), "(", ")", "->", "unit")
+        .row("entry", "effect_fn", I(99), "(", ")", "->", "unit")
         .row("print", I(7), ".", I(2), "(", 21, ")", indent=1)
         .build()
     )
+    imported["bundle"] = {"version": "0.9", "entry": "main.pxl", "modules": {"7": library}}
     reverse = (
         Grid()
-        .row("entry", "fn", I(99), "(", ")", "->", "unit")
+        .row("entry", "effect_fn", I(99), "(", ")", "->", "unit")
         .row("print", 10, "-", 20, indent=1)
         .connect("next", (2, 2), (8, 2))
         .connect("next", (8, 2), (6, 2))
@@ -61,7 +62,7 @@ def examples():
     )
     branch = (
         Grid()
-        .row("entry", "fn", I(99), "(", ")", "->", "unit")
+        .row("entry", "effect_fn", I(99), "(", ")", "->", "unit")
         .row("if", True, indent=1)
         .row("print", 42, indent=2)
         .row("else", indent=1)
@@ -80,7 +81,12 @@ def examples():
 
 
 if __name__ == "__main__":
-    for name, doc in examples().items():
+    from pixellang.compiler_client import CompilerClient
+
+    documents = examples()
+    for name, doc in documents.items():
         save(doc, ROOT / f"{name}.pixel")
-    save(examples()["addition"], ROOT / "addition.png")
-    save(examples()["connections"], ROOT / "connections.png")
+    with CompilerClient() as compiler:
+        for name in ("addition", "connections"):
+            image = compiler.request('export-pixel-png', document=documents[name])['result']['image']
+            (ROOT / f"{name}.png").write_bytes(image)

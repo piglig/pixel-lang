@@ -5,6 +5,7 @@ from pathlib import Path
 
 from pixellang.fileaccess import FileAccess
 from pixellang.model import PixelError
+from pixellang.compiler_client import CompilerClient
 from pixellang.temporal import Timeline
 from pixellang.workspace import Workspace
 
@@ -12,6 +13,11 @@ ROOT = Path(__file__).resolve().parents[1] / "examples" / "ledger"
 
 
 class LedgerAcceptanceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.compiler = CompilerClient()
+        cls.addClassCleanup(cls.compiler.close)
+
     def test_inclusive_upper_bound_and_validation_before_filter(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -51,17 +57,14 @@ class LedgerAcceptanceTests(unittest.TestCase):
             self.assertEqual(json.loads((root / "report.json").read_text()), report)
 
     def test_contradictory_bounds_fail_before_file_access(self):
-        with self.assertRaisesRegex(PixelError, "maximum_minor must be greater"):
-            Workspace(ROOT).run(
-                json.dumps(
-                    {
-                        "source": "missing.csv",
-                        "output": "report.json",
-                        "minimum_minor": 3,
-                        "maximum_minor": 2,
-                    }
-                )
-            )
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            result=Workspace(ROOT).run(json.dumps({
+                "source":"missing.csv", "output":"report.json", "minimum_minor":3, "maximum_minor":2,
+            }),file_access=FileAccess(root,root))
+            self.assertEqual(result["output"][0]["code"],"ledger.invalid_range")
+            self.assertIn("maximum_minor must be greater",result["output"][0]["message"])
+            self.assertFalse((root/"report.json").exists())
 
     def test_generated_workload_correctness_and_instruction_bound(self):
         from benchmarks.ledger import fixture
@@ -123,11 +126,13 @@ class LedgerAcceptanceTests(unittest.TestCase):
         self.assertEqual(len(result["tests"]), 4)
 
     def test_real_app_recording_restores_without_files_or_repeated_writes(self):
-        source, _ = Workspace(ROOT).compile()
+        workspace = Workspace(ROOT)
+        workspace.verify_lock()
+        compiled = self.compiler.debug_project(workspace.files, workspace.entry)
         input_text = (ROOT / "fixtures/config.json").read_text()
         with tempfile.TemporaryDirectory() as directory:
             access = FileAccess(ROOT / "fixtures", directory)
-            timeline = Timeline(source, input_text=input_text, file_access=access)
+            timeline = Timeline(compiled.source, compiled=compiled, input_text=input_text, file_access=access)
             timeline.run()
             self.assertIsNone(timeline.vm.error)
             actual = json.loads((Path(directory) / "report.json").read_text())

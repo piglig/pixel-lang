@@ -9,7 +9,7 @@ from statistics import median
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from pixellang.compiler_service import CompilerService
-from scripts.native_vm_probe import digest,power
+from scripts.benchmark_support import digest,power
 
 
 def main():
@@ -19,7 +19,7 @@ def main():
     args=parser.parse_args()
     if args.repeats<1:parser.error('repeats must be positive')
     if args.output.exists():parser.error('Use a new output path')
-    files={'main.pxl':'import "lib.pxl" as lib\nfn main(){print(lib.total([3,1,2]))}',
+    files={'main.pxl':'import "lib.pxl" as lib\neffect fn main(){print(lib.total([3,1,2]))}',
            'lib.pxl':'export fn total(values:[int])->int{var n=0;for x in values{n+=x};return n}'}
     service=CompilerService.installed()
     def call(op,**kwargs):

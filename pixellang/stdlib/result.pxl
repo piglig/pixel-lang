@@ -1,0 +1,17 @@
+// Expected business failures are values with a statically known error type.
+// Result[T, E] is a native, must-use type; this module supplies combinators.
+
+export fn Map[T, U, E](result: Result[T, E], transform: fn(T) -> U) -> Result[U, E] = .Ok(transform(result?))
+
+export fn MapError[T, E, F](result: Result[T, E], transform: fn(E) -> F) -> Result[T, F] {
+    match result {
+        .Ok(value) => { return .Ok(value) },
+        .Err(error) => { return .Err(transform(error)) }
+    }
+}
+
+// Invoke the next computation only for success; preserve an existing failure.
+export fn AndThen[T, U, E](result: Result[T, E], next: fn(T) -> Result[U, E]) -> Result[U, E] = next(result?)
+
+// Explicitly acknowledge that this business outcome is intentionally ignored.
+export fn Ignore[T, E](value: Result[T, E]) {}

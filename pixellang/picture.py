@@ -12,7 +12,7 @@ from PIL import Image, ImageDraw
 from .codec import MAX_PIXELS, validate
 from .model import PixelError
 
-MAGIC = b"PXIMG\x08\r\n"
+MAGIC = b"PXIMG\x09\r\n"
 PREFIX = 20
 MAX_META = 16_000_000
 MAX_IMAGE = 32_000_000
@@ -77,6 +77,19 @@ def is_picture(im):
         return False
 
 
+def _pack_links(links):
+    if len(links) > 1_000_000:
+        raise PixelError("image", "Picture exceeds link limit")
+    chunks = []
+    for start in range(0, len(links), 512):
+        raw = json.dumps(links[start:start + 512], ensure_ascii=False,
+                         separators=(",", ":")).encode("utf-8")
+        if len(raw) > 100_000:
+            raise PixelError("image", "Picture link chunk exceeds limit")
+        chunks.append(zlib.compress(raw, 9).hex())
+    return chunks
+
+
 def encode_picture(doc, scale=8):
     if type(scale) is not int or not 4 <= scale <= 24:
         raise PixelError("image", "Tile scale must be 4..24")
@@ -95,6 +108,8 @@ def encode_picture(doc, scale=8):
         total += math.prod(source["dimensions"])
     if total > MAX_PIXELS:
         raise PixelError("image", "Bundled source exceeds one million logical cells")
+    packed_links = {mid: _pack_links(source.get("spatial", {}).get("links", []))
+                    for mid, source in documents.items()}
     margin = scale * 3
     width = max(
         192, max(d["dimensions"][0] * scale for d in documents.values()) + 2 * margin
@@ -116,12 +131,14 @@ def encode_picture(doc, scale=8):
                 )
                 if k in source
             }
+            spec["spatial"] = {"links": []}
+            spec["linkChunks"] = packed_links[mid]
             entries.append({"id": mid, "origin": [margin, y], "source": spec})
             y += source["dimensions"][1] * scale + margin * 2
         height = y - margin
         metadata = {
             "format": "pixel-image",
-            "version": "0.8",
+            "version": "0.9",
             "scale": scale,
             "canvas": [width, height],
             "entry": bundle.get(
@@ -190,7 +207,7 @@ def decode_picture(image):
         if (
             not isinstance(meta, dict)
             or meta.get("format") != "pixel-image"
-            or meta.get("version") not in ("0.8", "0.9")
+            or meta.get("version") != "0.9"
             or meta.get("canvas") != [image.width, image.height]
         ):
             raise PixelError("image", "Unsupported image container")
@@ -227,24 +244,21 @@ def decode_picture(image):
                     "image", "Header cannot contain program pixels or nested bundles"
                 )
             chunks = source.pop("linkChunks", None)
-            if meta["version"] == "0.9":
-                if not isinstance(chunks, list) or len(chunks) > 1954 or source.get("spatial") != {"links": []}:
-                    raise PixelError("image", "Invalid or ambiguous picture link chunks")
-                links = []
-                for chunk in chunks:
-                    if not isinstance(chunk, str) or not 2 <= len(chunk) <= 200000 or len(chunk) % 2 or any(c not in "0123456789abcdef" for c in chunk):
-                        raise PixelError("image", "Invalid picture link chunk hex")
-                    decoder = zlib.decompressobj()
-                    raw_links = decoder.decompress(bytes.fromhex(chunk), 100001)
-                    if len(raw_links) > 100000 or not decoder.eof or decoder.unused_data:
-                        raise PixelError("image", "Invalid or oversized picture link chunk")
-                    decoded_links = json.loads(raw_links)
-                    if not isinstance(decoded_links, list) or not 1 <= len(decoded_links) <= 512 or len(links) + len(decoded_links) > 1000000:
-                        raise PixelError("image", "Picture exceeds link limit")
-                    links.extend(decoded_links)
-                source["spatial"] = {"links": links}
-            elif chunks is not None:
-                raise PixelError("image", "Ambiguous picture links")
+            if not isinstance(chunks, list) or len(chunks) > 1954 or source.get("spatial") != {"links": []}:
+                raise PixelError("image", "Invalid or ambiguous picture link chunks")
+            links = []
+            for chunk in chunks:
+                if not isinstance(chunk, str) or not 2 <= len(chunk) <= 200000 or len(chunk) % 2 or any(c not in "0123456789abcdef" for c in chunk):
+                    raise PixelError("image", "Invalid picture link chunk hex")
+                decoder = zlib.decompressobj()
+                raw_links = decoder.decompress(bytes.fromhex(chunk), 100001)
+                if len(raw_links) > 100000 or not decoder.eof or decoder.unused_data:
+                    raise PixelError("image", "Invalid or oversized picture link chunk")
+                decoded_links = json.loads(raw_links)
+                if not isinstance(decoded_links, list) or not 1 <= len(decoded_links) <= 512 or len(links) + len(decoded_links) > 1000000:
+                    raise PixelError("image", "Picture exceeds link limit")
+                links.extend(decoded_links)
+            source["spatial"] = {"links": links}
             source["pixels"] = []
             validate(source)
             if (
@@ -288,7 +302,7 @@ def decode_picture(image):
             raise PixelError("image", "Missing entry module")
         main = documents.pop("main")
         main["bundle"] = {
-            "version": "0.8",
+            "version": "0.9",
             "entry": meta.get("entry", "main.pxl"),
             "modules": documents,
         }

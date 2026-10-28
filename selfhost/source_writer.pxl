@@ -1,160 +1,227 @@
+import "failures.pxl" as failures
 import "model.pxl" as model
 
 // Render the compiler's decoded semantic AST, never source hidden in image metadata.
-export record Output { entry: string, files: map[string], diagnostics: [model.Diagnostic] }
-record Writer { nodes: [model.Node], names: map[string], paths: map[string], module: string }
+export record Output { entry: string, files: map[string, string], diagnostics: [model.Diagnostic] }
+record Writer { nodes: [model.Node], names: map[string, string], paths: map[string, string], module: string }
 fn Relative(from: string, target: string) -> string {
     if len(target) >= 4 && slice(target, 0, 4) == "std/" { return target }
     let left = split(from, "/")
     let right = split(target, "/")
     var common = 0
     while common < len(left) - 1 && common < len(right) - 1 && left[common] == right[common] { common += 1 }
-    let parts: [string] = []
+    var parts: [string] = []
     var i = common
-    while i < len(left) - 1 { append(parts, ".."); i += 1 }
-    while common < len(right) { append(parts, right[common]); common += 1 }
+    while i < len(left) - 1 { parts.append(".."); i += 1 }
+    while common < len(right) { parts.append(right[common]); common += 1 }
     return join(parts, "/")
 }
 fn Name(w: Writer, text: string) -> string {
     let parts = split(text, ".")
-    if len(parts) == 2 && has(w.names, parts[0] + ":" + parts[1]) { return parts[0] + "." + w.names[parts[0] + ":" + parts[1]] }
-    if has(w.names, w.module + ":" + text) { return w.names[w.module + ":" + text] }
+    if len(parts) == 2 && w.names.has(parts[0] + ":" + parts[1]) { return parts[0] + "." + w.names[parts[0] + ":" + parts[1]] }
+    if w.names.has(w.module + ":" + text) { return w.names[w.module + ":" + text] }
     return text
 }
-fn List(w: Writer, children: [int], start: int, end: int) -> string {
-    let parts: [string] = []
+fn List(w: Writer, children: [int], start: int, end: int) -> Result[string, Error] {
+    var parts: [string] = []
     var i = start
-    while i < end { append(parts, Write(w, children[i])); i += 1 }
-    return join(parts, ", ")
+    while i < end { parts.append(Write(w, children[i])?); i += 1 }
+    return .Ok(join(parts, ", "))
 }
 fn Generics(w: Writer, children: [int]) -> string {
-    let parts: [string] = []
-    for child in children { if w.nodes[child].kind == "type_parameter" { append(parts, Name(w, w.nodes[child].text)) } }
+    var parts: [string] = []
+    for child in children {
+        let parameter = w.nodes[child]
+        if parameter.kind != "type_parameter" { continue }
+        var text = Name(w, parameter.text)
+        for constraint in parameter.children { text += ": " + w.nodes[constraint].text }
+        parts.append(text)
+    }
     if len(parts) == 0 { return "" }
     return "[" + join(parts, ", ") + "]"
 }
-fn Function(w: Writer, node: model.Node) -> string {
-    let params: [string] = []
+fn Function(context: Writer, node: model.Node) -> Result[string, Error] {
+    let w = context
+    var params: [string] = []
+    var initial: [string] = []
     var result = ""
     var body = ""
     for child in node.children {
         let item = w.nodes[child]
-        if item.kind == "parameter" { append(params, Name(w, item.text) + ": " + Write(w, item.children[0])) }
-        else if item.kind == "result" { result = " -> " + Write(w, item.children[0]) }
-        else if item.kind == "block" { body = Write(w, child) }
-        else if item.kind == "expression_body" { body = "= " + Write(w, item.children[0]) }
+        if item.kind == "initial_parameter" { initial.append(Name(w, item.text) + ": " + Write(w, item.children[0])?) }
+        if item.kind == "parameter" { params.append(Name(w, item.text) + ": " + Write(w, item.children[0])?) }
+        else if item.kind == "result" { result = " -> " + Write(w, item.children[0])? }
+        else if item.kind == "block" || item.kind == "flow_body" { body = Write(w, child)? }
+        else if item.kind == "expression_body" { body = "= " + Write(w, item.children[0])? }
     }
     var name = ""
-    if node.kind == "fn" { name = " " + Name(w, node.text) }
-    return "fn" + name + Generics(w, node.children) + "(" + join(params, ", ") + ")" + result + " " + body
-}
-fn Arm(w: Writer, node: model.Node) -> string {
-    let pattern = w.nodes[node.children[0]]
-    var text = "_"
-    if pattern.kind == "variant_pattern" {
-        let typ = w.nodes[pattern.children[0]]
-        text = pattern.text
-        if typ.text != "Option" { text = Write(w, pattern.children[0]) + "." + text }
-        if len(node.children) > 2 { text += "(" + List(w, node.children, 1, len(node.children) - 1) + ")" }
+    if model.CallableDeclaration(node.kind) { name = " " + Name(w, node.text) }
+    var keyword = "fn"
+    if node.kind == "flow" { keyword = "flow" }
+    if node.kind == "lambda" && node.text == "effect" { keyword = "effect fn" }
+    for child in node.children {
+        if w.nodes[child].kind == "effect_marker" { keyword = "effect fn" }
     }
-    return text + " => " + Write(w, node.children[len(node.children) - 1])
+    var constructor = ""
+    if node.kind == "flow" { constructor = "(" + join(initial, ", ") + ") step" }
+    return .Ok(keyword + name + Generics(w, node.children) + constructor + "(" + join(params, ", ") + ")" + result + " " + body)
 }
-fn Write(w: Writer, index: int) -> string {
+fn Arm(w: Writer, node: model.Node) -> Result[string, Error] {
+    var text = Write(w, node.children[0])?
+    if len(node.children) == 3 { text += " if " + Write(w, w.nodes[node.children[1]].children[0])? }
+    return .Ok(text + " => " + Write(w, node.children[len(node.children) - 1])?)
+}
+fn Write(w: Writer, index: int) -> Result[string, Error] {
     let n = w.nodes[index]
     let k = n.kind
     let c = n.children
-    if k == "name" || k == "binding" || k == "type_parameter" { return Name(w, n.text) }
-    if k == "literal_str" || k == "literal_string" { return jsonStringify(jsonFrom(n.text)) }
-    if k == "literal_int" || k == "literal_float" || k == "literal_float64" || k == "literal_keyword" { return n.text }
+    if k == "match_subjects" { return .Ok(List(w, c, 0, len(c))?) }
+    if k == "pattern_list" {
+        let text = List(w, c, 0, len(c))?
+        if len(c) == 1 { return .Ok(text) }
+        return .Ok("(" + text + ")")
+    }
+    if k == "wildcard_pattern" { return .Ok("_") }
+    if k == "variant_pattern" {
+        var text = "." + n.text
+        var first = 0
+        if len(c) > 0 && w.nodes[c[0]].kind == "pattern_qualifier" {
+            text = Write(w, w.nodes[c[0]].children[0])? + text
+            first = 1
+        }
+        if len(c) > first { text += "(" + List(w, c, first, len(c))? + ")" }
+        return .Ok(text)
+    }
+    if k == "propagate" { return .Ok("(" + Write(w, c[0])? + ")?") }
+    if k == "context_variant" { return .Ok("." + n.text) }
+    if k == "name" || k == "binding" || k == "type_parameter" { return .Ok(Name(w, n.text)) }
+    if k == "literal_str" || k == "literal_string" { return .Ok(jsonStringify(jsonFrom(n.text))) }
+    if k == "literal_int" || k == "literal_float" || k == "literal_float64" || k == "literal_keyword" { return .Ok(n.text) }
     if k == "type" {
         let name = Name(w, n.text)
-        if len(c) == 0 { return name }
-        return name + "[" + List(w, c, 0, len(c)) + "]"
+        if len(c) == 0 { return .Ok(name) }
+        return .Ok(name + "[" + List(w, c, 0, len(c))? + "]")
     }
-    if k == "type_array" { return "[" + Write(w, c[0]) + "]" }
-    if k == "type_fn" { return "fn(" + List(w, c, 0, len(c) - 1) + ")->" + Write(w, c[len(c) - 1]) }
-    if k == "binary" { return "(" + Write(w, c[0]) + " " + n.text + " " + Write(w, c[1]) + ")" }
-    if k == "unary" { return "(" + n.text + Write(w, c[0]) + ")" }
-    if k == "annotate" { return "(" + Write(w, c[0]) + ": " + Write(w, c[1]) + ")" }
-    if k == "call" { return Write(w, c[0]) + "(" + List(w, c, 1, len(c)) + ")" }
-    if k == "specialize" { return Write(w, c[0]) + "[" + List(w, c, 1, len(c)) + "]" }
-    if k == "index" { return Write(w, c[0]) + "[" + Write(w, c[1]) + "]" }
+    if k == "type_array" { return .Ok("[" + Write(w, c[0])? + "]") }
+    if k == "type_inout" { return .Ok("inout " + Write(w, c[0])?) }
+    if k == "inout_argument" { return .Ok("&" + Write(w, c[0])?) }
+    if k == "type_fn" {
+        var prefix = "fn"
+        if n.text == "effect" { prefix = "effect fn" }
+        return .Ok(prefix + "(" + List(w, c, 0, len(c) - 1)? + ")->" + Write(w, c[len(c) - 1])?) }
+    if k == "binary" { return .Ok("(" + Write(w, c[0])? + " " + n.text + " " + Write(w, c[1])? + ")") }
+    if k == "unary" { return .Ok("(" + n.text + Write(w, c[0])? + ")") }
+    if k == "annotate" { return .Ok("(" + Write(w, c[0])? + ": " + Write(w, c[1])? + ")") }
+    if k == "call" { return .Ok(Write(w, c[0])? + "(" + List(w, c, 1, len(c))? + ")") }
+    if k == "specialize" { return .Ok(Write(w, c[0])? + "::[" + List(w, c, 1, len(c))? + "]") }
+    if k == "index" { return .Ok(Write(w, c[0])? + "[" + Write(w, c[1])? + "]") }
     if k == "field" {
         let target = w.nodes[c[0]]
-        if target.kind == "name" && has(w.paths, target.text + ".pxl") {
-            return Name(w, target.text + "." + n.text)
+        if target.kind == "name" && w.paths.has(target.text + ".pxl") {
+            return .Ok(Name(w, target.text + "." + n.text))
         }
-        return Write(w, c[0]) + "." + n.text
+        return .Ok(Write(w, c[0])? + "." + n.text)
     }
-    if k == "array" { return "[" + List(w, c, 0, len(c)) + "]" }
-    if k == "map_entry" { return Write(w, c[0]) + ": " + Write(w, c[1]) }
-    if k == "map" { return "map[" + Write(w, c[0]) + "]{" + List(w, c, 1, len(c)) + "}" }
-    if k == "map_inferred" { return "{" + List(w, c, 0, len(c)) + "}" }
-    if k == "construct" { return Write(w, c[0]) + "{" + List(w, c, 1, len(c)) + "}" }
-    if k == "initializer" { return n.text + ": " + Write(w, c[0]) }
-    if k == "lambda" { return "(" + Function(w, n) + ")" }
-    if k == "fn" { return Function(w, n) }
+    if k == "array" { return .Ok("[" + List(w, c, 0, len(c))? + "]") }
+    if k == "map_entry" { return .Ok(Write(w, c[0])? + ": " + Write(w, c[1])?) }
+    if k == "map" { return .Ok(Write(w, c[0])? + "{" + List(w, c, 1, len(c))? + "}") }
+    if k == "map_inferred" { return .Ok("{" + List(w, c, 0, len(c))? + "}") }
+    if k == "record_update" { return .Ok("(" + Write(w, c[0])? + " with {" + List(w, c, 1, len(c))? + "})") }
+    if k == "construct" { return .Ok(Write(w, c[0])? + "{" + List(w, c, 1, len(c))? + "}") }
+    if k == "initializer" {
+        if len(c) == 0 { return .Ok(n.text + ": " + Name(w, n.text)) }
+        return .Ok(n.text + ": " + Write(w, c[0])?)
+    }
+    if k == "lambda" { return .Ok("(" + Function(w, n)? + ")") }
+    if model.CallableDeclaration(k) { return .Ok(Function(w, n)?) }
+    if k == "flow_instance" { return .Ok("instance " + Name(w, n.text) + " = " + Write(w, c[0])?) }
+    if k == "flow_next" { return .Ok("next " + Name(w, n.text) + " = " + Write(w, c[0])?) }
+    if k == "flow_output" { return .Ok("output " + Write(w, c[0])?) }
+    if k == "frame" { return .Ok("frame " + Name(w, n.text) + " = " + w.nodes[c[0]].text) }
     if k == "record" || k == "enum" {
-        let fields: [string] = []
-        for child in c { if w.nodes[child].kind != "type_parameter" { append(fields, Write(w, child)) } }
-        return k + " " + Name(w, n.text) + Generics(w, c) + " { " + join(fields, ", ") + " }"
+        var fields: [string] = []
+        for child in c { if w.nodes[child].kind != "type_parameter" { fields.append(Write(w, child)?) } }
+        return .Ok(k + " " + Name(w, n.text) + Generics(w, c) + " { " + join(fields, ", ") + " }")
     }
-    if k == "field_decl" || k == "parameter" { return n.text + ": " + Write(w, c[0]) }
+    if k == "field_decl" || k == "parameter" { return .Ok(n.text + ": " + Write(w, c[0])?) }
     if k == "variant_decl" {
-        if len(c) == 0 { return n.text }
-        return n.text + "(" + List(w, c, 0, len(c)) + ")"
+        if len(c) == 0 { return .Ok(n.text) }
+        return .Ok(n.text + "(" + List(w, c, 0, len(c))? + ")")
     }
-    if k == "export" { return "export " + Write(w, c[0]) }
+    if k == "export" { return .Ok("export " + Write(w, c[0])?) }
     if k == "import" {
         var path = n.text
-        if has(w.paths, path) { path = Relative(w.paths[w.module + ".pxl"], w.paths[path]) }
-        return "import " + jsonStringify(jsonFrom(path)) + " as " + w.nodes[c[0]].text
+        if w.paths.has(path) { path = Relative(w.paths[w.module + ".pxl"], w.paths[path]) }
+        return .Ok("import " + jsonStringify(jsonFrom(path)) + " as " + w.nodes[c[0]].text)
     }
-    if k == "block" {
-        let lines: [string] = []
-        for child in c { append(lines, Write(w, child)) }
-        return "{\n" + join(lines, "\n") + "\n}"
+    if k == "block" || k == "value_block" || k == "flow_body" {
+        var lines: [string] = []
+        for child in c {
+            var line = Write(w, child)?
+            if k == "value_block" && w.nodes[child].kind == "expression_stmt" { line += ";" }
+            lines.append(line)
+        }
+        return .Ok("{\n" + join(lines, "\n") + "\n}")
     }
-    if k == "let" || k == "var" {
+    if k == "let" || k == "var" || k == "flow_state" || k == "flow_value" {
         var annotation = ""
-        if len(c) == 2 { annotation = ": " + Write(w, w.nodes[c[0]].children[0]) }
-        return k + " " + Name(w, n.text) + annotation + " = " + Write(w, c[len(c) - 1])
+        if len(c) == 2 { annotation = ": " + Write(w, w.nodes[c[0]].children[0])? }
+        var keyword = k
+        if k == "flow_state" { keyword = "state" }
+        if k == "flow_value" { keyword = "let" }
+        return .Ok(keyword + " " + Name(w, n.text) + annotation + " = " + Write(w, c[len(c) - 1])?)
     }
-    if k == "assign" { return Write(w, c[0]) + " " + n.text + " " + Write(w, c[1]) }
-    if k == "expression_stmt" { return Write(w, c[0]) }
+    if k == "assign" { return .Ok(Write(w, c[0])? + " " + n.text + " " + Write(w, c[1])?) }
+    if k == "expression_stmt" || k == "block_result" { return .Ok(Write(w, c[0])?) }
     if k == "return" {
-        if len(c) == 0 { return "return" }
-        return "return " + Write(w, c[0])
+        if len(c) == 0 { return .Ok("return") }
+        return .Ok("return " + Write(w, c[0])?)
     }
-    if k == "break" || k == "continue" { return k }
+    if k == "break" || k == "continue" { return .Ok(k) }
     if k == "if" || k == "while" {
-        var text = k + " (" + Write(w, c[0]) + ") " + Write(w, c[1])
-        if len(c) == 3 { text += " else " + Write(w, c[2]) }
-        return text
+        var text = k + " (" + Write(w, c[0])? + ") " + Write(w, c[1])?
+        if len(c) == 3 { text += " else " + Write(w, c[2])? }
+        return .Ok(text)
     }
-    if k == "for" { return "for " + List(w, c, 0, len(c) - 2) + " in (" + Write(w, c[len(c) - 2]) + ") " + Write(w, c[len(c) - 1]) }
-    if k == "try" { return "try " + Write(w, c[0]) + " catch " + Name(w, n.text) + " " + Write(w, c[1]) }
+    if k == "for" { return .Ok("for " + List(w, c, 0, len(c) - 2)? + " in (" + Write(w, c[len(c) - 2])? + ") " + Write(w, c[len(c) - 1])?) }
     if k == "match" || k == "match_stmt" {
-        let arms: [string] = []
+        var arms: [string] = []
         var i = 1
-        while i < len(c) { append(arms, Arm(w, w.nodes[c[i]])); i += 1 }
-        let text = "match (" + Write(w, c[0]) + ") {\n" + join(arms, ",\n") + "\n}"
-        if k == "match" { return "(" + text + ")" }
-        return text
+        while i < len(c) { arms.append(Arm(w, w.nodes[c[i]])?); i += 1 }
+        let text = "match (" + Write(w, c[0])? + ") {\n" + join(arms, ",\n") + "\n}"
+        if k == "match" { return .Ok("(" + text + ")") }
+        return .Ok(text)
     }
-    fail("Unsupported recovered AST node: " + k)
-    return ""
+    return .Err(failures.New("Unsupported recovered AST node: " + k))
 }
-export fn Build(project: model.Project, names: map[string], paths: map[string]) -> Output {
-    let output = Output{entry: "_module_0.pxl", files: map[string]{}, diagnostics: project.diagnostics}
+export fn Build(project: model.Project, names: map[string, string], paths: map[string, string]) -> Output {
+    var output: Output = Output{entry: "_module_0.pxl", files: map[string, string]{}, diagnostics: project.diagnostics}
     if len(output.diagnostics) > 0 { return output }
     for module in project.modules {
         let moduleName = slice(module.path, 0, len(module.path) - 4)
-        let w = Writer{nodes: module.syntax.nodes, names, paths, module: moduleName}
-        let lines: [string] = []
-        for root in module.syntax.roots { append(lines, Write(w, root)) }
+        let w: Writer = Writer{nodes: module.syntax.nodes, names, paths, module: moduleName}
+        var lines: [string] = []
+        for root in module.syntax.roots {
+            match Write(w, root) {
+                .Ok(text) => { lines.append(text) },
+                .Err(error) => {
+                    return Output{entry: output.entry, files: map[string, string]{}, diagnostics: [model.Diagnostic{source: module.path, phase: "recover", message: error.message, start: 0, end: 0, line: 1, column: 1}]}
+                }
+            }
+        }
+        if module.path == "_module_0.pxl" && project.entryName != "main" {
+            // Text programs use main; preserve the pixel entry identifier and
+            // lexical shadowing while exposing it at the source boundary.
+            var entryKeyword = "fn"
+            for root in module.syntax.roots {
+                var declaration = root
+                if module.syntax.nodes[declaration].kind == "export" { declaration = module.syntax.nodes[declaration].children[0] }
+                if module.syntax.nodes[declaration].text == project.entryName && model.Effectful(module.syntax.nodes, declaration) { entryKeyword = "effect fn" }
+            }
+            lines.append(entryKeyword + " main() {\n" + Name(w, project.entryName) + "()\n}")
+        }
         var path = module.path
-        if has(paths, path) { path = paths[path] }
+        if paths.has(path) { path = paths[path] }
         output.files[path] = join(lines, "\n\n") + "\n"
         if module.path == "_module_0.pxl" { output.entry = path }
     }

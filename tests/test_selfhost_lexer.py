@@ -1,11 +1,14 @@
+from tests.native_compiler import native_driver
 import json
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from pixellang.project import compile_project
-from pixellang.text import Source, lex
+from pixellang.bootstrap import compile_with
+from pixellang.text import Source
+from tests.reference_lexer import lex
 from pixellang.vm import VM
+from pixellang.code_image import CodeImage
 from tests.selfhost_runtime import SELFHOST_MAX_OUTPUT_CHARS
 
 ROOT = Path(__file__).resolve().parents[1] / "selfhost"
@@ -15,11 +18,13 @@ class SelfHostedLexerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.files = {p.name: p.read_text() for p in ROOT.glob("*.pxl")}
-        cls.bytecode = compile_project(cls.files)[1].bytecode
+        from tests.native_compiler import load_native_compiler
+        cls.bytecode = load_native_compiler(driver=None)
+        cls.image = CodeImage(cls.bytecode)
 
     def scan(self, text, source="test.pxl"):
         vm = VM(
-            self.bytecode,
+            self.image,
             input_text=json.dumps({"source": source, "text": text}),
             max_steps=20_000_000,
             max_output_chars=SELFHOST_MAX_OUTPUT_CHARS,
@@ -69,25 +74,26 @@ class SelfHostedLexerTests(unittest.TestCase):
         for token in tokens:
             self.assertEqual(text[token["start"] : token["end"]], token["text"])
 
-    def test_own_sources_match_independent_bootstrap_lexemes(self):
-        for name, text in self.files.items():
-            with self.subTest(source=name):
-                expected = lex(Source(text, name))
-                result = self.scan(text, name)
-                self.assertEqual(result["diagnostics"], [])
-                self.assertEqual(len(result["tokens"]), len(expected))
-                for actual, token in zip(result["tokens"], expected):
-                    kind = "name" if actual["kind"] == "keyword" else actual["kind"]
-                    self.assertEqual(
-                        (kind, actual["start"], actual["end"]),
-                        (token.kind, token.start, token.end),
-                    )
-                    value = actual["value"]
-                    if kind == "int":
-                        value = int(value)
-                    elif kind == "float64":
-                        value = float(value)
-                    self.assertEqual(value, token.value)
+    def test_own_sources_match_independent_lexemes(self):
+        with native_driver(self.image) as run:
+            for name, text in self.files.items():
+                with self.subTest(source=name):
+                    expected = lex(Source(text, name))
+                    result = run(dict(source=name,text=text),steps=20_000_000,output_chars=SELFHOST_MAX_OUTPUT_CHARS)[0]
+                    self.assertEqual(result["diagnostics"], [])
+                    self.assertEqual(len(result["tokens"]), len(expected))
+                    for actual, token in zip(result["tokens"], expected):
+                        kind = "name" if actual["kind"] == "keyword" else actual["kind"]
+                        self.assertEqual(
+                            (kind, actual["start"], actual["end"]),
+                            (token.kind, token.start, token.end),
+                        )
+                        value = actual["value"]
+                        if kind == "int":
+                            value = int(value)
+                        elif kind == "float64":
+                            value = float(value)
+                        self.assertEqual(value, token.value)
 
     def test_errors_have_exact_source_location(self):
         for text, start, line, column in [
@@ -116,11 +122,22 @@ class SelfHostedLexerTests(unittest.TestCase):
                 self.assertGreater(error["end"], error["start"])
 
     def test_unicode_classification_is_general_and_checked(self):
-        code = """fn main() {
+        code = """effect fn main() {
  for value in ["A", "中", "9", "😀"] { print(unicodeCategory(value)) }
- try { unicodeCategory("ab") } catch error { print(error.code) }
 }"""
         self.assertEqual(
-            VM(compile_project({"main.pxl": code})[1].bytecode).run(),
-            ["Lu", "Lo", "Nd", "So", "text.invalid_character"],
+            VM(compile_with(self.bytecode, {"main.pxl": code})[0]).run(),
+            ["Lu", "Lo", "Nd", "So"],
         )
+        from pixellang.model import PixelError
+        invalid = compile_with(self.bytecode, {"main.pxl": 'effect fn main(){print(unicodeCategory("ab"))}'})[0]
+        with self.assertRaises(PixelError) as raised:
+            VM(invalid).run()
+        self.assertEqual(raised.exception.code, "text.invalid_character")
+
+    def test_native_lexer_matches_reference_vm(self):
+        with native_driver(self.image) as run:
+            for text in ('let 数量=123\n"hello"', '"unterminated'):
+                with self.subTest(text=text):
+                    self.assertEqual(run(dict(source='test.pxl',text=text),steps=20_000_000,
+                        output_chars=SELFHOST_MAX_OUTPUT_CHARS)[0],self.scan(text))

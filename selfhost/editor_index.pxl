@@ -1,0 +1,70 @@
+// Native editor analysis exposes compiler identities even for unfinished input.
+// It never lowers partial programs to executable code.
+import "model.pxl" as model
+import "bindings.pxl" as bindings
+import "types.pxl" as types
+import "checker.pxl" as checker
+import "checker_spatial.pxl" as spatial
+import "flow_methods.pxl" as flowMethods
+import "collection_methods.pxl" as collectionMethods
+export record MemberView { storage: int, fields: [model.TypeField], variants: [model.TypeVariant], methods: [model.MethodSignature] }
+export record Output { memberViews: map[string, MemberView], resolved: model.ResolvedTypes, calls: [model.CallResolution], expressions: [model.NodeType], flows: [model.TypedFlow], diagnostics: [model.Diagnostic], typeNames: [string] }
+export fn Analyze(project: model.Project) -> Output {
+    var diagnostics = project.diagnostics
+    // Keep parser diagnostics in the editor result, but analyze the partial AST
+    // as well. Graph analysis otherwise stops before resolving any endpoints.
+    var modules: [model.Module] = []
+    for source in project.modules {
+        let syntax = source.syntax
+        modules.append(model.Module{path: source.path, imports: source.imports,
+            declarations: source.declarations,
+            syntax: model.Parsed{tokens: syntax.tokens, nodes: syntax.nodes,
+                roots: syntax.roots, diagnostics: []}})
+    }
+    let bound = bindings.Bind(model.Project{entryName: "main", modules: modules, diagnostics: []})
+    diagnostics.extend(bound.diagnostics)
+    let resolved = types.Analyze(model.BoundProject{project: bound.project, scopes: bound.scopes,
+        symbols: bound.symbols, references: bound.references, captures: bound.captures, diagnostics: []})
+    var checked = checker.Check(resolved)
+    diagnostics.extend(checked.diagnostics)
+    // Project member schemas through the same native substitution routines
+    // used by expression checking. The host never reconstructs generic types.
+    // Freeze the count: expanding a schema may intern additional nested types.
+    let count = len(checked.resolved.types)
+    var index = 0
+    while index < count {
+        let typ = checked.resolved.types[index]
+        var fields = typ.fields
+        var variants = typ.variants
+        if typ.kind == "record" || typ.kind == "spatial" { fields = types.FieldTypes(index, &checked.resolved) }
+        if typ.kind == "enum" { variants = types.VariantTypes(index, &checked.resolved) }
+        checked.resolved.types[index] = model.TypeInfo{kind: typ.kind, name: typ.name, module: typ.module,
+            declaration: typ.declaration, arguments: typ.arguments, fields, variants}
+        index += 1
+    }
+    // Publish receiver permissions separately from declaration schemas. Bound
+    // the pass to known types: recursive generic schemas may expand indefinitely.
+    var memberViews: map[string, MemberView] = map[string, MemberView]{}
+    let viewCount = len(checked.resolved.types)
+    index = 0
+    while index < viewCount {
+        let storage = index
+        let kind = checked.resolved.types[storage].kind
+        if kind == "record" || kind == "spatial" {
+            memberViews[string(index)] = MemberView{storage, fields: types.FieldTypes(index, &checked.resolved), variants: [], methods: spatial.Signatures(index, &checked.resolved)}
+        }
+        if kind == "array" || kind == "map" {
+            memberViews[string(index)] = MemberView{storage, fields: [], variants: [], methods: collectionMethods.Signatures(index, &checked.resolved)}
+        }
+        if kind == "flow_handle" {
+            memberViews[string(index)] = MemberView{storage, fields: [], variants: [], methods: flowMethods.Signatures(index, &checked.resolved)}
+        }
+        if kind == "enum" {
+            memberViews[string(index)] = MemberView{storage, fields: [], variants: types.VariantTypes(index, &checked.resolved), methods: []}
+        }
+        index += 1
+    }
+    return Output{memberViews: memberViews, resolved: checked.resolved, calls: checked.calls,
+        expressions: checked.expressions, flows: checked.flows, diagnostics: diagnostics,
+        typeNames: types.BuiltinNames()}
+}

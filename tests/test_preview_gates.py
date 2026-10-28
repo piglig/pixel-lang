@@ -36,7 +36,7 @@ class PreviewGateTests(unittest.TestCase):
             self.assertTrue(report['verified'])
             self.assertTrue(report['fresh'])
             manifest=json.loads((output/'related/manifest.json').read_text())
-            self.assertEqual(len(manifest['shards']),2)
+            self.assertEqual(len(manifest['shards']),1)  # One shared class fixture.
             self.assertEqual(sorted(sum(manifest['shards'],[])),names)
             self.assertEqual(manifest['selection']['timingCosts'],dict.fromkeys(names,10))
             events=[json.loads(line) for line in (output/'related/events.jsonl').read_text().splitlines()]

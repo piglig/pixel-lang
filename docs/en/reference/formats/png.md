@@ -1,12 +1,16 @@
-# Executable image container 0.9 (language/encoding 0.8)
+# Executable PNG
 
-[中文](../../../zh-CN/reference/formats/png.md) · [English](png.md) · [Documentation](../../README.md)
+[简体中文](../../../zh-CN/reference/formats/png.md) · [English](png.md) · [Documentation](../../README.md)
+
+The container version is 0.9. PNG preserves semantic pixels for the entry and reachable modules, recoverable without original source; execution still requires the toolchain.
+
+## Contract and interface
 
 The image is an RGBA PNG with no rendered text. Decoding requires exact pixels. PNG ancillary chunks are neither required nor used to carry source text, AST, bytecode or dependencies. The visible body contains the actual spatial token grids for the entry and all reachable modules. The image is not a screenshot of code.
 
 ## Physical container
 
-The first RGB bytes encode `PXIMG\x08\r\n`, followed by three big-endian uint32 values: compressed header length, expanded header length and CRC32 of the compressed payload. Together these occupy 20 bytes. Subsequent RGB bytes contain zlib-compressed JSON describing format/version, scale, canvas dimensions, entry and module placements. All header pixels are opaque. The metadata is itself physical pixel data, not a PNG text chunk.
+The first RGB bytes encode `PXIMG\x09\r\n`, followed by three big-endian uint32 values: compressed header length, expanded header length and CRC32 of the compressed payload. Together these occupy 20 bytes. Subsequent RGB bytes contain zlib-compressed JSON describing format/version, scale, canvas dimensions, entry and module placements. All header pixels are opaque. The metadata is itself physical pixel data, not a PNG text chunk.
 
 The header contains each module's source schema excluding pixels and recursive bundles: versions, dimensions, explicit connections and optional annotations (file names, symbol names, import names, text ranges). No complete textual program or compiled executable is embedded. Symbol annotations enable readable recovery; IDs and body tokens govern execution. Structural regions and connections retain the same role as in the native spatial container.
 
@@ -18,7 +22,7 @@ Do not resize, apply color correction, screenshot or convert to JPEG. Byte-ident
 
 ## Language encoding extensions
 
-Source language/encoding/format and VM/IR are 0.8. Old artifacts are rejected. Literal and builtin categories:
+Source language/encoding/format and VM/IR are 0.9. Old artifacts are rejected. Literal and builtin categories:
 
 - R=18: int64 head, payload zero, followed by four R=112 uint16 words.
 - R=19: UTF-8 string head, payload byte length, followed by R=112 words; final odd-byte padding is zero.
@@ -33,8 +37,12 @@ Type and punctuation tables add strings, unit and typed-array delimiters. `do` d
 
 ## Bounded connection headers (container 0.9)
 
-The native writer emits header version `0.9`, preserving the `PXIMG\x08\r\n` prefix and the language/semantic-pixel format `0.8`. Each module stores an empty `spatial.links` and a `linkChunks` array. Each chunk is a lowercase hexadecimal string containing zlib-compressed UTF-8 JSON for at most 512 connections. Connections keep their original order and schema; neither source text nor bytecode is introduced.
+The native writer emits header version `0.9`, using the `PXIMG\x09\r\n` prefix and the language/semantic-pixel format `0.9`. Each module stores an empty `spatial.links` and a `linkChunks` array. Each chunk is a lowercase hexadecimal string containing zlib-compressed UTF-8 JSON for at most 512 connections. Connections keep their original order and schema; neither source text nor bytecode is introduced.
 
 Limits per module: at most 1,000,000 links and 1,954 chunks. A chunk expands to at most 100,000 bytes and has at most 200,000 hex characters. Empty chunks, malformed hex/zlib/JSON, trailing compressed data, and simultaneous inline and chunked links are rejected. Empty link tables use an empty chunk array. General JSON node/string limits remain unchanged. Chunks are prepared once and reused while planning header placement.
 
-Readers also accept legacy container `0.8` with inline links; a `0.9` header must supply chunks. This does not change semantic source documents or bundled language versions.
+Readers accept only container 0.9 with chunked links and the `PXIMG\\x09\\r\\n` signature. Older containers and inline-link headers are rejected.
+
+## Further reading
+
+- [Documentation index](../../README.md)

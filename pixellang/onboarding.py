@@ -24,7 +24,7 @@ def create_project(destination, name=None):
         raise ValueError("Project destination must be an empty directory; existing files will not be replaced")
     files = {
         "pixel.toml": f'format = 1\n\n[project]\nname = "{name}"\nentry = "main.pxl"\n\n[[test]]\nname = "greeting"\nentry = "main.pxl"\nexpected = "expected.json"\n',
-        "main.pxl": 'fn main() {\n    print("Hello, PixelLang!")\n}\n',
+        "main.pxl": 'effect fn main() {\n    print("Hello, PixelLang!")\n}\n',
         "expected.json": '["Hello, PixelLang!"]\n',
         ".gitignore": "dist/\n.venv/\n",
         "README.md": f"# {name}\n\n```sh\npixel run .\npixel test .\npixel build .\n```\n\nEdit `main.pxl` and update `expected.json` when the expected output changes.\n",

@@ -1,0 +1,315 @@
+import "failures.pxl" as failures
+import "model.pxl" as model
+import "checker_state.pxl" as state
+import "constant_math.pxl" as arithmetic
+import "types.pxl" as types
+
+fn Symbol(module: int, node: int, resolved: model.ResolvedTypes) -> int {
+    for reference in resolved.bound.references { if reference.module == module && reference.node == node { return reference.symbol } }
+    return -1
+}
+
+fn Designator(module: int, index: int, resolved: model.ResolvedTypes) -> bool {
+    let nodes = resolved.bound.project.modules[module].syntax.nodes
+    let node = nodes[index]
+    if node.kind == "context_variant" { return true }
+    if node.kind == "specialize" { return Designator(module, node.children[0], resolved) }
+    let symbol = Symbol(module, index, resolved)
+    if symbol >= 0 {
+        let target = resolved.bound.symbols[symbol]
+        if target.kind == "record" || target.kind == "enum" { return true }
+        if target.kind == "builtin" {
+            for name in ["Point3", "Vec3", "Transform3", "Option", "Result", "Error"] { if target.name == name { return true } }
+        }
+    }
+    if node.kind == "field" { return Designator(module, node.children[0], resolved) }
+    return false
+}
+
+// Initial state uses constructor inputs and data expressions, never an implicit
+// call to arbitrary user code, per-step inputs, clocks or file capabilities.
+fn Allowed(module: int, index: int, inputs: bool, allowSpace: bool, resolved: model.ResolvedTypes) -> bool {
+    let nodes = resolved.bound.project.modules[module].syntax.nodes
+    let node = nodes[index]
+    if node.kind == "literal_int" || node.kind == "literal_float64" || node.kind == "literal_str" || node.kind == "literal_keyword" { return true }
+    if node.kind == "name" || node.kind == "field" || node.kind == "context_variant" {
+        if Designator(module, index, resolved) { return true }
+        let symbol = Symbol(module, index, resolved)
+        if inputs && symbol >= 0 && resolved.bound.symbols[symbol].kind == "initial_parameter" { return true }
+        return node.kind == "field" && Allowed(module, node.children[0], inputs, allowSpace, resolved)
+    }
+    if node.kind == "annotate" { return Allowed(module, node.children[0], inputs, allowSpace, resolved) }
+    if node.kind == "construct" {
+        if !Designator(module, node.children[0], resolved) { return false }
+        for child in slice(node.children, 1, len(node.children)) {
+            let item = nodes[child]
+            if len(item.children) == 0 {
+                let symbol = Symbol(module, child, resolved)
+                if !inputs || symbol < 0 || resolved.bound.symbols[symbol].kind != "initial_parameter" { return false }
+            } else if len(item.children) != 1 || !Allowed(module, item.children[0], inputs, allowSpace, resolved) { return false }
+        }
+        return true
+    }
+    if node.kind == "call" {
+        var callee = node.children[0]
+        if nodes[callee].kind == "specialize" { callee = nodes[callee].children[0] }
+        var allowed = Designator(module, callee, resolved)
+        let symbol = Symbol(module, callee, resolved)
+        if symbol >= 0 {
+            let target = resolved.bound.symbols[symbol]
+            if target.kind == "builtin" && target.name == "Space" && allowSpace { allowed = true }
+        }
+        if !allowed { return false }
+        for argument in slice(node.children, 1, len(node.children)) { if !Allowed(module, argument, inputs, allowSpace, resolved) { return false } }
+        return true
+    }
+    if node.kind == "index" {
+        return inputs && Allowed(module, node.children[0], inputs, allowSpace, resolved) && Allowed(module, node.children[1], inputs, allowSpace, resolved)
+    }
+    if node.kind == "array" || node.kind == "unary" || node.kind == "binary" || node.kind == "map_entry" || node.kind == "map" || node.kind == "map_inferred" {
+        for child in node.children {
+            if node.kind == "map" && (nodes[child].kind == "type" || nodes[child].kind == "type_array" || nodes[child].kind == "type_fn") { continue }
+            if !Allowed(module, child, inputs, allowSpace, resolved) { return false }
+        }
+        return true
+    }
+    return false
+}
+
+export fn Constant(module: int, index: int, resolved: model.ResolvedTypes) -> bool = Allowed(module, index, false, true, resolved)
+export fn Initializer(module: int, index: int, allowSpace: bool, resolved: model.ResolvedTypes) -> bool = Allowed(module, index, true, allowSpace, resolved)
+
+record Evaluation { module: int, types: map[string, int], current: int, spaces: map[string, bool] }
+fn Value(e: Evaluation, index: int, kind: string, value: json, fields: [string], children: [model.FlowConstant]) -> model.FlowConstant {
+    return model.FlowConstant{node: index, typeId: e.types[string(index)], kind, value, fields, children}
+}
+fn Scalar(e: Evaluation, index: int, value: json) -> model.FlowConstant = Value(e, index, "scalar", value, [], [])
+record ConstantPair { left: model.FlowConstant, right: model.FlowConstant }
+// Compare typed values, not their source nodes, field order or JSON spelling.
+fn Equal(e: Evaluation, left: model.FlowConstant, right: model.FlowConstant, resolved: model.ResolvedTypes) -> Result[bool, Error] {
+    var pending: [ConstantPair] = [ConstantPair{left, right}]
+    var work = 0
+    while len(pending) > 0 {
+        let pair = pending[len(pending) - 1]
+        pending.pop()
+        let a = pair.left
+        let b = pair.right
+        work += 1
+        if work > 1000000 { return .Err(failures.New("Equality comparison budget exceeded in state initializer")) }
+        if a.typeId != b.typeId || a.kind != b.kind { return .Ok(false) }
+        if a.kind == "scalar" {
+            if !jsonAsBool(arithmetic.Binary("==", resolved.types[a.typeId].name, a.value, b.value)?)? { return .Ok(false) }
+            continue
+        }
+        if a.kind == "enum" && jsonAsString(a.value)? != jsonAsString(b.value)? { return .Ok(false) }
+        if len(a.children) != len(b.children) { return .Ok(false) }
+        // Charge pending work before allocating comparison pairs.
+        work += len(a.children)
+        if work > 1000000 { return .Err(failures.New("Equality comparison budget exceeded in state initializer")) }
+        if a.kind == "map" {
+            var index = 0
+            while index < len(a.children) {
+                var found = -1
+                var other = 0
+                while other < len(b.children) {
+                    work += 1
+                    if work > 1000000 { return .Err(failures.New("Equality comparison budget exceeded in state initializer")) }
+                    if Equal(e, a.children[index], b.children[other], resolved)? { found = other + 1; break }
+                    other += 2
+                }
+                if found < 0 { return .Ok(false) }
+                pending.append(ConstantPair{left: a.children[index + 1], right: b.children[found]})
+                index += 2
+            }
+        } else if a.kind == "array" {
+            for index, child in a.children { pending.append(ConstantPair{left: child, right: b.children[index]}) }
+        } else {
+            var positions: map[string, int] = map[string, int]{}
+            for index, name in b.fields { positions[name] = index }
+            for index, name in a.fields {
+                if !positions.has(name) { return .Ok(false) }
+                pending.append(ConstantPair{left: a.children[index], right: b.children[positions[name]]})
+            }
+        }
+    }
+    return .Ok(true)
+}
+fn Member(value: model.FlowConstant, name: string) -> Result[model.FlowConstant, Error] {
+    for index, field in value.fields { if field == name { return .Ok(value.children[index]) } }
+    return .Err(failures.New("Missing constant field: " + name))
+}
+fn Abs(value: float64) -> float64 { if value < 0.0 { return -value }; return value }
+fn Transform(value: model.FlowConstant) -> Result[model.FlowConstant, Error] {
+    let matrix = Member(value, "rotation")?
+    if len(matrix.children) != 3 { return .Err(failures.New("Transform requires a 3 by 3 rotation")) }
+    var rows: [[float64]] = []
+    for row in matrix.children {
+        if len(row.children) != 3 { return .Err(failures.New("Transform requires a 3 by 3 rotation")) }
+        var values: [float64] = []
+        for item in row.children {
+            let number = jsonAsFloat64(item.value)?
+            if Abs(number) > 1.000000000001 { return .Err(failures.New("Transform rotation must be orthonormal")) }
+            values.append(number)
+        }
+        rows.append(values)
+    }
+    var i = 0
+    while i < 3 {
+        var j = 0
+        while j < 3 {
+            var product = 0.0
+            var k = 0
+            while k < 3 { product += rows[i][k] * rows[j][k]; k += 1 }
+            var expected = 0.0
+            if i == j { expected = 1.0 }
+            if Abs(product - expected) > 1e-12 { return .Err(failures.New("Transform rotation must be orthonormal")) }
+            j += 1
+        }
+        i += 1
+    }
+    let a = rows[0]
+    let b = rows[1]
+    let c = rows[2]
+    let determinant = a[0] * (b[1]*c[2] - b[2]*c[1]) - a[1] * (b[0]*c[2] - b[2]*c[0]) + a[2] * (b[0]*c[1] - b[1]*c[0])
+    if Abs(determinant - 1.0) > 1e-12 { return .Err(failures.New("Transform rotation must preserve handedness")) }
+    return .Ok(value)
+}
+fn SpatialBinary(e: Evaluation, index: int, op: string, left: model.FlowConstant, right: model.FlowConstant, resolved: inout model.ResolvedTypes) -> Result[model.FlowConstant, Error] {
+    var vector = left
+    var factor = right
+    if left.kind != "spatial" { vector = right; factor = left }
+    var result = Value(e, index, "spatial", jsonNull(), [], [])
+    var equal = true
+    for axis in ["x", "y", "z"] {
+        let a = Member(vector, axis)?
+        var value = 0.0
+        if op == "*" { value = arithmetic.Float("*", jsonAsFloat64(a.value)?, jsonAsFloat64(factor.value)?)? }
+        else {
+            let b = Member(right, axis)?
+            if op == "==" || op == "!=" { equal = equal && jsonAsFloat64(a.value)? == jsonAsFloat64(b.value)? }
+            else { value = arithmetic.Float(op, jsonAsFloat64(a.value)?, jsonAsFloat64(b.value)?)? }
+        }
+        result.fields.append(axis)
+        result.children.append(model.FlowConstant{node: index, typeId: types.Scalar("float64", &resolved), kind: "scalar", value: jsonFrom(value), fields: [], children: []})
+    }
+    if op == "==" { return .Ok(Scalar(e, index, jsonFrom(equal))) }
+    if op == "!=" { return .Ok(Scalar(e, index, jsonFrom(!equal))) }
+    return .Ok(result)
+}
+fn Eval(index: int, e: inout Evaluation, resolved: inout model.ResolvedTypes) -> Result[model.FlowConstant, Error] {
+    let nodes = resolved.bound.project.modules[e.module].syntax.nodes
+    let node = nodes[index]
+    e.current = index
+    if node.kind == "literal_int" { return .Ok(Scalar(e, index, jsonFrom(parseInt(node.text)?))) }
+    if node.kind == "literal_float64" { return .Ok(Scalar(e, index, jsonFrom(parseFloat64(node.text)?))) }
+    if node.kind == "literal_str" { return .Ok(Scalar(e, index, jsonFrom(node.text))) }
+    if node.kind == "literal_keyword" { return .Ok(Scalar(e, index, jsonFrom(node.text == "true"))) }
+    if node.kind == "annotate" { return Eval(node.children[0], &e, &resolved) }
+    if node.kind == "unary" {
+        let operand = nodes[node.children[0]]
+        if node.text == "-" && operand.kind == "literal_int" { return .Ok(Scalar(e, index, jsonFrom(parseInt("-" + operand.text)?))) }
+        let value = Eval(node.children[0], &e, &resolved)?
+        e.current = index
+        if node.text != "-" { return .Ok(Scalar(e, index, jsonFrom(!jsonAsBool(value.value)?))) }
+        if resolved.types[value.typeId].name == "int" { return .Ok(Scalar(e, index, jsonFrom(arithmetic.Integer("-", 0, jsonAsInt(value.value)?)?))) }
+        return .Ok(Scalar(e, index, jsonFrom(-jsonAsFloat64(value.value)?)))
+    }
+    if node.kind == "binary" {
+        let left = Eval(node.children[0], &e, &resolved)?
+        if node.text == "&&" && !jsonAsBool(left.value)? { return .Ok(Scalar(e, index, jsonFrom(false))) }
+        if node.text == "||" && jsonAsBool(left.value)? { return .Ok(Scalar(e, index, jsonFrom(true))) }
+        let right = Eval(node.children[1], &e, &resolved)?
+        e.current = index
+        if node.text == "==" { return .Ok(Scalar(e, index, jsonFrom(Equal(e, left, right, resolved)?))) }
+        if node.text == "!=" { return .Ok(Scalar(e, index, jsonFrom(!Equal(e, left, right, resolved)?))) }
+        if left.kind == "spatial" || right.kind == "spatial" { return SpatialBinary(e, index, node.text, left, right, &resolved) }
+        return .Ok(Scalar(e, index, arithmetic.Binary(node.text, resolved.types[left.typeId].name, left.value, right.value)?))
+    }
+    let typ = resolved.types[e.types[string(index)]]
+    if node.kind == "context_variant" || node.kind == "name" || node.kind == "field" && Designator(e.module, index, resolved) {
+        var result = Value(e, index, "enum", jsonFrom(node.text), [], [])
+        return .Ok(result)
+    }
+    if node.kind == "field" {
+        let target = Eval(node.children[0], &e, &resolved)?
+        e.current = index
+        return Member(target, node.text)
+    }
+    if node.kind == "array" {
+        var result = Value(e, index, "array", jsonNull(), [], [])
+        for child in node.children { result.children.append(Eval(child, &e, &resolved)?) }
+        return .Ok(result)
+    }
+    if node.kind == "map" || node.kind == "map_inferred" {
+        var result = Value(e, index, "map", jsonNull(), [], [])
+        var start = 0
+        if node.kind == "map" { start = 1 }
+        for child in slice(node.children, start, len(node.children)) {
+            let entry = nodes[child]
+            let key = Eval(entry.children[0], &e, &resolved)?
+            let value = Eval(entry.children[1], &e, &resolved)?
+            e.current = child
+            var prior = 0
+            while prior < len(result.children) {
+                if Equal(e, key, result.children[prior], resolved)? { return .Err(failures.New("Duplicate map key in state initializer")) }
+                prior += 2
+            }
+            result.children.append(key); result.children.append(value)
+        }
+        return .Ok(result)
+    }
+    if node.kind == "construct" {
+        var kind = "record"
+        if typ.kind == "spatial" { kind = "spatial" }
+        var result = Value(e, index, kind, jsonNull(), [], [])
+        for child in slice(node.children, 1, len(node.children)) {
+            let field = nodes[child]
+            result.fields.append(field.text)
+            result.children.append(Eval(field.children[0], &e, &resolved)?)
+        }
+        e.current = index
+        // Even host-provided record types need a complete materializable value.
+        // In particular, Error's optional ordinary syntax cannot leave holes in
+        // a persistent state constant.
+        if typ.kind == "record" {
+            for field in types.FieldTypes(result.typeId, &resolved) {
+                var found = false
+                for name in result.fields { if name == field.name { found = true; break } }
+                if !found { return .Err(failures.New("Missing constant field: " + field.name)) }
+            }
+        }
+        if typ.name == "Transform3" && typ.kind == "spatial" { result = Transform(result)? }
+        return .Ok(result)
+    }
+    if node.kind == "call" {
+        var callee = node.children[0]
+        if nodes[callee].kind == "specialize" { callee = nodes[callee].children[0] }
+        let symbol = Symbol(e.module, callee, resolved)
+        var result = Value(e, index, "enum", jsonFrom(nodes[callee].text), [], [])
+        for child in slice(node.children, 1, len(node.children)) { result.children.append(Eval(child, &e, &resolved)?) }
+        e.current = index
+        if symbol >= 0 && resolved.bound.symbols[symbol].kind == "builtin" && resolved.bound.symbols[symbol].name == "Space" {
+            result.kind = "space"
+            let identity = jsonAsString(result.children[0].value)?
+            if len(identity) == 0 || len(identity) > 128 { return .Err(failures.New("Space identity must be nonempty and at most 128 characters")) }
+            if e.spaces.has(identity) { return .Err(failures.New("Duplicate space identity in state initializer")) }
+            e.spaces[identity] = true
+            return .Ok(result)
+        }
+        for variant in types.VariantTypes(result.typeId, &resolved) {
+            if variant.name == nodes[callee].text { for field in variant.fields { result.fields.append(field.name) } }
+        }
+        return .Ok(result)
+    }
+    return .Err(failures.New("Unsupported state constant expression: " + node.kind))
+}
+export fn Evaluate(module: int, index: int, c: inout state.State, resolved: inout model.ResolvedTypes) -> Option[model.FlowConstant] {
+    var expressionTypes: map[string, int] = map[string, int]{}
+    for item in c.expressions { if item.module == module { expressionTypes[string(item.node)] = item.typeId } }
+    var evaluation: Evaluation = Evaluation{module, types: expressionTypes, current: index, spaces: map[string, bool]{}}
+    match Eval(index, &evaluation, &resolved) {
+        .Ok(value) => { return .Some(value) },
+        .Err(error) => { state.Report(module, evaluation.current, "Invalid state initializer: " + error.message, resolved, &c) }
+    }
+    return .None
+}

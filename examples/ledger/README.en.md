@@ -1,17 +1,18 @@
 # Ledger — a PixelLang data-processing project
 
-[中文](README.md) · [English](README.en.md)
+[简体中文](README.md) · [English](README.en.md) · [Documentation](../../docs/en/README.md)
+
+Run this example with the current toolchain. Complete [installation](../../docs/en/guides/installation.md); commands below run from the repository root.
 
 Configuration, CSV parsing, row validation, filtering, grouping, statistics, sorting
 and report generation are implemented in PixelLang. The host supplies general JSON
 operations, granted file I/O and the language runtime. From the repository root:
 
 ```sh
-uv sync --locked
-.venv/bin/pixel test examples/ledger
-.venv/bin/pixel build examples/ledger
+pixel test examples/ledger
+pixel build examples/ledger
 mkdir -p /tmp/ledger-output
-.venv/bin/pixel run examples/ledger/dist/program.png \
+pixel run examples/ledger/dist/program.png \
   --input examples/ledger/fixtures/config.json \
   --read-root examples/ledger/fixtures \
   --write-root /tmp/ledger-output
@@ -62,5 +63,5 @@ with fresh input.
 In VS Code open this directory, set pixellang.readRoot to fixtures and writeRoot to
 an existing report directory. Supply the JSON in Studio Runtime input or F5 launch
 input. Python needs the runtime dependencies. Optional configuration uses Option[T];
-collections.Sort uses an anonymous comparator with inferred Group type. Float averages
+collections.SortedBy uses an anonymous comparator with inferred Group type. Float averages
 are for presentation, not integer monetary settlement.

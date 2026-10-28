@@ -1,0 +1,117 @@
+import "model.pxl" as model
+import "types.pxl" as types
+import "flow_graph.pxl" as graph
+
+fn Report(module: int, index: int, message: string, resolved: model.ResolvedTypes, plan: inout model.TypedFlow) {
+    let source = resolved.bound.project.modules[module]
+    let node = source.syntax.nodes[index]
+    var line = 1
+    var column = 1
+    for token in source.syntax.tokens { if token.start >= node.start { line = token.line; column = token.column; break } }
+    plan.diagnostics.append(model.Diagnostic{source: source.path, phase: "flow-type", message, start: node.start, end: node.end, line, column})
+}
+
+// Only persistent child declarations are planned here. All computations use the
+// ordinary expression checker, including calls, generic inference and projections.
+export fn Analyze(module: int, declaration: int, references: map[string, int], resolved: inout model.ResolvedTypes) -> model.TypedFlow {
+    let structural = graph.Analyze(module, declaration, resolved.bound)
+    var plan = model.TypedFlow{module, stateful: len(structural.states) > 0 || len(structural.instances) > 0, graph: structural, initializers: map[string, model.FlowConstant]{}, instances: [], diagnostics: structural.diagnostics}
+    plan.diagnostics.extend(resolved.diagnostics)
+    // Structural errors must not hide independently checkable constructors in
+    // an unfinished editor document. Invalid binding/type inputs still stop us.
+    if len(resolved.diagnostics) > 0 { return plan }
+    let nodes = resolved.bound.project.modules[module].syntax.nodes
+    for instance in structural.instances {
+        let creation = nodes[nodes[instance].children[0]]
+        if creation.kind != "call" {
+            Report(module, instance, "Instance declaration requires a direct flow constructor call", resolved, &plan)
+            continue
+        }
+        let callee = creation.children[0]
+        var target = -1
+        let reference = string(module) + ":" + string(callee)
+        if references.has(reference) { target = references[reference] }
+        if target < 0 || resolved.bound.symbols[target].kind != "flow" {
+            Report(module, callee, "Instance constructor must name a flow declaration", resolved, &plan)
+            continue
+        }
+        let symbol = resolved.bound.symbols[target]
+        if symbol.typeId < 0 { Report(module, callee, "Flow constructor has no valid signature", resolved, &plan); continue }
+        let signature = resolved.types[symbol.typeId]
+        var inputs: [model.TypeField] = []
+        let targetNodes = resolved.bound.project.modules[symbol.module].syntax.nodes
+        for child in targetNodes[symbol.node].children {
+            if targetNodes[child].kind == "parameter" {
+                inputs.append(model.TypeField{name: targetNodes[child].text, typeId: signature.arguments[len(inputs)]})
+            }
+        }
+        plan.instances.append(model.FlowInstance{node: instance, symbol: target, inputs, result: signature.arguments[len(signature.arguments) - 1]})
+    }
+    return plan
+}
+
+fn AddCounts(source: map[string, int], target: inout map[string, int]) {
+    for key, count in source {
+        if !target.has(key) { target[key] = 0 }
+        target[key] += count
+    }
+}
+fn StepCounts(index: int, calls: map[string, int], nodes: [model.Node]) -> map[string, int] {
+    let node = nodes[index]
+    var result = map[string, int]{}
+    // Lambdas execute outside this expression evaluation. The expression checker
+    // separately rejects stepping a child from a different function owner.
+    if node.kind == "lambda" { return result }
+    if node.kind == "match" || node.kind == "match_stmt" {
+        AddCounts(StepCounts(node.children[0], calls, nodes), &result)
+        var alternatives = map[string, int]{}
+        var guards = map[string, int]{}
+        for arm in slice(node.children, 1, len(node.children)) {
+            let children = nodes[arm].children
+            // Only guards preceding this selected body may have executed.
+            // A later guard cannot execute after an earlier arm was selected.
+            if len(children) == 3 { AddCounts(StepCounts(children[1], calls, nodes), &guards) }
+            var counts = guards
+            AddCounts(StepCounts(children[len(children) - 1], calls, nodes), &counts)
+            for key, count in counts {
+                if !alternatives.has(key) || alternatives[key] < count { alternatives[key] = count }
+            }
+        }
+        AddCounts(alternatives, &result)
+        return result
+    }
+    for child in node.children { AddCounts(StepCounts(child, calls, nodes), &result) }
+    if calls.has(string(index)) {
+        let key = string(calls[string(index)])
+        if !result.has(key) { result[key] = 0 }
+        result[key] += 1
+    }
+    return result
+}
+
+export fn ValidateSteps(calls: [model.CallResolution], declarations: map[string, int], resolved: model.ResolvedTypes, plan: inout model.TypedFlow) {
+    var steps = map[string, int]{}
+    for call in calls {
+        if call.module == plan.module && call.kind == "flow-child-step" { steps[string(call.node)] = call.symbol }
+    }
+    let nodes = resolved.bound.project.modules[plan.module].syntax.nodes
+    var counts = map[string, int]{}
+    var expressions = plan.graph.values
+    expressions.extend(plan.graph.updates)
+    if plan.graph.output >= 0 { expressions.append(plan.graph.output) }
+    for expression in expressions {
+        let children = nodes[expression].children
+        AddCounts(StepCounts(children[len(children) - 1], steps, nodes), &counts)
+    }
+    for instance in plan.instances {
+        var count = 0
+        let declaration = string(plan.module) + ":" + string(instance.node)
+        if declarations.has(declaration) {
+            let symbol = string(declarations[declaration])
+            if counts.has(symbol) { count = counts[symbol] }
+        }
+        if count > 1 {
+            Report(plan.module, instance.node, "Child instance may step more than once in one activation: " + nodes[instance.node].text, resolved, &plan)
+        }
+    }
+}

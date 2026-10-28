@@ -1,103 +1,96 @@
+import "checked_operations.pxl" as checked
 import "types.pxl" as types
 import "checker_state.pxl" as state
+import "model.pxl" as model
 
-export fn Fixed(c: state.State, module: int, index: int, arguments: [int], expected: [int], result: int, visit: fn(state.State, int, int, int)->int) -> int {
-    if len(arguments) != len(expected) { state.Report(c, module, index, "Builtin argument count mismatch"); return -1 }
+export fn Fixed(module: int, index: int, arguments: [int], expected: [int], result: int, visit: fn(int, int, int, inout state.State, inout model.ResolvedTypes) -> int, c: inout state.State, resolved: inout model.ResolvedTypes) -> int {
+    if len(arguments) != len(expected) { state.Report(module, index, "Builtin argument count mismatch", resolved, &c); return -1 }
     for position, argument in arguments {
-        let actual = visit(c, module, argument, expected[position])
-        if actual == state.Scalar(c, "unit") { state.Report(c, module, argument, "Builtin arguments require a value") }
-        state.Match(c, module, argument, expected[position], actual)
+        let actual = visit(module, argument, expected[position], &c, &resolved)
+        if actual == state.Scalar("unit", &resolved) { state.Report(module, argument, "Builtin arguments require a value", resolved, &c) }
+        state.Match(module, argument, expected[position], actual, resolved, &c)
     }
     return result
 }
-export fn Builtin(c: state.State, module: int, index: int, name: string, arguments: [int], expected: int, visit: fn(state.State, int, int, int)->int) -> int {
-    let unit = state.Scalar(c, "unit")
-    let integer = state.Scalar(c, "int")
-    let floatType = state.Scalar(c, "float64")
-    let boolean = state.Scalar(c, "bool")
-    let text = state.Scalar(c, "string")
-    let jsonType = state.Scalar(c, "json")
-    let strings = types.Structural(c.resolved, "array", [text])
-    if name == "utf8Encode" { return Fixed(c, module, index, arguments, [text], types.Structural(c.resolved, "array", [integer]), visit) }
-    if name == "utf8Decode" { return Fixed(c, module, index, arguments, [types.Structural(c.resolved, "array", [integer])], text, visit) }
-    if name == "float64Bytes" { return Fixed(c, module, index, arguments, [floatType], types.Structural(c.resolved, "array", [integer]), visit) }
-    if name == "float64FromBytes" { return Fixed(c, module, index, arguments, [types.Structural(c.resolved, "array", [integer])], floatType, visit) }
-    if name == "crc32" { return Fixed(c, module, index, arguments, [types.Structural(c.resolved, "array", [integer])], integer, visit) }
-    if name == "zlibCompress" { let bytes = types.Structural(c.resolved, "array", [integer]); return Fixed(c, module, index, arguments, [bytes], bytes, visit) }
-    if name == "zlibDecompress" { let bytes = types.Structural(c.resolved, "array", [integer]); return Fixed(c, module, index, arguments, [bytes, integer], bytes, visit) }
-    if name == "input" { return Fixed(c, module, index, arguments, [], text, visit) }
-    if name == "jsonNull" { return Fixed(c, module, index, arguments, [], jsonType, visit) }
-    if name == "print" { return Fixed(c, module, index, arguments, [-1], unit, visit) }
-    if name == "assert" { return Fixed(c, module, index, arguments, [boolean], boolean, visit) }
-    if name == "fail" { return Fixed(c, module, index, arguments, [text], unit, visit) }
-    if name == "parseInt" { return Fixed(c, module, index, arguments, [text], integer, visit) }
-    if name == "parseFloat64" { return Fixed(c, module, index, arguments, [text], floatType, visit) }
-    if name == "unicodeCategory" || name == "trim" || name == "readText" { return Fixed(c, module, index, arguments, [text], text, visit) }
-    if name == "replace" { return Fixed(c, module, index, arguments, [text, text, text], text, visit) }
-    if name == "split" { return Fixed(c, module, index, arguments, [text, text], strings, visit) }
-    if name == "join" { return Fixed(c, module, index, arguments, [strings, text], text, visit) }
-    if name == "readBytes" { return Fixed(c, module, index, arguments, [text, integer], types.Structural(c.resolved, "array", [integer]), visit) }
-    if name == "writeBytes" { return Fixed(c, module, index, arguments, [text, types.Structural(c.resolved, "array", [integer])], boolean, visit) }
-    if name == "writeText" { return Fixed(c, module, index, arguments, [text, text], boolean, visit) }
-    if name == "jsonParse" { return Fixed(c, module, index, arguments, [text], jsonType, visit) }
-    if name == "jsonStringify" || name == "jsonKind" || name == "jsonAsString" { return Fixed(c, module, index, arguments, [jsonType], text, visit) }
-    if name == "jsonGet" { return Fixed(c, module, index, arguments, [jsonType, text], jsonType, visit) }
-    if name == "jsonAt" { return Fixed(c, module, index, arguments, [jsonType, integer], jsonType, visit) }
-    if name == "jsonAsInt" { return Fixed(c, module, index, arguments, [jsonType], integer, visit) }
-    if name == "jsonAsFloat64" { return Fixed(c, module, index, arguments, [jsonType], floatType, visit) }
-    if name == "jsonAsBool" { return Fixed(c, module, index, arguments, [jsonType], boolean, visit) }
-    if name == "jsonKeys" { return Fixed(c, module, index, arguments, [jsonType], strings, visit) }
-    if name == "jsonFrom" { return Fixed(c, module, index, arguments, [-1], jsonType, visit) }
-    if name == "Some" && len(arguments) == 1 {
-        var hint = -1
-        if expected >= 0 && c.resolved.types[expected].name == "Option" { hint = c.resolved.types[expected].arguments[0] }
-        let actual = visit(c, module, arguments[0], hint)
-        state.Match(c, module, arguments[0], hint, actual)
-        if actual >= 0 { return types.OptionType(c.resolved, actual) }
-        return -1
+export fn Builtin(module: int, index: int, name: string, arguments: [int], expected: int, visit: fn(int, int, int, inout state.State, inout model.ResolvedTypes) -> int, c: inout state.State, resolved: inout model.ResolvedTypes) -> int {
+    let value = CheckValue(module, index, name, arguments, expected, visit, &c, &resolved)
+    if checked.Handles(name) { return checked.ResultType(value, &resolved) }
+    return value
+}
+fn CheckValue(module: int, index: int, name: string, arguments: [int], expected: int, visit: fn(int, int, int, inout state.State, inout model.ResolvedTypes) -> int, c: inout state.State, resolved: inout model.ResolvedTypes) -> int {
+    let unit = state.Scalar("unit", &resolved)
+    let integer = state.Scalar("int", &resolved)
+    let floatType = state.Scalar("float64", &resolved)
+    let boolean = state.Scalar("bool", &resolved)
+    let text = state.Scalar("string", &resolved)
+    let jsonType = state.Scalar("json", &resolved)
+    let strings = types.Structural("array", [text], &resolved)
+    if name == "utf8Encode" { return Fixed(module, index, arguments, [text], types.Structural("array", [integer], &resolved), visit, &c, &resolved) }
+    if name == "utf8Decode" { return Fixed(module, index, arguments, [types.Structural("array", [integer], &resolved)], text, visit, &c, &resolved) }
+    if name == "float64Bytes" { return Fixed(module, index, arguments, [floatType], types.Structural("array", [integer], &resolved), visit, &c, &resolved) }
+    if name == "float64FromBytes" { return Fixed(module, index, arguments, [types.Structural("array", [integer], &resolved)], floatType, visit, &c, &resolved) }
+    if name == "crc32" { return Fixed(module, index, arguments, [types.Structural("array", [integer], &resolved)], integer, visit, &c, &resolved) }
+    if name == "zlibCompress" {
+        let bytes = types.Structural("array", [integer], &resolved)
+        if len(arguments) != 1 { state.Report(module, index, "Builtin argument count mismatch", resolved, &c); return -1 }
+        let actual = visit(module, arguments[0], bytes, &c, &resolved)
+        // Compression reads synchronously and publishes independent bytes;
+        // it neither retains nor grants write access to its input buffer.
+        state.Match(module, arguments[0], bytes, actual, resolved, &c)
+        return bytes
     }
-    if len(arguments) == 0 { state.Report(c, module, index, "Builtin requires arguments: " + name); return -1 }
-    let first = visit(c, module, arguments[0], -1)
+    if name == "zlibDecompress" { let bytes = types.Structural("array", [integer], &resolved); return Fixed(module, index, arguments, [bytes, integer], bytes, visit, &c, &resolved) }
+    if name == "readChunk" { return Fixed(module, index, arguments, [text, integer, integer], jsonType, visit, &c, &resolved) }
+    if name == "listDirectory" { return Fixed(module, index, arguments, [text], jsonType, visit, &c, &resolved) }
+    if name == "programArgs" { return Fixed(module, index, arguments, [], strings, visit, &c, &resolved) }
+    if name == "input" { return Fixed(module, index, arguments, [], text, visit, &c, &resolved) }
+    if name == "jsonNull" { return Fixed(module, index, arguments, [], jsonType, visit, &c, &resolved) }
+    if name == "print" { return Fixed(module, index, arguments, [-1], unit, visit, &c, &resolved) }
+    if name == "assert" { return Fixed(module, index, arguments, [boolean], boolean, visit, &c, &resolved) }
+    if name == "parseInt" { return Fixed(module, index, arguments, [text], integer, visit, &c, &resolved) }
+    if name == "parseFloat64" { return Fixed(module, index, arguments, [text], floatType, visit, &c, &resolved) }
+    if name == "unicodeCategory" || name == "trim" || name == "readText" { return Fixed(module, index, arguments, [text], text, visit, &c, &resolved) }
+    if name == "replace" { return Fixed(module, index, arguments, [text, text, text], text, visit, &c, &resolved) }
+    if name == "split" { return Fixed(module, index, arguments, [text, text], strings, visit, &c, &resolved) }
+    if name == "join" { return Fixed(module, index, arguments, [strings, text], text, visit, &c, &resolved) }
+    if name == "readBytes" { return Fixed(module, index, arguments, [text, integer], types.Structural("array", [integer], &resolved), visit, &c, &resolved) }
+    if name == "writeBytes" { return Fixed(module, index, arguments, [text, types.Structural("array", [integer], &resolved)], boolean, visit, &c, &resolved) }
+    if name == "writeText" { return Fixed(module, index, arguments, [text, text], boolean, visit, &c, &resolved) }
+    if name == "jsonParse" { return Fixed(module, index, arguments, [text], jsonType, visit, &c, &resolved) }
+    if name == "jsonStringify" || name == "jsonKind" || name == "jsonAsString" { return Fixed(module, index, arguments, [jsonType], text, visit, &c, &resolved) }
+    if name == "jsonGet" { return Fixed(module, index, arguments, [jsonType, text], jsonType, visit, &c, &resolved) }
+    if name == "jsonAt" { return Fixed(module, index, arguments, [jsonType, integer], jsonType, visit, &c, &resolved) }
+    if name == "jsonAsInt" { return Fixed(module, index, arguments, [jsonType], integer, visit, &c, &resolved) }
+    if name == "jsonAsFloat64" { return Fixed(module, index, arguments, [jsonType], floatType, visit, &c, &resolved) }
+    if name == "jsonAsBool" { return Fixed(module, index, arguments, [jsonType], boolean, visit, &c, &resolved) }
+    if name == "jsonKeys" { return Fixed(module, index, arguments, [jsonType], strings, visit, &c, &resolved) }
+    if name == "jsonFrom" { return Fixed(module, index, arguments, [-1], jsonType, visit, &c, &resolved) }
+    if len(arguments) == 0 { state.Report(module, index, "Builtin requires arguments: " + name, resolved, &c); return -1 }
+    let first = visit(module, arguments[0], -1, &c, &resolved)
     if first < 0 { return -1 }
-    let typ = c.resolved.types[first]
+    let storage = first
+    let typ = resolved.types[storage]
     if name == "string" && len(arguments) == 1 {
-        if first != text && first != integer && first != floatType && first != boolean { state.Report(c, module, index, "string requires a scalar") }
+        if first != text && first != integer && first != floatType && first != boolean { state.Report(module, index, "string requires a scalar", resolved, &c) }
         return text
     }
     if (name == "int" || name == "float64") && len(arguments) == 1 {
-        if first != integer && first != floatType { state.Report(c, module, index, "Conversion requires a number") }
+        if first != integer && first != floatType { state.Report(module, index, "Conversion requires a number", resolved, &c) }
         if name == "int" { return integer }
         return floatType
     }
     if name == "len" && len(arguments) == 1 {
-        if typ.kind != "array" && typ.kind != "map" && first != text && first != jsonType { state.Report(c, module, index, "len requires a collection or string") }
+        if typ.kind != "array" && typ.kind != "map" && first != text && first != jsonType { state.Report(module, index, "len requires a collection or string", resolved, &c) }
         return integer
     }
     if name == "slice" && len(arguments) == 3 && (typ.kind == "array" || first == text) {
-        for argument in slice(arguments, 1, 3) { state.Match(c, module, argument, integer, visit(c, module, argument, integer)) }
+        for argument in slice(arguments, 1, 3) { state.Match(module, argument, integer, visit(module, argument, integer, &c, &resolved), resolved, &c) }
         return first
     }
-    if typ.kind == "array" {
-        if (name == "extend" || name == "arrayRepeat") && len(arguments) == 2 {
-            var expected = first
-            if name == "arrayRepeat" { expected = integer }
-            state.Match(c, module, arguments[1], expected, visit(c, module, arguments[1], expected))
-            return first
-        }
-        if name == "append" && len(arguments) == 2 {
-            state.Match(c, module, arguments[1], typ.arguments[0], visit(c, module, arguments[1], typ.arguments[0]))
-            return first
-        }
-        if name == "pop" && len(arguments) == 1 { return typ.arguments[0] }
+    if typ.kind == "array" && name == "arrayRepeat" && len(arguments) == 2 {
+        state.Match(module, arguments[1], integer, visit(module, arguments[1], integer, &c, &resolved), resolved, &c)
+        return first
     }
-    if typ.kind == "map" {
-        if name == "keys" && len(arguments) == 1 { return strings }
-        if (name == "has" || name == "delete" || name == "lookup") && len(arguments) == 2 {
-            state.Match(c, module, arguments[1], text, visit(c, module, arguments[1], text))
-            if name == "lookup" { return types.OptionType(c.resolved, typ.arguments[0]) }
-            return boolean
-        }
-    }
-    state.Report(c, module, index, "Unsupported builtin signature: " + name)
+    state.Report(module, index, "Unsupported builtin signature: " + name, resolved, &c)
     return -1
 }

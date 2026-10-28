@@ -1,0 +1,34 @@
+import "model.pxl" as model
+import "ir_state.pxl" as state
+
+record Collection { type: string, count: int }
+record RecordValue { type: string, fields: [string] }
+record EnumValue { type: string, variant: string, fields: [string] }
+
+// Materialize checked constant trees. Arithmetic, branches and field projection
+// have already been evaluated; only per-instance space identity is deferred.
+export fn Emit(value: model.FlowConstant, planned: model.ClosurePlan, c: inout state.Context) {
+    let resolved = planned.named.checked.resolved
+    let typ = state.TypeName(value.typeId, resolved)
+    if value.kind == "scalar" { state.ConstantValue(typ, value.value, value.node, planned, &c); return }
+    for child in value.children { Emit(child, planned, &c) }
+    if value.kind == "array" || value.kind == "map" {
+        var op = "ARRAY"
+        if value.kind == "map" { op = "MAP" }
+        state.Emit(op, jsonFrom(Collection{type: typ, count: len(value.children)}), value.node, planned, &c)
+    } else if value.kind == "space" { state.Emit("SPACE_NEW", jsonFrom(typ), value.node, planned, &c) }
+    else if value.kind == "enum" {
+        match jsonAsString(value.value) {
+            .Ok(variant) => { state.Emit("ENUM", jsonFrom(EnumValue{type: typ, variant, fields: value.fields}), value.node, planned, &c) },
+            .Err(error) => { state.Report(value.node, error.message, planned, &c) }
+        }
+    }
+    else {
+        var op = "RECORD"
+        if value.kind == "spatial" {
+            op = "SPATIAL_VALUE"
+            if resolved.types[value.typeId].name == "Transform3" { op = "SPATIAL_TRANSFORM" }
+        }
+        state.Emit(op, jsonFrom(RecordValue{type: typ, fields: value.fields}), value.node, planned, &c)
+    }
+}

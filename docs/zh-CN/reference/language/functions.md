@@ -1,63 +1,105 @@
-# 函数值与词法闭包（语言 0.8）
+# 函数、效果与闭包
 
-[中文](functions.md) · [English](../../../en/reference/language/functions.md) · [文档首页](../../README.md)
+[简体中文](functions.md) · [English](../../../en/reference/language/functions.md) · [文档首页](../../README.md)
 
-文本和语义像素均支持函数值、匿名函数与捕获。
+函数签名描述参数、结果、修改权限和外部效果。闭包捕获创建时的值，调用遵循确定的求值顺序。
 
-## 类型与调用
 
-函数类型写作 `fn(T, U) -> R`；unit 返回省略箭头，如 `fn(int)`。参数名不参与类型身份。
-类型不变，参数和结果必须精确匹配，数值转换须显式进行。
-`[fn(int) -> string]` 是函数数组，`fn(int) -> [string]` 是返回数组的函数。
-函数可作为参数或结果；具名函数、`library.transform`、显式特化 `library.identity[int]` 都可存储或用作回调。
-特化和模块访问规则与直接调用一致，调用者的私有类型可以传给公共泛型函数。
+**本页内容**
 
-先求值可调用表达式，再从左到右求值各参数，每项只执行一次。
-返回的函数（`choose()(42)`）、记录字段和数组中的函数都可直接调用。
-目标读取失败会阻止参数副作用；参数求值中替换已存函数不会改变本次选定目标。
-局部绑定在字段访问和调用中可以遮蔽模块别名。
+- [规则与接口](#规则与接口)
+- [函数类型与效果权限](#函数类型与效果权限)
+- [匿名函数与按值捕获](#匿名函数与按值捕获)
+- [求值、交付与调试](#求值交付与调试)
+- [继续阅读](#继续阅读)
 
-## 匿名函数与捕获
+## 规则与接口
 
-匿名函数具有具名参数和块体或表达式体。函数上下文提供类型时，参数注解可以省略；
-返回类型来自上下文或一致的 return 表达式。非 unit 函数必须每条路径返回，具名函数签名保持显式。
-例如在 `fn(int) -> int` 上下文中写 `fn(x) = x + 1`，或 `collections.Map(values, fn(x) = string(x))`。
-缺少输入类型证据时报告错误，不退化为动态类型；回调结果可约束泛型输出参数。
+开发编译器统一使用 `fn`。普通函数没有外部效果；需要 I/O 或创建、推进运行实例时，
+显式使用 `effect fn`。旧 `component` 声明和函数类型不再接受。
 
-```go
-fn counter() -> fn() -> int {
+```pixellang
+fn Twice(value: int) -> int = value * 2
+effect fn main() { print(Twice(21)) }
+```
+
+## 函数类型与效果权限
+
+函数类型写作 `fn(T, U) -> R`；unit 返回可省略箭头，如 `fn(int)`。
+允许外部效果的函数类型写作 `effect fn(T) -> R`。参数名不参与类型身份。
+`effect` 仅在紧邻 `fn` 时作为修饰符，其他位置仍可用作普通标识符。
+
+无外部效果的函数可用于允许外部效果的回调位置，反向不允许；`inout` 访问模式仍须匹配。参数类型逆变、返回类型协变；
+容器和名义类型的类型参数不因此获得隐式转换。
+
+```pixellang
+fn Apply(value: int, operation: fn(int) -> int) -> int = operation(value)
+effect fn Report(value: int) { print(value) }
+effect fn Visit(value: int, operation: effect fn(int)) { operation(value) }
+effect fn main() { Visit(Apply(3, Twice), Report) }
+```
+
+检查依据函数声明的契约，即使某个 `effect fn` 当前为空实现，未声明 `effect` 的函数也不能调用它。
+反过来，有效果的调用者不会向未声明 `effect` 的被调用者授予 I/O 权限。函数变量、记录中的回调、
+泛型和动态调用都保留效果信息；运行时同样检查调用边界。
+
+函数实现违反效果契约时，在该定义处诊断，不把实现中的效果推断传播给调用者。
+调用依据表达式的静态函数类型；即使 `let alias: effect fn() = pure` 的目标没有外部效果，
+调用 alias 仍需要效果权限。已成功检查且语义依赖未变的函数可复用效果检查结果。
+
+局部 `var` 修改不属于外部效果。显式参数写回使用独立的访问权限：
+
+```pixellang
+fn Increment(value: inout int) { value += 1 }
+effect fn main() {
     var count = 0
-    return fn() -> int {
-        count += 1
-        return count
-    }
+    Increment(&count)
+    print(count)
 }
 ```
 
-闭包捕获词法绑定。共享同一可变绑定的闭包会观察定义函数和兄弟闭包的赋值。
-不可变绑定不能重绑，但引用对象仍共享可变身份。捕获在定义调用返回后存活；嵌套闭包传递外层绑定，
-不同调用拥有不同环境。
-每次进入声明、循环迭代、模式分支或 catch 都创建新绑定，逃逸闭包保留所属那次绑定。
-递归闭包可通过给已初始化的可变函数绑定赋 lambda 实现；声明名称在自身初始化式中不可用。
+函数类型保留 `inout`，如 `fn(inout int)`。参数和调用处都必须显式标记，
+访问不得逃逸或被闭包捕获。同一根变量的重叠可写访问会被拒绝；不同变量可以分别写入。
+`&` 仅用于调用参数，不是通用引用值。
 
-函数值不支持相等或 JSON 表示。检查阶段拒绝判等和 JSON 解码，编码时报 json.unsupported_type，
-包括集合或记录内部的函数。
+`fn` 保证没有外部效果，不保证没有调用者可观察的修改。带 `inout` 的函数会写回实参，
+不能仅凭缺少 `effect` 就缓存调用结果、合并调用或重排执行。局部值修改与参数写回
+也不能混为一谈：前者不会改变调用者的值，后者必须保留显式写回。
 
-## 像素、单元与回放
+## 匿名函数与按值捕获
 
-像素编码函数类型、匿名函数引用和独立函数体区域。解码拒绝重复、缺失、复用或未引用的体身份；
-捕获从词法引用重新计算，不依赖编辑器元数据。参考实现 `captures.py` 分配声明身份并传递捕获，
-检查器解析类型、可变性和槽；每个具体匿名体有显式参数与捕获单元签名。
+匿名函数使用 `fn(x: T) -> R { ... }` 或 `fn(x: T) = expression`。
+上下文提供类型时可省略参数注解，例如 `fn(x) = x + 1`；缺少类型证据时报告错误。
+有外部效果的匿名函数显式写作 `effect fn(...)`。
 
-CAPTURE 将绑定装箱一次并复用单元，BIND 建立新绑定，STORE 更新已有单元，LOAD 读取值。
-CLOSURE 构造捕获环境，INVOKE 传递同一批单元。GC 追踪环境和单元中的环；快照保留身份，调试器展示单元中的值。
-内部类型写法分隔返回值，如 `fn(int)->(str)[]`，以区分外层数组和返回数组；像素显式记录 unit，文本可省略。
+所有闭包捕获创建时的值，捕获内容只读。后续外层变量修改不影响已创建的闭包：
 
-## 相关测试
+```pixellang
+effect fn main() {
+    var offset = 2
+    let add = fn(value: int) -> int = value + offset
+    offset = 10
+    print(add(3)) // 5
+}
+```
 
-`test_function_types_v6.py`、`test_function_values_v6.py`、`test_captures_v6.py`、
-`test_capture_cells_v6.py`、`test_closures_v6.py` 覆盖类型往返、求值顺序、访问控制、共享单元、
-新绑定、GC、递归、泛型捕获、PNG 执行、逐步回放、导航和局部变量。
-调试环境隐藏内部函数 ID，以源码名称显示捕获；翻页与逆向状态保留引用路径。
-匿名函数格式化缩进且幂等。畸形捕获签名、绕过环境的直接调用、带捕获入口、缺失或未引用体区域会被拒绝。
-泛型回调算法见[集合](collections.md)及 `examples/callback-analysis`。
+嵌套闭包和每次循环迭代遵守同样规则。需要持续变化的实例状态时使用 flow；
+闭包不能通过捕获外层变量获得隐蔽的共享修改能力。捕获普通值不需要权限转换；
+`inout` 访问不能被捕获。整体实现进度见[设计原则](../../internals/design.md)。
+
+## 求值、交付与调试
+
+先求值可调用表达式，再从左到右求值各参数，每项只执行一次。参数求值过程中替换
+原先保存函数的变量，不会改变本次已选定的调用目标。
+
+PNG 保存函数类型、效果、匿名函数体身份和捕获关系。源码恢复后重新检查同一契约，
+入口包装函数保留所需效果权限。字节码使用 `CAPTURE_VALUE` 创建只读捕获单元，
+旧 `CAPTURE` 指令被拒绝。检查点与回放保持捕获值，不通过重读外层变量重建闭包。
+
+相关验证包括 `test_function_effect_runtime.py`、`test_native_function_effects.py`、
+`test_value_captures.py`、`test_native_value_captures.py` 与 `test_native_inout_png.py`。
+
+## 继续阅读
+
+- [完整文档目录](../../README.md)
+- [语言总览](overview.md)

@@ -1,16 +1,17 @@
+import json
 import unittest
 from pathlib import Path
 
-from pixellang.project import compile_project
+from tests.native_compiler import compile_native_sources
 from pixellang.vm import VM
 
 
 class PictureColorTests(unittest.TestCase):
     def test_every_palette_byte_matches_independent_xor_oracle(self):
         source = Path(__file__).resolve().parents[1] / 'selfhost' / 'picture_colors.pxl'
-        code = compile_project({'picture_colors.pxl': source.read_text(), 'main.pxl':
-            'import "picture_colors.pxl" as c\nfn main(){print(c.Build())}'})[1].bytecode
-        palette = VM(code, max_steps=1000000, max_heap_items=100000, max_heap_objects=10000).run()[0]
+        code = compile_native_sources({'picture_colors.pxl': source.read_text(), 'main.pxl':
+            'import "picture_colors.pxl" as c\neffect fn main(){print(jsonFrom(c.Build()))}'})
+        palette = json.loads(VM(code, max_steps=1000000, max_heap_items=100000, max_heap_objects=10000).run()[0])
         categories = [16,17,18,19,20,32,48,64,80,96,112,128]
         colors = [(177,220,110),(192,171,230),(178,220,110),(230,181,127),
                   (179,220,110),(80,195,222),(240,175,94),(222,125,112),

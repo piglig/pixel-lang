@@ -1,46 +1,60 @@
 # Your first program
 
-[中文](../../zh-CN/learn/getting-started.md) · [English](getting-started.md) · [Documentation](../README.md)
+[简体中文](../../zh-CN/learn/getting-started.md) · [English](getting-started.md) · [Documentation](../README.md)
 
-At the repository root run `uv sync --locked`; Python 3.11+ is required. Save this as hello.pxl:
+Write and run a text program, export it as PNG, then recover editable source.
+First complete [installation](../guides/installation.md) and confirm `pixel doctor` succeeds. Commands below use an activated toolchain environment; a source installation can also use entries such as `uv run pixelrun`.
+
+## 1. Write and run
+
+Create `hello.pxl`:
 
 ```pixellang
-fn main() {
+effect fn main() {
     print("Hello, PixelLang!")
 }
 ```
 
 ```sh
-.venv/bin/pixelrun hello.pxl
+pixelrun hello.pxl
 ```
 
-## Arrays and sorting
+```text
+Hello, PixelLang!
+```
+
+`main` is the entry point. Printing is an external effect, so the entry uses `effect fn`.
+
+## 2. Use collection algorithms
+
+Replace the file contents with:
 
 ```pixellang
-import "std/sort.pxl" as sort
+import "std/collections.pxl" as collections
 
-fn main() {
-    let values = sort.Ints([9, 2, 7])
-    for index, value in values {
-        print(string(index) + ": " + string(value))
+effect fn main() {
+    let values = collections.Sorted([9, 2, 7])
+    for value in values {
+        print(value)
     }
 }
 ```
 
-let prevents rebinding but container contents remain mutable; use var for reassignment.
-Functions and variables are statically checked. Imports use relative paths or std/ for libraries.
+Run it again to print `2`, `7`, then `9`. `Sorted` returns a sorted array and `let` creates a readonly binding. Use `var` for local updates; other copies remain unchanged.
 
-## Multiple files and delivery
-
-The [data-report example](../../../examples/data-report/main.pxl) reads CSV, sorts and computes statistics:
+## 3. Deliver an image
 
 ```sh
-.venv/bin/pixel test examples/data-report
-.venv/bin/pixel build examples/data-report
-.venv/bin/pixel run examples/data-report/dist/program.png --input examples/data-report/measurements.csv
+pixelpack hello.pxl -o program.png
+pixelrun program.png
+pixelunpack program.png -o recovered
+pixelrun recovered/hello.pxl
 ```
 
-The PNG holds the semantic-pixel program. `pixelunpack program.png -o empty-directory`
-recovers editable files without original comments/formatting. Continue with
-[projects](../guides/projects.md), [language](../reference/language/overview.md) and
-[standard library](../reference/standard-library.md).
+All three executions should agree. Use an empty recovery directory. PNG includes the entry and reachable modules, but execution still requires the PixelLang runtime. Recovery produces canonical source without original comments or formatting. Preserve exact pixels when transferring the image.
+
+## Next steps
+
+- [Projects](../guides/projects.md): manifests, dependencies and tests.
+- [Language overview](../reference/language/overview.md): types, declarations and control flow.
+- [Spatial programming](../guides/spatial-programming.md): positions and connections that participate in computation.

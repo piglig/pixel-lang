@@ -1,4 +1,4 @@
-export fn InsertionSort(values: [int]) {
+export fn InsertionSort(values: inout [int]) {
     var i = 1
     while i < len(values) {
         let current = values[i]

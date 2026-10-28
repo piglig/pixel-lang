@@ -4,17 +4,17 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
+from tests.native_compiler import compile_native_sources
 from pixellang.bootstrap_image import HOST_STAGES
 from pixellang.compiler_service import CompilerService
-from pixellang.project import compile_project
 from pixellang.vm import VM
-from tests import test_selfhost_pixel_ast as fixtures
+from tests.pixel_language_cases import PixelLanguageCases
 
 
-class SelfHostedRecoveryTests(unittest.TestCase):
+class SelfHostedRecoveryTests(PixelLanguageCases, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.code=compile_project({p.name:p.read_text() for p in Path('selfhost').glob('*.pxl')})[1].bytecode
+        cls.code=compile_native_sources({p.name:p.read_text() for p in Path('selfhost').glob('*.pxl')})
 
     def assert_execution(self,source,expected):
         files=source if isinstance(source,dict) else {'main.pxl':source}
@@ -35,7 +35,7 @@ class SelfHostedRecoveryTests(unittest.TestCase):
         return document['result']['document']
 
     def test_nested_paths_and_readable_names(self):
-        self.assert_execution({'main.pxl':'import "src/lib.pxl" as lib\nfn main(){print(lib.answer())}',
+        self.assert_execution({'main.pxl':'import "src/lib.pxl" as lib\neffect fn main(){print(lib.answer())}',
             'src/lib.pxl':'import "../data/value.pxl" as data\nexport fn answer()->int=data.get()',
             'data/value.pxl':'export fn get()->int=42'},[42])
 
@@ -46,7 +46,7 @@ class SelfHostedRecoveryTests(unittest.TestCase):
 
     def test_metadata_free_png_and_readable_named_png(self):
         service=CompilerService(self.code)
-        files={'main.pxl':'fn main(){let values=[3,1,2];print(values)}'}
+        files={'main.pxl':'effect fn main(){let values=[3,1,2];print(values)}'}
         for operation in ('export-png','export-debug-png'):
             with self.subTest(operation=operation):
                 image=service.request(dict(version=1,operation=operation,files=files))['result']['image']
@@ -75,10 +75,3 @@ class SelfHostedRecoveryTests(unittest.TestCase):
             compiled=service.request(dict(version=1,operation='compile',**project))
             self.assertEqual(compiled['status'],'ok',compiled)
             self.assertEqual(VM(compiled['result']['bytecode']).run(),[42])
-
-
-# Share the complete language fixtures, while replacing their assertion with a
-# native PNG -> source -> native compiler -> execution check.
-for name in dir(fixtures.SelfHostedPixelASTTests):
-    if name.startswith('test_') and name not in ('test_real_data_processing_projects','test_rejected_sources_are_not_executable'):
-        setattr(SelfHostedRecoveryTests,name,getattr(fixtures.SelfHostedPixelASTTests,name))

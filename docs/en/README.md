@@ -1,60 +1,68 @@
-<p align="center">
-  <img src="../../assets/branding/icon.png" alt="PixelLang spatial icon" width="112" height="112">
-</p>
-
 # PixelLang documentation
 
-[中文](../zh-CN/README.md) · [English](README.md) · [Documentation](README.md)
+[简体中文](../zh-CN/README.md) · [English](README.md) · [Documentation](README.md)
 
-These pages describe the current product, contracts and development workflows. Start with the tutorial; use the reference for exact behavior.
+Start with a running program, then choose a task guide. Use references for exact behavior and internals for compiler work.
+
+| Your goal | Start with |
+| --- | --- |
+| Try PixelLang | [Install](guides/installation.md) → [First program](learn/getting-started.md) |
+| Develop an application | [Projects](guides/projects.md) → [Studio](guides/studio.md) |
+| Explore distinctive features | [Spatial programming](guides/spatial-programming.md) · [State machines](guides/state-machines.md) |
+| Contribute code | [Architecture](internals/architecture.md) → [Contributing](contributing/README.md) |
 
 ## Start here
 
-- [Product overview](product.md)
-- [Getting started](learn/getting-started.md)
+- [Project scope](product.md)
+- [Installation](guides/installation.md)
+- [Your first program](learn/getting-started.md)
 
-## Guides
+## Build something
 
 - [Projects, dependencies and tests](guides/projects.md)
 - [VS Code Studio](guides/studio.md)
 - [Command-line tools](guides/cli.md)
+- [Spatial programming](guides/spatial-programming.md)
+- [State machines and event applications](guides/state-machines.md)
 
 ## Language reference
 
-- [Language overview](reference/language/overview.md)
+- [Syntax overview](reference/language/overview.md)
 - [Numbers](reference/language/numbers.md)
-- [Data and aliasing](reference/language/data.md)
-- [Functions and closures](reference/language/functions.md)
-- [Generics](reference/language/generics.md)
-- [Enums, Option and match](reference/language/enums.md)
-- [Errors](reference/language/errors.md)
+- [Values and update permissions](reference/language/data.md)
+- [Functions, effects and closures](reference/language/functions.md)
+- [Generics and capabilities](reference/language/generics.md)
+- [Enums, Option and pattern matching](reference/language/enums.md)
+- [Result and error propagation](reference/language/errors.md)
 - [Typed JSON](reference/language/json.md)
-- [Collection callbacks](reference/language/collections.md)
-- [Spatial semantics](reference/language/spatial.md)
+- [Collections and algorithms](reference/language/collections.md)
+- [Space and source layout](reference/language/spatial.md)
 
-## Libraries, protocols and formats
+## APIs and formats
 
 - [Standard library](reference/standard-library.md)
 - [Compiler service protocol](reference/compiler-service.md)
-- [File formats](reference/formats/files.md)
-- [RGBA encoding](reference/formats/encoding.md)
+- [File types](reference/formats/files.md)
+- [Semantic-pixel encoding](reference/formats/encoding.md)
 - [Executable PNG](reference/formats/png.md)
-- [Bytecode](reference/formats/bytecode.md)
+- [PixelVM bytecode](reference/formats/bytecode.md)
 - [Runtime and replay](reference/formats/runtime.md)
 
-## Internals
+## Understand the implementation
 
-- [Compiler architecture](internals/architecture.md)
-- [Python responsibilities](internals/python.md)
+- [Architecture](internals/architecture.md)
+- [Design principles and future work](internals/design.md)
 - [Compiler interfaces](internals/compiler-interfaces.md)
-- [Reference AST and canonicalization](internals/representations.md)
-- [IR and reuse](internals/ir.md)
-- [Self-hosting verification](internals/self-hosting.md)
-- [Native VM prototype](internals/native-vm.md)
+- [IR and function reuse](internals/ir.md)
+- [Value storage](internals/value-storage.md)
+- [Spatial model implementation](internals/spatial-model.md)
+- [Dataflow and transactions](internals/dataflow.md)
+- [Python responsibilities](internals/python.md)
+- [Self-hosting and source recovery](internals/self-hosting.md)
 
-## Contributing
+## Contribute
 
-- [Contributing and documentation](contributing/README.md)
+- [Contributing](contributing/README.md)
 - [Layered verification](contributing/verification.md)
 - [Conformance coverage](contributing/conformance.md)
 - [Performance measurement](contributing/performance.md)

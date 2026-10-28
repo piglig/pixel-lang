@@ -1,40 +1,72 @@
-# 数据语义（语言 0.8）
+# 值与修改权限
 
-[中文](data.md) · [English](../../../en/reference/language/data.md) · [文档首页](../../README.md)
+[简体中文](data.md) · [English](../../../en/reference/language/data.md) · [文档首页](../../README.md)
 
-绑定是名称到值的关联，对象是可被多个绑定引用的数据。普通赋值不隐式深复制，也不产生深不可变性。
+普通值的复制不会产生共享修改。用 let 表达只读绑定，用 var 表达本地修改，用 inout 表达显式写回。
 
-| 操作 | 规则 |
+## 规则与接口
+
+普通记录、数组、映射和枚举采用值语义。`let` 保存只读值，`var` 允许修改本地值，
+包括字段与嵌套容器。赋值、传参和返回不会产生可观察的共享修改。
+
+| 写法 | 含义 |
 | --- | --- |
-| `let name = value` | 绑定不可重新赋值，所引用字段和元素可修改。 |
-| `var name = value` | 可重新赋同一静态类型的值。 |
-| 函数参数 | 绑定不可重新赋值，对象与调用者共享。 |
-| 赋值与传参 | 复制标量值、共享对象引用；局部重新绑定不改变调用者绑定。 |
-| 字段和下标更新 | 所有别名可观察修改，仍执行边界和类型检查。 |
-| `collections.Copy(values)` | 创建新外层数组，元素共享；不会复制元素记录。 |
-| 独立记录 | 显式构造新记录，并复制需要独立的嵌套对象。 |
-| 标量相等 | 相同 int、float64、bool、string 按值比较，无数值转换。 |
-| 对象相等 | 数组、映射、记录、枚举、JSON、函数不能直接判等；显式比较所需字段。 |
-| 遍历 | 入口时建立外层浅快照，嵌套对象仍共享。 |
-| 闭包 | 捕获绑定，共享可变绑定单元；每次声明和迭代建立新绑定。 |
-| 可捕获失败 | 已产生的修改保留，catch 不回滚事务。 |
-| 回放 | 恢复对象身份与修改，观察过去不会重复外部写入。 |
+| `let values = [1]` | 不能重新赋值或修改元素。 |
+| `var values = [1]` | 可以重新赋值、修改元素，或调用 `values.append(2)`。 |
+| `var copy = original` | 得到独立的值；修改 copy 不改变 original。 |
+| `item with { count: 2 }` | 产生同类型的新记录值，未指定字段保留。 |
+| 普通函数参数 | 只读；可赋给本地 var 后修改副本。 |
+| `values: inout [int]` | 显式写回调用者变量，调用写作 `sort(&values)`。 |
+| 闭包捕获 | 创建时按值捕获，捕获内容只读。 |
+| 历史快照 | 后续修改不会改写旧值；回放不重复外部写入。 |
 
 ```pixellang
-import "std/collections.pxl" as collections
-record Item { amount: int }
-fn change(item: Item) { item.amount = 9 }
-fn main() {
-    let original = [Item{amount: 1}]
-    let copied = collections.Copy(original)
-    change(copied[0])
-    print(original[0].amount)
-    copied[0] = Item{amount: 2}
-    print(original[0].amount)
+record Item { values: [int] }
+effect fn main() {
+    let original = Item{values: [1]}
+    var edited = original
+    edited.values.append(2)
+    let replaced = original with { values: [3] }
+    print(original.values) // [1]
+    print(edited.values)   // [1, 2]
+    print(replaced.values) // [3]
 }
 ```
 
-两次输出都是 9：元素 Item 最初共享，替换 copied 的元素不会替换 original 的元素。
-自动深复制会隐藏成本，还需定义环和闭包策略；这不是赋值或 Copy 的含义。
-结构相等同样需要递归身份和环规则，因此当前使用显式领域字段比较。
-相关测试：`tests/test_data_semantics_v8.py`、闭包、集合回调和捕获单元测试。
+实现允许结构共享，值隔离不等于每次赋值都深复制，也不保证每次修改都无分配。
+数组和映射的局部更新复制受影响的结构路径；资源预算及取消仍然生效。
+
+普通值与运行身份分开：空间快照是值，实体、连接和活跃 flow 实例有显式身份。
+复制流程句柄不会创建一个新实例；独立实例必须显式创建。
+
+以上值语义已接入随附开发编译器和运行时。旧 `mut`、`Frozen` 类型包装以及
+`freeze`、`thaw` 内建转换已删除；同名用户声明遵循普通名称解析规则。
+可恢复失败使用 `Result` 与显式 `?` 传播，见[错误](errors.md)。
+
+## 结构相等
+
+`==` 与 `!=` 要求两侧静态类型相同。int、float64、bool、string、同坐标系的
+Point3／Vec3 可比较；数组、类型化映射、记录和枚举在其所有元素或字段类型均可比较时可比较。
+类型检查包括枚举未选中的变体和空容器的元素类型。无约束泛型参数、函数、JSON、
+Flow、Space、Entity、Link、Transform3 不支持直接判等。
+
+数组比较顺序和元素；映射比较键集合及对应值，忽略插入顺序；记录比较同一名义类型的字段；
+枚举比较同一名义类型的变体和负载。源码位置、分配地址和对象共享形状不参与值比较。
+普通值不提供可变引用环；空间图通过显式实体和连接身份表达环。
+比较不修改对象或分配 VM 堆值，运行时遍历受独立工作预算限制，并可取消。
+float64 使用精确值比较；几何近似判断应显式选择容差，不把容差隐含在 `==` 中。
+
+状态初值中的常量比较也须保持相同的内容语义，包括不同字段书写顺序与映射插入顺序。
+运行时语义测试见 `tests/test_value_equality.py`，编译及 PNG 往返测试见
+`tests/test_native_equality.py`。
+值更新与隔离验证见 `tests/test_native_value_assignment.py`、`tests/test_native_value_captures.py`
+和 `tests/test_native_collection_methods.py`。
+
+## Unicode 分类
+
+`unicodeCategory(text)` 接受单个字符，返回 `Lu`、`Ll`、`Lo` 等两字母 Unicode 通用类别。参考运行时和原生后端均使用随附的 Unicode **15.1.0** 数据表，不随宿主 Python 的 Unicode 版本变化。空字符串或多个字符会被拒绝。
+
+## 继续阅读
+
+- [完整文档目录](../../README.md)
+- [语言总览](overview.md)
