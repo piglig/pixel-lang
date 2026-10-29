@@ -4,7 +4,7 @@ The token is internal lookup data, never a persisted hash or a source-level valu
 It is flat so hashing an arbitrarily nested enum does not recurse in the host.
 """
 from pixellang.typeexpr import parse_type
-from pixellang.spatial_values import SpatialValue, FrozenValue
+from pixellang.spatial_values import EntityId, LinkId, SpatialValue, FrozenValue
 from dataclasses import dataclass, field
 
 MAX_KEY_ITEMS = 4096
@@ -41,7 +41,7 @@ def supports(vm, name):
         typ = parse_type(current)
         if typ.kind == 'scalar' and typ.name in ('int', 'float64', 'bool', 'str'):
             continue
-        if typ.kind == 'spatial' and typ.name in ('Point3', 'Vec3'):
+        if typ.kind == 'spatial' and typ.name in ('Point3', 'Vec3', 'EntityId', 'LinkId'):
             continue
         if current in vm.bytecode['enums']:
             for fields in vm.bytecode['enums'][current].values():
@@ -89,6 +89,9 @@ def token(vm, value, expected, span=None, *, frozen=False):
             if type(item) is float and item == 0:
                 item = 0.0
             output.append((typ, item))
+        elif type(item) in (EntityId, LinkId):
+            size += len(item.owner.encode("utf-8")) + len(item.key.encode("utf-8"))
+            output.append((typ, item.owner, item.key))
         elif type(item) is SpatialValue:
             output.append((typ, item.frame.unit, tuple(0.0 if x == 0 else x for x in item.xyz)))
         elif isinstance(item, Ref) or immutable_enum:

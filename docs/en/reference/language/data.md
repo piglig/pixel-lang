@@ -53,7 +53,7 @@ Recoverable failure uses `Result` and explicit `?` propagation; see [errors](err
 This contract is implemented in the runtime, self-hosted checker and bundled
 development compiler, with targeted source and program PNG round-trip verification.
 See [self-hosting verification](../../internals/self-hosting.md) for the current development artifact’s acceptance scope. `==` and `!=` require identical static operand types. Integers,
-float64, booleans, strings, and Point3/Vec3 in the same frame are comparable. Arrays,
+float64, booleans, strings, and Point3/Vec3 and EntityId/LinkId in the same frame are comparable. Arrays,
 typed maps, records and enums are comparable when all their element or field
 types are comparable, including inactive enum variants and empty container element
 types. Unconstrained type parameters, functions, JSON, Flow, Space, Entity, Link and

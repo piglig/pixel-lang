@@ -1,14 +1,14 @@
 {
   "protocolVersion": 1,
-  "sha256": "3cc306815369803061f407ba04f5e7c4bcadd1f0fe79912cc37518d4c5b1344d",
-  "sourceSha256": "d8a3966cb28b91bd5d03245fa400f28c2eabee8bcafb4bd2b63766519c059cec",
+  "sha256": "1697893f9c9887dfea69694ed6ba12d63da359c5d3622d70d5cdea6fb5a9568c",
+  "sourceSha256": "da4ca382e26c19c83ca0ef8a2109ac96d42d5030d63cfb6089a96ca47c80d916",
   "files": 75,
-  "seedSha256": "3cc306815369803061f407ba04f5e7c4bcadd1f0fe79912cc37518d4c5b1344d",
+  "seedSha256": "1697893f9c9887dfea69694ed6ba12d63da359c5d3622d70d5cdea6fb5a9568c",
   "provenance": "Development native compiler: self-host fixed point and full PNG recovery verified; distribution and Studio acceptance are separate gates.",
-  "acceptanceSha256": "b4538824da55f7970f0f8ce58eb6f502692c11c25f46410b619ccc0eb98c14dc",
+  "acceptanceSha256": "cd31d9c16e715a8169ad1a7317ad862158d82ed0fe216f681cab1df36091dde8",
   "native": {
     "file": "compiler-native",
-    "sha256": "7936f5a43aa2c523e81e79e833a8619d35646aab79159a73703fe45f16390e3a",
+    "sha256": "a151e6e807410487911686ce96685b049a690216b517b38b5b41d2ae831b00a5",
     "platform": "darwin",
     "machine": "arm64",
     "wheelTag": "macosx_26_0_arm64"

@@ -61,7 +61,7 @@ effect fn run(count: int) {
     'spatial-state': '''frame World = meters
 flow Scene() step(value: int) -> Space[World, int, string] {
  state world = Space::[World, int, string]("scene")
- let updated = world.insert(Point3::[World]{x: 0.0, y: 0.0, z: float64(value)}, value)
+ let updated = world.insert(string(value), Point3::[World]{x: 0.0, y: 0.0, z: float64(value)}, value)
  next world = updated
  output updated
 }

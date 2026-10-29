@@ -22,7 +22,7 @@ frame World = meters
 record Road { cost: int, enabled: bool }
 
 fn Count(network: Space[World, string, Road]) -> int {
-    let origin = network.get(0)
+    let origin = network.entityId("observer")
     return len(network.neighbors(origin, 2.0))
 }
 flow Inspect() step(network: Space[World, string, Road]) -> int {
@@ -31,16 +31,16 @@ flow Inspect() step(network: Space[World, string, Road]) -> int {
 }
 effect fn main() {
     var network = Space::[World, string, Road]("room")
-    network = network.insert(Point3::[World]{x: 0.0, y: 0.0, z: 0.0}, "observer")
-    network = network.insert(Point3::[World]{x: 0.0, y: 0.0, z: 1.5}, "moving")
-    network = network.connect(network.get(0), network.get(1), Road{cost: 7, enabled: true})
+    network = network.insert("observer", Point3::[World]{x: 0.0, y: 0.0, z: 0.0}, "observer")
+    network = network.insert("moving", Point3::[World]{x: 0.0, y: 0.0, z: 1.5}, "moving")
+    network = network.connect("road", network.entityId("observer"), network.entityId("moving"), Road{cost: 7, enabled: true})
     let before = network
-    network = network.move(network.get(1), Point3::[World]{x: 0.0, y: 0.0, z: 3.0})
+    network = network.move(network.entityId("moving"), Point3::[World]{x: 0.0, y: 0.0, z: 3.0})
     print(Inspect().step(before))
     print(Inspect().step(network))
-    let road = network.outgoing(network.get(0))[0]
+    let road = network.outgoing(network.entityId("observer"))[0]
     print(road.payload.cost)
-    print(network.target(road).position.z)
+    print(network.require(road.target).position.z)
 }
 ```
 

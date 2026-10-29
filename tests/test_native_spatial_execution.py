@@ -168,32 +168,32 @@ effect fn main() {
  let forward = Vec3::[World]{x: 0.0, y: 0.0, z: 1.0}
  var data: Data = Data{values: [10, 20]}
  let empty = Space::[World, Data,string]("room")
- let first = empty.insert(origin, data)
- let before = first.insert(near, data)
- let a = before.get(0)
- let b = before.get(1)
+ let first = empty.insert("entity-0", origin, data)
+ let before = first.insert("entity-1", near, data)
+ let a = before.require(before.entityId("entity-0"))
+ let b = before.require(before.entityId("entity-1"))
  data.values[0] = 99
  var retrieved = a.payload
  print(retrieved.values[0])
  retrieved.values[0] = 55
  print(a.payload.values[0])
- print(len(before.neighbors(a, 2.0)))
- let after = before.move(b, far)
- print(len(after.neighbors(a, 2.0)))
- print(before.get(1).position.z)
- print(after.get(1).position.z)
- print(after.ahead(a, b, forward, 0.0))
+ print(len(before.neighbors(a.id, 2.0)))
+ let after = before.move(b.id, far)
+ print(len(after.neighbors(a.id, 2.0)))
+ print(before.require(before.entityId("entity-1")).position.z)
+ print(after.require(after.entityId("entity-1")).position.z)
+ print(after.ahead(a.id, b.id, forward, 0.0))
  print(origin.distance(near))
  print(forward.dot(forward))
- let removed = after.remove(b)
- let inserted = removed.insert(near, data)
- print(inserted.get(2).id)
+ let removed = after.remove(b.id)
+ let inserted = removed.insert("entity-2", near, data)
+ print(inserted.require(inserted.entityId("entity-2")).id.key)
  print(empty.size())
- let other = Space::[World, Data,string]("other").insert(origin, data)
+ let other = Space::[World, Data,string]("other").insert("entity-3", origin, data)
  print(other.size())
 }
 ''')
-        self.assertEqual(VM(code).run(), [10, 10, 1, 0, 2.0, 3.0, True, 2.0, 1.0, 2, 0, 1])
+        self.assertEqual(VM(code).run(), [10, 10, 1, 0, 2.0, 3.0, True, 2.0, 1.0, "entity-2", 0, 1])
 
     def test_explicit_transform_applies_units_and_copies_rotation(self):
         code = self.compile(r'''frame Cabin = centimeters
@@ -221,11 +221,11 @@ effect fn main() {
         prefix = '''frame World = meters
 effect fn main(){
  let origin=Point3::[World]{x:0.0,y:0.0,z:0.0}
- let first=Space::[World,int,string]("first").insert(origin,1)
- let other=Space::[World,int,string]("other").insert(origin,2)
+ let first=Space::[World,int,string]("first").insert("entity-0", origin,1)
+ let other=Space::[World,int,string]("other").insert("entity-1", origin,2)
 '''
         for statement, message in (
-            ('print(other.neighbors(first.get(0),2.0))', 'different space'),
+            ('print(other.neighbors(first.entityId("entity-0"),2.0))', 'belonging to this space'),
             ('let bad=Transform3::[World,World]{rotation:[[9.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]],translation:Vec3::[World]{x:0.0,y:0.0,z:0.0}}', 'orthonormal'),
         ):
             with self.subTest(statement=statement):
@@ -245,9 +245,9 @@ effect fn main() {
  let space = Space::[World, int,string]("a")
 '''
         for statement in [
-            'let bad = space.insert(wrong, 1)',
-            'let bad = space.insert(p, "wrong payload")',
-            'let bad = space.neighbors(space.get(0), true)',
+            'let bad = space.insert("sample", wrong, 1)',
+            'let bad = space.insert("sample", p, "wrong payload")',
+            'let bad = space.neighbors(space.entityId("sample"), true)',
             'let bad = Space::[int, int,string]("b")',
             'let bad = p.distance(wrong)',
             'let bad = Transform3::[World, Other]{rotation: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], translation: Vec3::[World]{x: 0.0, y: 0.0, z: 0.0}}',
@@ -452,7 +452,7 @@ effect fn main() {
 
     def test_native_space_state_is_namespaced_per_instance_and_replayable(self):
         code = self.compile('''frame World = meters
-fn Insert(world: Space[World, int,string], value: int) -> Space[World, int,string] = world.insert(Point3::[World]{x: 0.0, y: 0.0, z: 0.0}, value)
+fn Insert(world: Space[World, int,string], value: int) -> Space[World, int,string] = world.insert(string(value), Point3::[World]{x: 0.0, y: 0.0, z: 0.0}, value)
 fn Size(world: Space[World, int,string]) -> int = world.size()
 flow Scene() step(value: int) -> int {
  state world: Space[World, int,string] = Space::[World, int,string]("world")

@@ -6,17 +6,17 @@ effect fn main() {
     let far = Point3::[World]{x: 0.0, y: 0.0, z: 3.0}
 
     let empty = Space::[World, string,string]("room")
-    let first = empty.insert(origin, "observer")
-    let before = first.insert(near, "moving object")
-    let observer = before.get(0)
-    let moving = before.get(1)
+    let first = empty.insert("observer", origin, "observer")
+    let before = first.insert("moving", near, "moving object")
+    let observer = before.entityId("observer")
+    let moving = before.entityId("moving")
 
     print(len(before.neighbors(observer, 2.0)))
     let after = before.move(moving, far)
     print(len(after.neighbors(observer, 2.0)))
 
     // Earlier snapshots retain their positions and neighborhood results.
-    print(before.get(1).position.z)
-    print(after.get(1).position.z)
+    print(before.require(moving).position.z)
+    print(after.require(moving).position.z)
     print(after.ahead(observer, moving, Vec3::[World]{x: 0.0, y: 0.0, z: 1.0}, 0.0))
 }

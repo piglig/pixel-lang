@@ -1,8 +1,8 @@
 const vscode = require('vscode'), assert = require('node:assert/strict'), path = require('node:path');
 const source = `frame World = meters
 fn Count(world: Space[World, string, Cost]) -> int {
- let observer = world.get(0)
- return len(world.neighbors(observer, 2.0))
+ let observer = world.require(world.entityId("entity-0"))
+ return len(world.neighbors(observer.id, 2.0))
 }
 flow Inspect() step(world: Space[World, string, Cost]) -> int {
  let count = Count(world)
@@ -13,9 +13,9 @@ effect fn main() {
  let origin = Point3::[World]{x: 0.0, y: 0.0, z: 0.0}
  let near = Point3::[World]{x: 0.0, y: 0.0, z: 2.0}
  let empty = Space::[World, string, Cost]("room")
- let first = empty.insert(origin, "observer")
- let populated = first.insert(near, "moving")
- let world = populated.connect(populated.get(0), populated.get(1), Cost{weights:[5,8]})
+ let first = empty.insert("entity-0", origin, "observer")
+ let populated = first.insert("entity-1", near, "moving")
+ let world = populated.connect("link-0", populated.require(populated.entityId("entity-0")).id, populated.require(populated.entityId("entity-1")).id, Cost{weights:[5,8]})
  print(Inspect().step(world))
 }
 `;
@@ -69,7 +69,7 @@ async function run() {
   const first = await launch();
   assert.equal(first.view.entities[1].position[2],2);
   assert.equal(first.view.linkTotal,1);
-  assert.deepEqual(first.view.links.map(link=>[link.id,link.source,link.target]),[[0,0,1]]);
+  assert.deepEqual(first.view.links.map(link=>[link.id,link.source,link.target]),[['link-0','entity-0','entity-1']]);
   const cost = await debug.customRequest('pixelFlowChildren',{...first.args,path:first.view.links[0].payload.path,start:0,count:50});
   const weights = cost.variables.find(item=>item.name==='weights'); assert(weights?.path);
   const weightPage = await debug.customRequest('pixelFlowChildren',{...first.args,path:weights.path,start:1,count:1});
@@ -79,7 +79,7 @@ async function run() {
   await waitFor(() => panel.snapshot?.project.files['main.pxl'] === document.getText(), 'saved source projection');
   const coordinates = panel.snapshot.projection.coordinates.find(item => item.source === origin.source && item.node === origin.node);
   assert(coordinates);
-  const near = await debug.customRequest('pixelFlowSpace', {...first.args,path:first.input.value.path,neighbors:{origin:0,radius:2}});
+  const near = await debug.customRequest('pixelFlowSpace', {...first.args,path:first.input.value.path,neighbors:{origin:"entity-0",radius:2}});
   assert.equal(near.total,1);
   await debug.customRequest('stepBack',{threadId:1}); await stop();
   await assert.rejects(debug.customRequest('pixelFlowSpace',{...first.args,path:first.input.value.path}), /expired/);
@@ -102,8 +102,8 @@ async function run() {
   console.log('Native spatial debug: source edited and old overlay rejected, restarting DAP.');
   const second = await launch();
   assert.equal(second.view.entities[1].position[2],3);
-  assert.deepEqual(second.view.links.map(link=>[link.id,link.source,link.target]),[[0,0,1]]);
-  const far = await debug.customRequest('pixelFlowSpace', {...second.args,path:second.input.value.path,neighbors:{origin:0,radius:2}});
+  assert.deepEqual(second.view.links.map(link=>[link.id,link.source,link.target]),[['link-0','entity-0','entity-1']]);
+  const far = await debug.customRequest('pixelFlowSpace', {...second.args,path:second.input.value.path,neighbors:{origin:"entity-0",radius:2}});
   assert.equal(far.total,0);
   await debug.customRequest('setBreakpoints',{source:{path:uri.fsPath},breakpoints:[]});
   await debug.customRequest('continue',{threadId:1});

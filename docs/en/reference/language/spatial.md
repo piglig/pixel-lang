@@ -29,38 +29,40 @@ The nonnegative integer `(X,Y)` coordinates below refer only to PNG source pixel
 
 ## Native spatial interface
 
-Frames and payload types come from the receiver without repeated type arguments.
+An identity answers **which object**; an entity or link value contains **data from one snapshot**. Use `EntityId[F, T]` and `LinkId[F, T, L]` for queries and updates. These types support equality and map keys. They cannot be constructed from raw strings: obtain them from the owning space.
 
 | Operation | Behavior |
 | --- | --- |
-| `Space::[F, T, L](identity)` | Empty snapshot; identity must be unique in a run |
-| `space.insert(position, payload)` | Retain a payload value snapshot, allocate a monotonic ID, return a snapshot |
-| `space.get(id)` | Read an entity; missing IDs cause execution faults |
-| `space.move(entity, position)` | Move by identity and return a new snapshot |
-| `space.remove(entity)` | Delete without reusing its identity |
-| `space.neighbors(entity, radius)` | Inclusive Euclidean neighborhood, excluding self |
-| `space.ahead(origin, candidate, direction, tolerance)` | Direction query; tolerance uses the space length unit |
-| `space.size()` | Entity count |
-| `space.connect(source, target, payload)` | Retain a payload value snapshot, allocate a directed link identity, return a snapshot |
-| `space.getLink(id)` | Read a link; deleted identities are never reused |
-| `space.disconnect(link)` | Remove the specified link and return a snapshot |
-| `space.setLinkPayload(link, payload)` | Replace payload while retaining identity and endpoints |
-| `space.outgoing(entity)` / `space.incoming(entity)` | Outgoing/incoming links in identity order |
-| `space.linkCount()` | Link count |
-| `space.source(link)` / `space.target(link)` | Resolve endpoints in the supplied snapshot, including their positions at that time |
-| `link.id` / `link.payload` | Read identity or payload; payloads are independent values of their declared types |
-| `entity.id` / `entity.position` / `entity.payload` | Read entity values; payloads are independent values of their declared types |
-| `point.distance(other)` / `vector.dot(other)` | Same-frame position distance and displacement dot product |
-| `transform.point(point)` / `transform.vector(vector)` | Explicit point or direction conversion |
+| `Space::[F, T, L](identity)` | Create an empty space; its identity is unique in a run |
+| `space.entityId(key) / space.linkId(key)` | Create a typed identity without inserting an object |
+| `space.insert(key, position, payload)` | Insert an entity; reject duplicate keys |
+| `space.get(id) / space.getLink(id)` | Return Option[Entity] / Option[Link]; absent means None |
+| `space.require(id) / space.requireLink(id)` | Read an object that must exist; absence is an execution fault |
+| `space.move(id, position) / space.setPayload(id, payload)` | Return an updated snapshot with the same entity identity |
+| `space.remove(id)` | Remove an entity only when no incident links remain |
+| `space.removeCascade(id)` | Remove an entity and all incident links together |
+| `space.neighbors(id, radius)` | Return nearby entities from this snapshot, excluding self |
+| `space.ahead(originId, candidateId, direction, tolerance)` | Test the projected displacement along a direction |
+| `space.connect(key, sourceId, targetId, payload)` | Insert a directed link between existing entities |
+| `space.disconnect(id) / space.setLinkPayload(id, payload)` | Remove a link or replace its payload |
+| `space.outgoing(id) / space.incoming(id)` | Return links in insertion order |
+| `space.size() / space.linkCount()` | Count entities / links |
+| `entity.id / entity.position / entity.payload` | Read the identity and data captured by this entity value |
+| `link.id / link.source / link.target / link.payload` | Read link identity, endpoint identities and captured payload |
+| `id.key` | Read the stable business key |
+| `point.distance(other) / vector.dot(other)` | Same-frame distance / dot product |
+| `transform.point(point) / transform.vector(vector)` | Convert positions / displacements explicitly |
 | `first.then(after)` | Apply first, then after |
 
-`ahead` normalizes the direction and checks whether the displacement projected onto it is strictly greater
-than `tolerance`; this parameter is not a query radius. Disconnect all incident links before removing an entity.
-Spatial methods return values without modifying receivers: `let disconnected = scene.disconnect(link)` leaves `scene` intact.
+Business keys are exact, case-sensitive strings of 1–256 characters. A key is scoped to its space and identity type. Two branches inserting the same key describe the same logical object; different keys remain different even at identical positions. Re-inserting a removed key deliberately recreates that logical identity. Use a new key for a new object.
 
-Assignment, collection mutation and `inout` cannot write through properties. `var data = link.payload` creates an
-independently editable local value; `scene.setLinkPayload(link, data)` produces an updated snapshot. Entity properties
-read the position and payload stored in that entity value. Space queries and moves resolve its identity in the receiver snapshot.
+All updates return new snapshots. Stored entity and link values keep their original data. To read an endpoint in a particular snapshot, use `space.get(link.target)` or `space.require(link.target)`. Passing a captured entity value where an identity is required is a type error; pass `entity.id` explicitly.
+
+Foreign-space identities, duplicate insertions and updates to missing objects are execution faults. `get` and `getLink` return `None` for valid identities absent from the selected snapshot. Removing an entity is explicit: disconnect its links first, or use `removeCascade`.
+
+Properties are readonly, including through containers and `inout`. Copy a payload into a local variable to edit it, then publish it with `setPayload` or `setLinkPayload`. Earlier snapshots remain unchanged.
+
+`ahead` normalizes the direction and tests whether projected displacement is strictly greater than `tolerance`, measured in the frame's length unit.
 
 ## Explicit compact regions
 
@@ -92,9 +94,9 @@ Application scheduling is configured by the host after main initializes the flow
 ## Coordinate and geometry constraints
 
 Coordinates use a right-handed frame with Y up and finite float64 components. Units are meters, centimeters or millimeters; distinct frames remain distinct types even with the same unit. Point3 represents position and Vec3 displacement: point minus point yields a vector, point plus vector yields a point, and point plus point is invalid.
-Radius queries include the boundary, exclude the origin entity and order results by stable entity identity. Radius must be finite and nonnegative.
+Radius queries include the boundary, exclude the origin entity and return results in insertion order. Radius must be finite and nonnegative.
 
-`Transform3[From, To]` has a 3×3 orthogonal `rotation` matrix and `translation: Vec3[To]`. Transforms cannot change handedness or introduce implicit scaling; frame units determine unit conversion. `first.then(after)` applies first before after. Parallel links and self-loops are valid. Deleted identities are never reused; foreign or missing identities cause execution faults.
+`Transform3[From, To]` has a 3×3 orthogonal `rotation` matrix and `translation: Vec3[To]`. Transforms cannot change handedness or introduce implicit scaling; frame units determine unit conversion. `first.then(after)` applies first before after. Parallel links and self-loops are valid. Identity lookup and absence follow the contracts above.
 
 ## Further reading
 

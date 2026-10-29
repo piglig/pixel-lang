@@ -35,13 +35,13 @@ class NativeSpatialOriginTests(unittest.TestCase):
 
     def test_entity_insert_move_and_debug_source_mapping(self):
         vm, point = self.point()
-        world = spatial.SpaceValue('room', point.frame, 'int', 'str').insert(point, 1)
-        entity = world.get(0)
+        world = spatial.SpaceValue('room', point.frame, 'int', 'str').insert("a", point, 1)
+        entity = world.require(world.entity_id("a"))
         self.assertIs(entity.position, point)
         newer = replace(point, xyz=(1.0, 2.0, 7.0), origin=spatial.SpatialOrigin('main', 90))
-        moved = world.move(entity, newer)
-        self.assertEqual(world.get(0).position.origin.node, 41)
-        self.assertEqual(moved.get(0).position.origin.node, 90)
+        moved = world.move(entity.id, newer)
+        self.assertEqual(world.require(world.entity_id("a")).position.origin.node, 41)
+        self.assertEqual(moved.require(moved.entity_id("a")).position.origin.node, 90)
         vm.stack[:] = [world, moved]
         timeline = SimpleNamespace(cursor=0, events=[], vm=vm, source_project=None,
             compiled=SimpleNamespace(debug={'types':{},'functions':{'main':{'source':'lib.pxl','module':'main'}}}),
@@ -102,8 +102,8 @@ class NativeSpatialOriginTests(unittest.TestCase):
         vm.run()
         vm.restore_checkpoint(checkpoint)
         self.assertEqual(vm.stack[-1].origin,value.origin)
-        world=spatial.SpaceValue('room',value.frame,'int','str').insert(value,1)
-        self.assertEqual(world.get(0).position.origin,value.origin)
+        world=spatial.SpaceValue('room',value.frame,'int','str').insert("a", value,1)
+        self.assertEqual(world.require(world.entity_id("a")).position.origin,value.origin)
 
     def test_vm_transform_origin_identifies_call_instead_of_operand(self):
         _,point=self.point()

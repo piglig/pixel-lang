@@ -175,7 +175,7 @@ class NativeEventRuntimeTests(unittest.TestCase):
         runtime = NativeApplicationRuntime(VM(application_program(), max_heap_items=128))
         frame = CoordinateFrame('@0:7', 'meters')
         point = SpatialValue('Point3', frame, (0.0, 0.0, 0.0))
-        scene = SpaceValue('scene', frame, 'int[]', 'str').insert(point, FrozenValue('int[]', (1, 2)))
+        scene = SpaceValue('scene', frame, 'int[]', 'str').insert('sample', point, FrozenValue('int[]', (1, 2)))
         runtime.vm.stack.extend((scene, scene))
         runtime.vm.recount_spatial()
         shared = runtime.vm.spatial_items

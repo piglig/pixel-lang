@@ -19,16 +19,32 @@ class NativeStateTests(unittest.TestCase):
 
     def test_space_links_transform_and_shared_payload_round_trip(self):
         payload = FrozenValue('int[]', (1, 2, 3))
-        scene = SpaceValue('world', self.frame, 'int[]', 'int').insert(self.point, payload).insert(self.point, payload)
-        scene = scene.connect(scene.get(0), scene.get(1), 9)
+        scene = SpaceValue('world', self.frame, 'int[]', 'int').insert("a", self.point, payload).insert("b", self.point, payload)
+        scene = scene.connect("edge", scene.entity_id("a"), scene.entity_id("b"), 9)
         transform = Transform(self.frame, self.frame,
                               ((1.0,0.0,0.0),(0.0,1.0,0.0),(0.0,0.0,1.0)), (0.0,0.0,0.0))
         encoded = NativeStateCodec(self.vm).encode((scene, scene, transform))
         restored = NativeStateCodec(self.vm).decode(json.loads(json.dumps(encoded, sort_keys=True)))
         self.assertEqual(restored, (scene, scene, transform))
         self.assertIs(restored[0], restored[1])
-        self.assertIs(restored[0].get(0).payload, restored[0].get(1).payload)
-        self.assertEqual(restored[0].get_link(0).payload, 9)
+        self.assertIs(restored[0].require(restored[0].entity_id("a")).payload, restored[0].require(restored[0].entity_id("b")).payload)
+        self.assertEqual(restored[0].require_link(restored[0].link_id("edge")).payload, 9)
+
+    def test_business_identities_round_trip_without_snapshot_membership(self):
+        scene = SpaceValue('world', self.frame, 'int[]', 'int')
+        entity, link = scene.entity_id('order-42'), scene.link_id('route')
+        value = (scene, entity, link)
+        encoded = NativeStateCodec(self.vm).encode(value)
+        restored = NativeStateCodec(self.vm).decode(json.loads(json.dumps(encoded)))
+        self.assertEqual(restored, value)
+        self.assertIsNone(restored[0].get(restored[1]))
+        self.assertIsNone(restored[0].get_link(restored[2]))
+        for identity in (entity, link):
+            for field, replacement in [('owner', 'foreign'), ('key', ''), ('key', 1)]:
+                invalid = NativeStateCodec(self.vm).encode(identity)
+                invalid['fields'][field] = replacement
+                with self.subTest(field=field), self.assertRaises(PixelError):
+                    NativeStateCodec(self.vm).decode(invalid)
 
     def test_unknown_tags_forward_references_cycles_and_wrong_frames_are_rejected(self):
         values = [{'id':0,'native':'Frame','fields':{}}, {'ref':0}, {'id':0,'tuple':[{'ref':0}]}]

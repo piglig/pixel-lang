@@ -46,7 +46,7 @@ effect fn main() {
 ## 结构相等
 
 `==` 与 `!=` 要求两侧静态类型相同。int、float64、bool、string、同坐标系的
-Point3／Vec3 可比较；数组、类型化映射、记录和枚举在其所有元素或字段类型均可比较时可比较。
+Point3／Vec3、EntityId／LinkId 可比较；数组、类型化映射、记录和枚举在其所有元素或字段类型均可比较时可比较。
 类型检查包括枚举未选中的变体和空容器的元素类型。无约束泛型参数、函数、JSON、
 Flow、Space、Entity、Link、Transform3 不支持直接判等。
 

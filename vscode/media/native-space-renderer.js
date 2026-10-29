@@ -37,11 +37,11 @@
     const vertices = new Map(items.map(item => [item.id, item])), groups = new Map(), paths = [];
     for (const link of links || []) {
       if (!vertices.has(link.source) || !vertices.has(link.target)) continue;
-      const key = JSON.stringify([Math.min(link.source, link.target), Math.max(link.source, link.target)]);
+      const key = JSON.stringify([link.source, link.target].sort());
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(link);
     }
-    for (const group of groups.values()) group.sort((a, b) => a.id - b.id).forEach((link, index) => {
+    for (const group of groups.values()) group.forEach((link, index) => {
       const a = vertices.get(link.source), b = vertices.get(link.target), length = Math.hypot(b.x - a.x, b.y - a.y);
       let from, to, c1, c2;
       if (length < 1) {

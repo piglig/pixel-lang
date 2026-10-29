@@ -4,6 +4,7 @@ import "types.pxl" as types
 
 // Names map to runtime intrinsics, not source-level wrapper calls.
 export fn Property(receiver: string, name: string) -> string {
+    if (receiver == "EntityId" || receiver == "LinkId") && name == "key" { return "identityKey" }
     if receiver == "Entity" {
         if name == "id" { return "entityId" }
         if name == "position" { return "entityPosition" }
@@ -11,6 +12,8 @@ export fn Property(receiver: string, name: string) -> string {
     }
     if receiver == "Link" {
         if name == "id" { return "linkId" }
+        if name == "source" { return "linkSourceId" }
+        if name == "target" { return "linkTargetId" }
         if name == "payload" { return "linkPayload" }
     }
     return ""
@@ -18,6 +21,12 @@ export fn Property(receiver: string, name: string) -> string {
 
 export fn Method(receiver: string, name: string) -> string {
     if receiver == "Space" {
+        if name == "entityId" { return "spaceEntityId" }
+        if name == "linkId" { return "spaceLinkId" }
+        if name == "require" { return "spaceRequire" }
+        if name == "requireLink" { return "spaceRequireLink" }
+        if name == "setPayload" { return "spaceSetPayload" }
+        if name == "removeCascade" { return "spaceRemoveCascade" }
         if name == "insert" { return "spaceInsert" }
         if name == "get" { return "spaceGet" }
         if name == "move" { return "spaceMove" }
@@ -32,8 +41,7 @@ export fn Method(receiver: string, name: string) -> string {
         if name == "outgoing" { return "spaceOutgoing" }
         if name == "incoming" { return "spaceIncoming" }
         if name == "linkCount" { return "spaceLinkCount" }
-        if name == "source" { return "linkSource" }
-        if name == "target" { return "linkTarget" }
+
     }
     if receiver == "Point3" && name == "distance" { return "distance3" }
     if receiver == "Vec3" && name == "dot" { return "dot3" }
@@ -74,7 +82,7 @@ export fn Signatures(receiver: int, resolved: inout model.ResolvedTypes) -> [mod
     let typ = resolved.types[receiver]
     var signatures: [model.MethodSignature] = []
     if typ.kind != "spatial" { return signatures }
-    for name in ["insert", "get", "move", "remove", "neighbors", "ahead", "size", "connect", "disconnect", "getLink", "setLinkPayload", "outgoing", "incoming", "linkCount", "source", "target", "distance", "dot", "point", "vector", "then"] {
+    for name in ["entityId", "linkId", "require", "requireLink", "setPayload", "removeCascade", "insert", "get", "move", "remove", "neighbors", "ahead", "size", "connect", "disconnect", "getLink", "setLinkPayload", "outgoing", "incoming", "linkCount", "distance", "dot", "point", "vector", "then"] {
         let operation = Method(typ.name, name)
         if operation != "" { signatures.append(Describe(receiver, name, operation, &resolved)) }
     }
@@ -106,18 +114,32 @@ fn Describe(receiver: int, name: string, operation: string, resolved: inout mode
         let point = types.Spatial("Point3",[typ.arguments[0]],&resolved)
         let entity = types.Spatial("Entity",slice(typ.arguments,0,2),&resolved)
         let link = types.Spatial("Link",typ.arguments,&resolved)
+        let entityId = types.Spatial("EntityId",slice(typ.arguments,0,2),&resolved)
+        let linkId = types.Spatial("LinkId",typ.arguments,&resolved)
+        let text = state.Scalar("string",&resolved)
         if operation == "spaceSize" || operation == "spaceLinkCount" { result = integer }
-        if operation == "spaceGet" || operation == "spaceGetLink" {
-            parameters.append(model.TypeField{name:"id",typeId:integer})
+        if operation == "spaceEntityId" || operation == "spaceLinkId" {
+            parameters.append(model.TypeField{name:"key",typeId:text})
+            result = entityId
+            if operation == "spaceLinkId" { result = linkId }
+        }
+        if operation == "spaceGet" || operation == "spaceRequire" {
+            parameters.append(model.TypeField{name:"id",typeId:entityId})
             result = entity
-            if operation == "spaceGetLink" { result = link }
+            if operation == "spaceGet" { result = types.OptionType(entity,&resolved) }
+        }
+        if operation == "spaceGetLink" || operation == "spaceRequireLink" {
+            parameters.append(model.TypeField{name:"id",typeId:linkId})
+            result = link
+            if operation == "spaceGetLink" { result = types.OptionType(link,&resolved) }
         }
         if operation == "spaceInsert" {
+            parameters.append(model.TypeField{name:"key",typeId:text})
             parameters.append(model.TypeField{name:"position",typeId:point})
             parameters.append(model.TypeField{name:"payload",typeId:typ.arguments[1]})
         }
-        if operation == "spaceMove" || operation == "spaceRemove" || operation == "spaceNeighbors" || operation == "spaceOutgoing" || operation == "spaceIncoming" {
-            parameters.append(model.TypeField{name:"entity",typeId:entity})
+        if operation == "spaceMove" || operation == "spaceRemove" || operation == "spaceRemoveCascade" || operation == "spaceSetPayload" || operation == "spaceNeighbors" || operation == "spaceOutgoing" || operation == "spaceIncoming" {
+            parameters.append(model.TypeField{name:"entity",typeId:entityId})
         }
         if operation == "spaceMove" { parameters.append(model.TypeField{name:"position",typeId:point}) }
         if operation == "spaceNeighbors" {
@@ -125,9 +147,11 @@ fn Describe(receiver: int, name: string, operation: string, resolved: inout mode
             result = types.Structural("array",[entity],&resolved)
         }
         if operation == "spaceOutgoing" || operation == "spaceIncoming" { result = types.Structural("array",[link],&resolved) }
+        if operation == "spaceConnect" { parameters.append(model.TypeField{name:"key",typeId:text}) }
+        if operation == "spaceSetPayload" { parameters.append(model.TypeField{name:"payload",typeId:typ.arguments[1]}) }
         if operation == "spaceConnect" || operation == "spaceAhead" {
-            parameters.append(model.TypeField{name:"source",typeId:entity})
-            parameters.append(model.TypeField{name:"target",typeId:entity})
+            parameters.append(model.TypeField{name:"source",typeId:entityId})
+            parameters.append(model.TypeField{name:"target",typeId:entityId})
         }
         if operation == "spaceConnect" { parameters.append(model.TypeField{name:"payload",typeId:typ.arguments[2]}) }
         if operation == "spaceAhead" {
@@ -135,11 +159,10 @@ fn Describe(receiver: int, name: string, operation: string, resolved: inout mode
             parameters.append(model.TypeField{name:"tolerance",typeId:number})
             result = state.Scalar("bool",&resolved)
         }
-        if operation == "spaceDisconnect" || operation == "spaceSetLinkPayload" || operation == "linkSource" || operation == "linkTarget" {
-            parameters.append(model.TypeField{name:"link",typeId:link})
+        if operation == "spaceDisconnect" || operation == "spaceSetLinkPayload" {
+            parameters.append(model.TypeField{name:"link",typeId:linkId})
         }
         if operation == "spaceSetLinkPayload" { parameters.append(model.TypeField{name:"payload",typeId:typ.arguments[2]}) }
-        if operation == "linkSource" || operation == "linkTarget" { result = entity }
     }
     return model.MethodSignature{name,generics,parameters,result,effect:false}
 }

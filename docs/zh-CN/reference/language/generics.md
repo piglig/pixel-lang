@@ -117,7 +117,7 @@ Sorted 使用稳定自然排序；Sum 的显式 initial 定义空输入结果和
 
 `T: Hashable` 是类型化映射键的前置契约。Hashable 蕴含 Equatable；
 Ordered 与 Numeric 满足 Hashable，但 Hashable 不蕴含 Ordered。
-允许 int、有限 float64、bool、string、Point3／Vec3，以及所有变体负载均可哈希的枚举。
+允许 int、有限 float64、bool、string、Point3／Vec3、EntityId／LinkId，以及所有变体负载均可哈希的枚举。
 数组、映射、记录、函数、JSON 和运行实例不能作为哈希键；未选中的枚举变体同样参与检查。
 浮点的正零与负零标识同一个映射键；空间值的源码来源不参与键身份。
 

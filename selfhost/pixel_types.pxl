@@ -61,7 +61,7 @@ fn Inner(r: inout reader.Reader) -> int {
         reader.Need("punct", "(", &r); children.append(Parse(&r))
         if name == "map" || name == "Result" { reader.Need("punct", ",", &r); children.append(Parse(&r)) }
         reader.Need("punct", ")", &r)
-    } else if name == "Point3" || name == "Vec3" || name == "Transform3" || name == "Entity" || name == "Space" || name == "Link" || name == "Flow" {
+    } else if name == "Point3" || name == "Vec3" || name == "Transform3" || name == "EntityId" || name == "LinkId" || name == "Entity" || name == "Space" || name == "Link" || name == "Flow" {
         reader.Need("punct", "(", &r)
         while len(r.diagnostics) == 0 && !reader.At(r, "punct", ")") {
             children.append(Parse(&r))

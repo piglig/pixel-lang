@@ -21,34 +21,34 @@ class NativeLinkExecutionTests(unittest.TestCase):
 record Weight { values: [int] }
 effect fn main() {
  let empty = Space::[World, string, Weight]("network")
- let a = empty.insert(Point3::[World]{x:0.0,y:0.0,z:0.0}, "a")
- let b = a.insert(Point3::[World]{x:0.0,y:0.0,z:2.0}, "b")
+ let a = empty.insert("entity-0", Point3::[World]{x:0.0,y:0.0,z:0.0}, "a")
+ let b = a.insert("entity-1", Point3::[World]{x:0.0,y:0.0,z:2.0}, "b")
  var weight = Weight{values:[5]}
- let linked = b.connect(b.get(0), b.get(1), weight)
+ let linked = b.connect("link-0", b.require(b.entityId("entity-0")).id, b.require(b.entityId("entity-1")).id, weight)
  weight.values.append(99)
- let edge: Link[World, string, Weight] = linked.getLink(0)
- let moved = linked.move(linked.get(1),Point3::[World]{x:0.0,y:0.0,z:9.0})
- let changed = moved.setLinkPayload(edge,Weight{values:[8]})
+ let edge: Link[World, string, Weight] = linked.requireLink(linked.linkId("link-0"))
+ let moved = linked.move(linked.require(linked.entityId("entity-1")).id,Point3::[World]{x:0.0,y:0.0,z:9.0})
+ let changed = moved.setLinkPayload(edge.id,Weight{values:[8]})
  print(edge.payload.values)
- print(changed.getLink(0).payload.values)
- print(linked.target(edge).position.z)
- print(changed.target(edge).position.z)
- print(changed.source(edge).id)
- print(len(changed.outgoing(changed.get(0))))
- print(len(changed.incoming(changed.get(0))))
- let detached = changed.disconnect(edge)
+ print(changed.requireLink(changed.linkId("link-0")).payload.values)
+ print(linked.require(edge.target).position.z)
+ print(changed.require(edge.target).position.z)
+ print(changed.require(edge.source).id.key)
+ print(len(changed.outgoing(changed.require(changed.entityId("entity-0")).id)))
+ print(len(changed.incoming(changed.require(changed.entityId("entity-0")).id)))
+ let detached = changed.disconnect(edge.id)
  print(detached.linkCount())
- print(detached.remove(detached.get(1)).size())
+ print(detached.remove(detached.require(detached.entityId("entity-1")).id).size())
 }
 ''')
         self.assertEqual(result['diagnostics'], [])
-        self.assertEqual(VM(result['bytecode']).run(), [[5], [8], 2.0, 9.0, 0, 1, 0, 0, 1])
+        self.assertEqual(VM(result['bytecode']).run(), [[5], [8], 2.0, 9.0, "entity-0", 1, 0, 0, 1])
 
     def test_link_payload_type_is_checked_by_native_frontend(self):
         result = self.compile('''frame World = meters
 effect fn main() {
- let a = Space::[World,string,int]("network").insert(Point3::[World]{x:0.0,y:0.0,z:0.0},"a")
- let wrong = a.connect(a.get(0),a.get(0),"wrong weight")
+ let a = Space::[World,string,int]("network").insert("entity-0", Point3::[World]{x:0.0,y:0.0,z:0.0},"a")
+ let wrong = a.connect("link-0", a.require(a.entityId("entity-0")).id,a.require(a.entityId("entity-0")).id,"wrong weight")
 }
 ''')
         self.assertTrue(result['diagnostics'])

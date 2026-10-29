@@ -3,7 +3,7 @@ from .value_map import ValueMap
 
 
 from .typeexpr import parse_type
-from .spatial_values import SpatialValue
+from .spatial_values import EntityId, LinkId, SpatialValue
 
 MAX_COMPARISON_ITEMS = 1_000_000
 SCALARS = (int, float, bool, str)
@@ -27,7 +27,7 @@ def supports(vm, name):
         typ = parse_type(current)
         if typ.kind == 'scalar' and typ.name in ('int', 'float64', 'bool', 'str'):
             continue
-        if typ.kind == 'spatial' and typ.name in ('Point3', 'Vec3'):
+        if typ.kind == 'spatial' and typ.name in ('Point3', 'Vec3', 'EntityId', 'LinkId'):
             continue
         if typ.kind in ('array', 'map'):
             pending.extend(arg.spelling() for arg in typ.args)
@@ -77,7 +77,7 @@ def equal(vm, left, right, span=None):
         if type(a) in SCALARS:
             if a != b:
                 return False
-        elif type(a) is SpatialValue:
+        elif type(a) in (SpatialValue, EntityId, LinkId):
             if vm.value_type(a) != vm.value_type(b):
                 vm.fail('Equality operands have different types', span)
             if a != b:

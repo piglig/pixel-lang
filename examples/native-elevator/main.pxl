@@ -42,7 +42,7 @@ effect fn main() {
     // An earlier snapshot retains its cabin position and docking connection.
     match top {
         .Ok(view) => {
-            print(view.scene.get(4).position.y)
+            print(view.scene.require(view.scene.entityId("cabin")).position.y)
             print(view.scene.linkCount())
         },
         .Err(reason) => { print(controller.Message(reason)) }

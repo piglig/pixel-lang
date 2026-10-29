@@ -8,11 +8,11 @@ Spatial types belong to the language and runtime, not renderer JSON or graph lay
 
 `frame` declares a nominal coordinate system whose unit participates in semantics. Point3, Vec3 and Transform3 retain frame types; the compiler rejects implicit mixing. Space carries frame, entity-payload and link-payload types. Entities and links have stable identities independent of display names or coordinate equality.
 
-Entity references identify their owning space. Queries resolve them by identity in a specified snapshot; an entity value retains its original position and payload. Deleted identities are not reused. Foreign-space references and dangling links are rejected.
+`EntityId[F,T]` and `LinkId[F,T,L]` contain an owning space and a stable business key, independent of snapshot version. Entity and link values contain captured data. Operations accept typed identities, never captured data as an implicit reference. Same-key insertions across forks denote the same logical object. Reusing a removed key is explicit recreation; lookup absence returns Option. Foreign-space identities are rejected.
 
 ## Snapshots and updates
 
-Operations return new snapshots with isolated typed payloads. Parallel edges and self-loops are valid; stable identities determine query order. Moving an entity preserves links, and removal requires explicitly disconnecting incident links first. The runtime validates positions, budgets and identities before publishing results. Failure does not partially mutate input.
+Operations return new snapshots with isolated typed payloads. Parallel edges and self-loops are valid; insertion order determines query order. Moving an entity preserves links, and removal requires disconnecting incident links first or choosing removeCascade. The runtime validates positions, budgets and identities before publishing results. Failure does not partially mutate input.
 
 Flows store space snapshots as ordinary state. Execution faults roll back a step; transition functions decide how business Result.Err affects state. Checkpoints preserve the identity registry and resource accounting so resumed execution obeys the same boundaries.
 

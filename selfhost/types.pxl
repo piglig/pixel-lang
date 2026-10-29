@@ -2,7 +2,7 @@ import "model.pxl" as model
 
 // Public type spellings exposed to native editor clients, including type-only
 // constructors that deliberately are not ordinary expression bindings.
-export fn BuiltinNames() -> [string] = ["int", "float64", "string", "bool", "json", "unit", "map", "Option", "Result", "Error", "Flow", "Point3", "Vec3", "Transform3", "Entity", "Space", "Link"]
+export fn BuiltinNames() -> [string] = ["int", "float64", "string", "bool", "json", "unit", "map", "Option", "Result", "Error", "Flow", "Point3", "Vec3", "Transform3", "Entity", "EntityId", "Space", "Link", "LinkId"]
 
 // Pass-local lookup data is separate from the authoritative type arena.
 export record ResolutionIndex { symbolIds: map[string, int] }
@@ -70,10 +70,10 @@ fn Named(module: int, index: int, name: string, arguments: [int], parameters: ma
         if name == "Error" { kind = "record" }
         return Intern(kind, name, -1, -1, arguments, &r)
     }
-    if name == "Point3" || name == "Vec3" || name == "Transform3" || name == "Entity" || name == "Space" || name == "Link" {
+    if name == "Point3" || name == "Vec3" || name == "Transform3" || name == "Entity" || name == "EntityId" || name == "Space" || name == "Link" || name == "LinkId" {
         var arity = 1
-        if name == "Transform3" || name == "Entity" || name == "Space" { arity = 2 }
-        if name == "Space" || name == "Link" { arity = 3 }
+        if name == "Transform3" || name == "Entity" || name == "EntityId" || name == "Space" { arity = 2 }
+        if name == "Space" || name == "Link" || name == "LinkId" { arity = 3 }
         if len(arguments) != arity { Report(module, index, "Wrong spatial type argument count: " + name, &r); return -1 }
         var frames = 1
         if name == "Transform3" { frames = 2 }
@@ -85,7 +85,7 @@ fn Named(module: int, index: int, name: string, arguments: [int], parameters: ma
             }
             cursor += 1
         }
-        if name == "Entity" || name == "Space" || name == "Link" {
+        if name == "Entity" || name == "EntityId" || name == "Space" || name == "Link" || name == "LinkId" {
             for payload in slice(arguments, 1, len(arguments)) {
                 if r.types[payload].kind == "frame" || r.types[payload].name == "unit" {
                     Report(module, index, "Spatial payload requires a value type", &r)
@@ -448,13 +448,18 @@ fn DisplayInner(module: int, typeId: int, depth: int, resolved: model.ResolvedTy
 export fn FieldTypes(typeId: int, resolved: inout model.ResolvedTypes) -> [model.TypeField] {
     if typeId < 0 { return [] }
     let typ = resolved.types[typeId]
+    if typ.kind == "spatial" && (typ.name == "EntityId" || typ.name == "LinkId") {
+        return [model.TypeField{name:"key",typeId:Scalar("string", &resolved)}]
+    }
     if typ.kind == "spatial" && typ.name == "Entity" {
-        return [model.TypeField{name: "id", typeId: Scalar("int", &resolved)},
+        return [model.TypeField{name: "id", typeId: Spatial("EntityId", typ.arguments, &resolved)},
                 model.TypeField{name: "position", typeId: Spatial("Point3", [typ.arguments[0]], &resolved)},
                 model.TypeField{name: "payload", typeId: typ.arguments[1]}]
     }
     if typ.kind == "spatial" && typ.name == "Link" {
-        return [model.TypeField{name: "id", typeId: Scalar("int", &resolved)},
+        return [model.TypeField{name: "id", typeId: Spatial("LinkId", typ.arguments, &resolved)},
+                model.TypeField{name: "source", typeId: Spatial("EntityId", slice(typ.arguments,0,2), &resolved)},
+                model.TypeField{name: "target", typeId: Spatial("EntityId", slice(typ.arguments,0,2), &resolved)},
                 model.TypeField{name: "payload", typeId: typ.arguments[2]}]
     }
     if typ.kind == "spatial" && typ.name == "Transform3" {
@@ -620,7 +625,7 @@ export fn Equatable(typeId: int, resolved: inout model.ResolvedTypes) -> bool {
             if capability != "Equatable" && capability != "Ordered" && capability != "Numeric" && capability != "Hashable" { return false }
         } else if typ.kind == "primitive" {
             if typ.name != "int" && typ.name != "float64" && typ.name != "bool" && typ.name != "string" { return false }
-        } else if typ.kind == "spatial" && (typ.name == "Point3" || typ.name == "Vec3") {
+        } else if typ.kind == "spatial" && (typ.name == "Point3" || typ.name == "Vec3" || typ.name == "EntityId" || typ.name == "LinkId") {
             continue
         } else if typ.kind == "array" || typ.kind == "map" {
             for argument in typ.arguments { pending.append(argument) }
@@ -655,7 +660,7 @@ export fn Hashable(typeId: int, resolved: inout model.ResolvedTypes) -> bool {
             if capability != "Hashable" && capability != "Ordered" && capability != "Numeric" { return false }
         } else if typ.kind == "primitive" {
             if typ.name != "int" && typ.name != "float64" && typ.name != "bool" && typ.name != "string" { return false }
-        } else if typ.kind == "spatial" && (typ.name == "Point3" || typ.name == "Vec3") {
+        } else if typ.kind == "spatial" && (typ.name == "Point3" || typ.name == "Vec3" || typ.name == "EntityId" || typ.name == "LinkId") {
             continue
         } else if typ.kind == "enum" {
             for variant in VariantTypes(current, &resolved) {

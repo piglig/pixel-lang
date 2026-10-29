@@ -90,7 +90,7 @@ reinterpret graph metadata as executable wiring at runtime. Stateful flows requi
 A failed step discards staged state, including nested instances. Runtime protection
 also enforces readonly inputs and pure flow execution.
 
-Point3, Vec3, Entity, Space and Link are native runtime values. Snapshot boundaries
+Point3, Vec3, EntityId, LinkId, Entity, Space and Link are native runtime values. Snapshot boundaries
 isolate entity/link payloads. Extracted containers are values; later updates cannot
 change a published snapshot. Complete
 checkpoints include space identities, allocation budgets and flow state. Coordinate
@@ -101,7 +101,7 @@ numeric computation. See [native space](../../internals/spatial-model.md) and
 ## Typed maps
 
 The runtime accepts canonical `map<K,V>` types with invariant key and value types.
-Keys use bounded structural identity for scalar, enum, Point3 and Vec3 values;
+Keys use bounded structural identity for scalar, enum, Point3, Vec3, EntityId and LinkId values;
 Containers and executable values cannot be keys. Iteration preserves
 insertion order. Replacing a value preserves its position; deleting and reinserting
 a key places it last. Duplicate constructor keys raise `collection.duplicate_key`.

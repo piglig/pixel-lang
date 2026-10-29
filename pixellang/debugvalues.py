@@ -75,13 +75,14 @@ def children(vm, value):
                      translation=spatial.SpatialValue('Vec3', value.target, value.translation))
     elif isinstance(value, spatial.SpaceValue):
         value = dict(identity=value.identity, frame=value.frame.identity, unit=value.frame.unit,
-                     version=value.version, nextIdentity=value.next_identity, entities=value.entities,
-                     links=value.links, nextLinkIdentity=value.next_link_identity)
+                     version=value.version, entities=value.entities, links=value.links)
+    elif isinstance(value, (spatial.EntityId, spatial.LinkId)):
+        value = dict(key=value.key, owner=value.owner)
     elif isinstance(value, spatial.LinkValue):
-        value = dict(id=value.identity, owner=value.owner, source=value.source, target=value.target,
+        value = dict(id=value.id, owner=value.owner, source=value.source_id, target=value.target_id,
                      payload=value.payload)
     elif isinstance(value, spatial.EntityValue):
-        value = dict(id=value.identity, owner=value.owner, position=value.position, payload=value.payload)
+        value = dict(id=value.id, owner=value.owner, position=value.position, payload=value.payload)
     if isinstance(value, JsonValue):
         if value.tag == "object":
             return iter(value.data), True, len(value.data)
@@ -174,6 +175,8 @@ def describe_value(timeline, vm, item, path, name):
         summary = readable_type
     elif isinstance(item, spatial.SpaceValue):
         summary = f"{readable_type} {item.identity} ({len(item.entities)} entities, {len(item.links)} links)"
+    elif isinstance(item, (spatial.EntityId, spatial.LinkId)):
+        summary = f"{readable_type} {item.owner}/{item.key}"
     elif isinstance(item, spatial.LinkValue):
         summary = f"{readable_type} #{item.identity} ({item.source} → {item.target})"
     elif isinstance(item, spatial.EntityValue):

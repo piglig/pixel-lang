@@ -2,16 +2,18 @@ frame World = meters
 record Road { cost: int, enabled: bool }
 
 // Each step relaxes one edge from the previous distance snapshot.
-// This example uses four stable, contiguous entity IDs and no removals.
+// Business keys identify stations independently of insertion order.
 fn Relax(network: Space[World, string, Road], previous: [int]) -> [int] {
  var distances = previous
+ let stations = ["A", "B", "C", "D"]
  var id = 0
  while id < len(previous) {
   if previous[id] >= 0 {
-   for road in network.outgoing(network.get(id)) {
+   for road in network.outgoing(network.entityId(stations[id])) {
     let data = road.payload
     if data.enabled {
-     let target = network.target(road).id
+     var target = 0
+     while stations[target] != road.target.key { target += 1 }
      let candidate = previous[id] + data.cost
      if distances[target] < 0 || candidate < distances[target] {
       distances[target] = candidate
@@ -31,21 +33,21 @@ flow Routes() step(network: Space[World, string, Road]) -> [int] {
 }
 effect fn main() {
  var network = Space::[World, string, Road]("routes")
- network = network.insert(Point3::[World]{x:0.0,y:0.0,z:0.0}, "A")
- network = network.insert(Point3::[World]{x:1.0,y:0.0,z:1.0}, "B")
- network = network.insert(Point3::[World]{x:2.0,y:0.0,z:2.0}, "C")
- network = network.insert(Point3::[World]{x:3.0,y:0.0,z:3.0}, "D")
- network = network.connect(network.get(0), network.get(1), Road{cost:5,enabled:true})
- network = network.connect(network.get(0), network.get(2), Road{cost:20,enabled:true})
- network = network.connect(network.get(1), network.get(2), Road{cost:2,enabled:true})
- network = network.connect(network.get(2), network.get(3), Road{cost:1,enabled:true})
- network = network.connect(network.get(0), network.get(3), Road{cost:1,enabled:false})
+ network = network.insert("A", Point3::[World]{x:0.0,y:0.0,z:0.0}, "A")
+ network = network.insert("B", Point3::[World]{x:1.0,y:0.0,z:1.0}, "B")
+ network = network.insert("C", Point3::[World]{x:2.0,y:0.0,z:2.0}, "C")
+ network = network.insert("D", Point3::[World]{x:3.0,y:0.0,z:3.0}, "D")
+ network = network.connect("A-B", network.entityId("A"), network.entityId("B"), Road{cost:5,enabled:true})
+ network = network.connect("A-C", network.entityId("A"), network.entityId("C"), Road{cost:20,enabled:true})
+ network = network.connect("B-C", network.entityId("B"), network.entityId("C"), Road{cost:2,enabled:true})
+ network = network.connect("C-D", network.entityId("C"), network.entityId("D"), Road{cost:1,enabled:true})
+ network = network.connect("A-D", network.entityId("A"), network.entityId("D"), Road{cost:1,enabled:false})
  let routes = Routes()
  print(routes.step(network))
  print(routes.step(network))
  print(routes.step(network))
- let changed = network.setLinkPayload(network.getLink(4), Road{cost:1,enabled:true})
+ let changed = network.setLinkPayload(network.linkId("A-D"), Road{cost:1,enabled:true})
  let rerouted = Routes()
  print(rerouted.step(changed))
- print(network.getLink(4).payload.enabled)
+ print(network.requireLink(network.linkId("A-D")).payload.enabled)
 }

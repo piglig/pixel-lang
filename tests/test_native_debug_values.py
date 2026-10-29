@@ -61,7 +61,7 @@ class NativeDebugValueTests(unittest.TestCase):
         coordinate_frame = spatial.CoordinateFrame('@0:0', 'meters')
         point = spatial.SpatialValue('Point3', coordinate_frame, (1.0, 2.0, 3.0))
         payload = spatial.FrozenValue('int[]', (10, 20, 30))
-        world = spatial.SpaceValue('world', coordinate_frame, 'int[]', 'str').insert(point, payload)
+        world = spatial.SpaceValue('world', coordinate_frame, 'int[]', 'str').insert("a", point, payload)
         transform = spatial.Transform(coordinate_frame, coordinate_frame,
                                       ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)), (1.0, 2.0, 3.0))
         vm.stack.extend([point, world, world.entities[0], transform, payload])
@@ -83,8 +83,8 @@ class NativeDebugValueTests(unittest.TestCase):
     def test_link_payloads_are_paged_from_the_selected_snapshot_without_allocating(self):
         frame = spatial.CoordinateFrame('@0:0', 'meters')
         point = spatial.SpatialValue('Point3', frame, (0.0, 0.0, 0.0))
-        world = spatial.SpaceValue('graph', frame, 'str', 'int[]').insert(point, 'vertex')
-        world = world.connect(world.get(0), world.get(0), spatial.FrozenValue('int[]', (3, 5, 8)))
+        world = spatial.SpaceValue('graph', frame, 'str', 'int[]').insert("a", point, 'vertex')
+        world = world.connect("edge", world.entity_id("a"), world.entity_id("a"), spatial.FrozenValue('int[]', (3, 5, 8)))
         timeline = timeline_for(spatial_program())
         timeline.vm.stack.append(world)
         before = timeline.vm.checkpoint()
@@ -92,8 +92,9 @@ class NativeDebugValueTests(unittest.TestCase):
         edge = variables(timeline, fields['links']['path'])[0]
         self.assertEqual(edge['type'], 'Link[World, string, [int]]')
         data = {item['name']: item for item in variables(timeline, edge['path'])}
-        self.assertEqual(data['source']['value'], '0')
-        self.assertEqual(data['target']['value'], '0')
+        self.assertEqual(data['source']['type'], 'EntityId[World, string]')
+        self.assertEqual({v['name']: v['value'] for v in variables(timeline, data['source']['path'])}['key'], '"a"')
+        self.assertEqual(data['target']['type'], 'EntityId[World, string]')
         self.assertEqual([item['value'] for item in variables(timeline, data['payload']['path'], start=1, count=1)], ['5'])
         self.assertEqual(timeline.vm.checkpoint(), before)
 

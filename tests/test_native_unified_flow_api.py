@@ -84,7 +84,7 @@ class NativeUnifiedFlowAPITests(unittest.TestCase):
   }
   effect fn main(){
    let space=Space::[World,int,string]("main")
-   let next=space.insert(Point3::[World]{x:0.0,y:0.0,z:1.0},7)
+   let next=space.insert("entity-0", Point3::[World]{x:0.0,y:0.0,z:1.0},7)
    print(space.size());print(next.size());print(Scene().step(3))
   }'''
   self.assertEqual(VM(self.compile(source)).run(),[0,1,3])

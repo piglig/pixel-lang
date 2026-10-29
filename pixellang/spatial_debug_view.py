@@ -25,7 +25,7 @@ def space_view(timeline, args):
             valid_radius = type(radius) in (float, int) and radius >= 0 and math.isfinite(radius)
         except OverflowError:
             valid_radius = False
-        if type(identity) is not int or not valid_radius:
+        if type(identity) is not str or not identity or not valid_radius:
             raise PixelError('debug', 'Neighborhood requires an entity identity and finite nonnegative radius')
         origin = next((entity for entity in space.entities if entity.identity == identity), None)
         if origin is None:

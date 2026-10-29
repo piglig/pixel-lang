@@ -52,8 +52,8 @@ record Payload {count:int}
 fn inspect(entity:Entity[World,Payload],edge:Link[World,Payload,string]){
 '''
         for receiver, expected in (
-            ('entity', {'id': 'int', 'position': 'Point3[World]', 'payload': 'Payload'}),
-            ('edge', {'id': 'int', 'payload': 'string'}),
+            ('entity', {'id': 'EntityId[World, Payload]', 'position': 'Point3[World]', 'payload': 'Payload'}),
+            ('edge', {'id': 'LinkId[World, Payload, string]', 'source': 'EntityId[World, Payload]', 'target': 'EntityId[World, Payload]', 'payload': 'string'}),
             ('entity.payload', {'count': 'int'}),
             ('entity.position', {'x': 'float64', 'y': 'float64', 'z': 'float64'}),
         ):
@@ -78,13 +78,13 @@ fn main(){}
     def test_space_method_completion_uses_typed_native_contracts(self):
         text='frame World=meters\nrecord Cost {weight:int}\nfn inspect(scene:Space[World,string,Cost]){scene.|}\nfn main(){}'
         items=self.complete(text)
-        self.assertEqual(len(items),16)
+        self.assertEqual(len(items),20)
         self.assertTrue(all(item['kind']=='Method' for item in items))
         details={item['label']:item['detail'] for item in items}
-        self.assertEqual(details['insert'],'fn insert(position: Point3[World], payload: string) -> Space[World, string, Cost]')
-        self.assertEqual(details['connect'],'fn connect(source: Entity[World, string], target: Entity[World, string], payload: Cost) -> Space[World, string, Cost]')
-        self.assertEqual(details['source'],'fn source(link: Link[World, string, Cost]) -> Entity[World, string]')
-        self.assertEqual(details['neighbors'],'fn neighbors(entity: Entity[World, string], radius: float64) -> [Entity[World, string]]')
+        self.assertEqual(details['insert'],'fn insert(key: string, position: Point3[World], payload: string) -> Space[World, string, Cost]')
+        self.assertEqual(details['connect'],'fn connect(key: string, source: EntityId[World, string], target: EntityId[World, string], payload: Cost) -> Space[World, string, Cost]')
+        self.assertEqual(details['get'],'fn get(id: EntityId[World, string]) -> Option[Entity[World, string]]')
+        self.assertEqual(details['neighbors'],'fn neighbors(entity: EntityId[World, string], radius: float64) -> [Entity[World, string]]')
 
     def test_geometry_method_completion_preserves_frame_relations(self):
         text='frame World=meters\nframe Local=centimeters\nfn inspect(transform:Transform3[World,Local]){transform.|}\nfn main(){}'
@@ -100,17 +100,17 @@ fn main(){}
         self.assertEqual(self.complete(text),[dict(label='distance',kind='Method',detail='fn distance(other: Point3[World]) -> float64')])
 
     def test_method_hover_and_unfinished_call_signature(self):
-        prefix='frame World=meters\nrecord Cost {weight:int}\nfn inspect(scene:Space[World,string,Cost],origin:Entity[World,string]){'
+        prefix='frame World=meters\nrecord Cost {weight:int}\nfn inspect(scene:Space[World,string,Cost],origin:EntityId[World,string]){'
         text=prefix+'let nearby=scene.neighbors(origin,2.0)}\nfn main(){}'
         index=self.index({'main.pxl':text})
         self.assertEqual(index.diagnostics,[])
         self.assertEqual(index.hover('main.pxl',text.index('neighbors'))['label'],
-                         'fn neighbors(entity: Entity[World, string], radius: float64) -> [Entity[World, string]]')
-        text=prefix+'scene.insert(Point3[World]{x:0.0,y:0.0,z:0.0}, '
+                         'fn neighbors(entity: EntityId[World, string], radius: float64) -> [Entity[World, string]]')
+        text=prefix+'scene.insert("sample", Point3[World]{x:0.0,y:0.0,z:0.0}, '
         signature=self.index({'main.pxl':text}).signature_help('main.pxl',len(text))
         self.assertIsNotNone(signature)
-        self.assertEqual(signature['parameters'],['position: Point3[World]','payload: string'])
-        self.assertEqual(signature['activeParameter'],1)
+        self.assertEqual(signature['parameters'],['key: string','position: Point3[World]','payload: string'])
+        self.assertEqual(signature['activeParameter'],2)
 
 
 

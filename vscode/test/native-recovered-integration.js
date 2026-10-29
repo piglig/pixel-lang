@@ -7,13 +7,13 @@ async function run(){
  // Semantic PNG recovery may synthesize names when source metadata is absent.
  // Locate identities from the recovered declarations, not the original text.
  const frameName=source.match(/^frame (\w+) = meters/m)?.[1];
- const recordName=source.match(/^record (\w+) \{ cost: int \}/m)?.[1];
+ const recordName=source.match(/^record (\w+) \{ cost: int[, }]/m)?.[1];
  const functionName=source.match(/^fn (\w+)\(/m)?.[1];
  const flowName=source.match(/^flow (\w+)\(/m)?.[1];
- const roadName=source.match(/linkPayload\((\w+)\)\.cost/)?.[1];
- const flowCall=source.match(new RegExp('print\\('+flowName+'\\((\\w+)\\)\\)'));
+ const roadName=source.match(/(\w+)\.payload\.cost/)?.[1];
+ const flowCall=source.match(new RegExp('print\\('+flowName+'\\(\\)\\.step\\((\\w+)\\)\\)'));
  assert(frameName&&recordName&&functionName&&flowName&&roadName&&flowCall);
- const line=source.split('\n').findIndex(text=>text.includes('return len(spaceNeighbors('))+1;assert(line>0);
+ const line=source.split('\n').findIndex(text=>/return len\(\w+\.neighbors\(/.test(text))+1;assert(line>0);
  const api=await vscode.extensions.getExtension('pixellang-local.pixellang-studio').activate();
  await vscode.workspace.getConfiguration('pixellang').update('pythonPath',process.env.PIXELLANG_TEST_PYTHON,vscode.ConfigurationTarget.Workspace);
  const uri=vscode.Uri.file(path.join(vscode.workspace.workspaceFolders[0].uri.fsPath,'main.pxl'));
@@ -25,7 +25,7 @@ async function run(){
  const position=needle=>{const offset=source.indexOf(needle);assert(offset>=0,needle);return document.positionAt(offset);};
  const symbols=await vscode.commands.executeCommand('vscode.executeDocumentSymbolProvider',uri);
  for(const name of [frameName,recordName,functionName,flowName])assert(symbols.some(symbol=>symbol.name===name),name);
- const hovers=await vscode.commands.executeCommand('vscode.executeHoverProvider',uri,position(roadName+').cost'));
+ const hovers=await vscode.commands.executeCommand('vscode.executeHoverProvider',uri,position(roadName+'.payload'));
  assert(hovers.some(hover=>hover.contents.some(content=>(content.value||String(content)).includes(`Link[${frameName}, string, ${recordName}]`))));
  const definitions=await vscode.commands.executeCommand('vscode.executeDefinitionProvider',uri,position('cost)'));
  assert.equal(definitions.length,1);
@@ -33,7 +33,7 @@ async function run(){
  const completion=await vscode.commands.executeCommand('vscode.executeCompletionItemProvider',uri,position('cost)'),'.');
  assert(completion.items.some(item=>item.label==='cost'&&item.detail==='int'));
  const signature=await vscode.commands.executeCommand('vscode.executeSignatureHelpProvider',uri,position(flowCall[1]+'))'),'(');
- assert(signature.signatures.some(item=>item.label.includes(`flow ${flowName}(`)&&item.label.includes(`Space[${frameName}, string, ${recordName}]`)));
+ assert(signature.signatures.some(item=>item.label.includes(`fn step(`)&&item.label.includes(`Space[${frameName}, string, ${recordName}]`)));
  const rename=await vscode.commands.executeCommand('vscode.executeDocumentRenameProvider',uri,position(recordName+' {'),'Route');
  const edits=rename.entries().flatMap(([,items])=>items);
  assert(edits.length>=5);assert(edits.every(edit=>edit.newText==='Route'));
@@ -73,7 +73,7 @@ async function run(){
   await vscode.debug.stopDebugging(debug);await waitFor(()=>!vscode.debug.activeDebugSession,'first session stops');
   const after=await launch();assert.equal(after.view.entities[1].position[2],2.5);
   assert.deepEqual(after.view.links.map(link=>[link.id,link.source,link.target]),before.view.links.map(link=>[link.id,link.source,link.target]));
-  const neighbors=await debug.customRequest('pixelFlowSpace',{...after.args,path:after.input.path,neighbors:{origin:0,radius:2}});assert.equal(neighbors.total,0);
+  const neighbors=await debug.customRequest('pixelFlowSpace',{...after.args,path:after.input.path,neighbors:{origin:after.view.entities[0].id,radius:2}});assert.equal(neighbors.total,0);
   await debug.customRequest('setBreakpoints',{source:{path:uri.fsPath},breakpoints:[]});
   await debug.customRequest('continue',{threadId:1});await waitFor(()=>outputs.length===4,'recovered edited program completes');
   assert.deepEqual(outputs,[0,0,9,3]);

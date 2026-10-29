@@ -136,9 +136,9 @@ effect fn main() {
  let origin = Point3::[World]{x: 0.0, y: 0.0, z: 0.0}
  let near = Point3::[World]{x: 0.0, y: 0.0, z: 2.0}
  let empty = Space::[World, string,string]("room")
- let first = empty.insert(origin, "observer")
- let world = first.insert(near, "moving")
- print(len(world.neighbors(world.get(0), 2.0)))
+ let first = empty.insert("entity-0", origin, "observer")
+ let world = first.insert("entity-1", near, "moving")
+ print(len(world.neighbors(world.require(world.entityId("entity-0")).id, 2.0)))
 }
 """
         coordinates = self.project(source)['coordinates']

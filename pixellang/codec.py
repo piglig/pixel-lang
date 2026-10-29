@@ -39,7 +39,7 @@ TYPES += ["float64"]
 TYPES += ["parameter"]
 TYPES += ["Option", "function"]
 TYPES += ["frame", "Point3", "Vec3", "Transform3", "Entity", "Space", "Flow", "Link", "effect_function", "Equatable", "Ordered", "Numeric", "Hashable"]
-TYPES += ["inout", "Result"]
+TYPES += ["inout", "Result", "EntityId", "LinkId"]
 NATIVE_BUILTINS = ['Space']
 TABLES = {
     48: ("op", OPS),

@@ -101,7 +101,7 @@ class NativeSpatialVMTests(unittest.TestCase):
         position = SpatialValue('Point3', frame, (0.0, 0.0, 0.0))
         empty = SpaceValue('world', frame, 'int[]', 'str')
         values = tuple(range(1000))
-        populated = empty.insert(position, FrozenValue('int[]', values))
+        populated = empty.insert("a", position, FrozenValue('int[]', values))
         self.assertGreater(footprint(populated), footprint(empty) + 8000)
 
     def test_transform_json_round_trip_preserves_matrix_and_translation(self):

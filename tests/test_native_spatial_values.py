@@ -13,16 +13,16 @@ IDENTITY = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
 
 class NativeSpatialValuesTests(unittest.TestCase):
     def test_deepcopy_shares_native_values_but_not_mutable_host_containers(self):
-        scene = SpaceValue('room', self.world, 'int[]', 'str').insert(
+        scene = SpaceValue('room', self.world, 'int[]', 'str').insert("sample",
             self.point((1.0, 2.0, 3.0)), FrozenValue('int[]', (1, 2, 3)))
         source = {'scene': scene, 'mutable': [1]}
         copied = deepcopy(source)
         self.assertIs(copied['scene'], scene)
         copied['mutable'].append(2)
         self.assertEqual(source['mutable'], [1])
-        moved = scene.move(scene.get(0), self.point((4.0, 5.0, 6.0)))
-        self.assertEqual(copied['scene'].get(0).position.xyz, (1.0, 2.0, 3.0))
-        self.assertIs(moved.get(0).payload, scene.get(0).payload)
+        moved = scene.move(scene.entity_id("sample"), self.point((4.0, 5.0, 6.0)))
+        self.assertEqual(copied['scene'].require(scene.entity_id('sample')).position.xyz, (1.0, 2.0, 3.0))
+        self.assertIs(moved.require(moved.entity_id("sample")).payload, scene.require(scene.entity_id("sample")).payload)
 
     def test_native_snapshots_reject_transitively_mutable_payloads(self):
         from pixellang.jsonvalue import JsonValue
@@ -30,7 +30,7 @@ class NativeSpatialValuesTests(unittest.TestCase):
             with self.subTest(items=items), self.assertRaises(SpatialError):
                 FrozenValue('int[]', items)
         with self.assertRaises(SpatialError):
-            SpaceValue('room', self.world, 'int[]', 'str').insert(self.point((0.0, 0.0, 0.0)), [1])
+            SpaceValue('room', self.world, 'int[]', 'str').insert("sample", self.point((0.0, 0.0, 0.0)), [1])
     def setUp(self):
         self.world = CoordinateFrame('World', 'meters')
         self.cabin = CoordinateFrame('Cabin', 'centimeters')
@@ -82,28 +82,29 @@ class NativeSpatialValuesTests(unittest.TestCase):
 
     def test_z_changes_neighborhood_without_changing_previous_snapshot(self):
         empty = SpaceValue('room', self.world, 'str', 'str')
-        original = empty.insert(self.point((0.0, 0.0, 0.0)), 'origin')
-        original = original.insert(self.point((0.0, 0.0, 2.0)), 'near')
-        original = original.insert(self.point((0.0, 0.0, 5.0)), 'far')
-        origin, moving = original.get(0), original.get(1)
-        self.assertEqual([e.identity for e in original.neighbors(origin, 2.0)], [1])
+        original = empty.insert("origin", self.point((0.0, 0.0, 0.0)), 'origin')
+        original = original.insert("near", self.point((0.0, 0.0, 2.0)), 'near')
+        original = original.insert("far", self.point((0.0, 0.0, 5.0)), 'far')
+        origin, moving = original.entity_id("origin"), original.entity_id("near")
+        self.assertEqual([e.identity for e in original.neighbors(origin, 2.0)], ["near"])
         changed = original.move(moving, self.point((0.0, 0.0, 3.0)))
         self.assertEqual(changed.neighbors(origin, 2.0), ())
-        self.assertEqual(original.get(1).position.xyz[2], 2.0)
+        self.assertEqual(original.require(moving).position.xyz[2], 2.0)
         self.assertEqual(len(empty.entities), 0)
-        # Old references resolve by identity in the queried snapshot.
-        self.assertEqual(changed.current(moving).position.xyz[2], 3.0)
+        # Identity lookup requires an explicit snapshot.
+        self.assertEqual(changed.require(moving).position.xyz[2], 3.0)
         self.assertTrue(changed.ahead(origin, moving, self.vector((0.0, 0.0, 1.0)), 0.0))
         self.assertFalse(changed.ahead(origin, moving, self.vector((1.0, 0.0, 0.0)), 0.0))
 
-    def test_deleted_ids_are_not_reused_and_foreign_entities_are_rejected(self):
-        a = SpaceValue('a', self.world, 'int', 'str').insert(self.point((0.0, 0.0, 0.0)), 1)
-        b = SpaceValue('b', self.world, 'int', 'str').insert(self.point((0.0, 0.0, 0.0)), 2)
-        for action in (lambda: a.move(b.get(0), self.point((1.0, 0.0, 0.0))),
-                       lambda: a.neighbors(b.get(0), 3.0), lambda: a.remove(b.get(0))):
+    def test_removed_keys_and_foreign_identities_are_explicit(self):
+        a = SpaceValue('a', self.world, 'int', 'str').insert('first', self.point((0.0, 0.0, 0.0)), 1)
+        b = SpaceValue('b', self.world, 'int', 'str').insert('first', self.point((0.0, 0.0, 0.0)), 2)
+        foreign = b.entity_id('first')
+        for action in (lambda: a.move(foreign, self.point((1.0, 0.0, 0.0))),
+                       lambda: a.neighbors(foreign, 3.0), lambda: a.remove(foreign)):
             with self.assertRaises(SpatialError): action()
-        removed = a.remove(a.get(0))
-        inserted = removed.insert(self.point((1.0, 0.0, 0.0)), 3)
-        self.assertEqual(inserted.entities[0].identity, 1)
-        with self.assertRaises(SpatialError): inserted.get(0)
-        with self.assertRaises(SpatialError): inserted.neighbors(inserted.get(1), -1.0)
+        removed = a.remove(a.entity_id('first'))
+        inserted = removed.insert('second', self.point((1.0, 0.0, 0.0)), 3)
+        self.assertEqual(inserted.entities[0].identity, 'second')
+        self.assertIsNone(inserted.get(a.entity_id('first')))
+        with self.assertRaises(SpatialError): inserted.neighbors(inserted.entity_id('second'), -1.0)

@@ -21,6 +21,7 @@ async function main() {
     'native-pixel-edit': '../test/native-pixel-edit-integration.js',
     application: '../test/application-integration.js',
     'native-spatial-debug': '../test/native-spatial-debug-integration.js',
+    'native-recovered': '../test/native-recovered-integration.js',
     'native-computed': '../test/native-computed-integration.js',
     'native-methods': '../test/native-methods-integration.js',
     'native-flow-methods': '../test/native-flow-methods-integration.js',
@@ -47,6 +48,7 @@ async function main() {
   extensionDevelopmentPath: process.env.PIXELLANG_EXTENSION_PATH || path.resolve(__dirname, ".."),
   extensionTestsPath: path.resolve(__dirname, suites[suite]),
   extensionTestsEnv: {
+    PIXELLANG_RECOVERED_SOURCE: process.env.PIXELLANG_RECOVERED_SOURCE,
     PIXELLANG_TEST_HOLD_MS: process.env.PIXELLANG_TEST_HOLD_MS || "0",
     PIXELLANG_TEST_LOGS: path.resolve(__dirname, "../../examples/log-analysis"),
     PIXELLANG_TEST_LEDGER: path.resolve(__dirname, "../../examples/ledger"),

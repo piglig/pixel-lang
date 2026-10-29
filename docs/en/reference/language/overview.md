@@ -60,7 +60,7 @@ Precedence from high to low: member/index/call; unary - and !; * / %; + -;
 String + concatenates. Order comparisons accept matching int, float64 or string values;
 comparison and equality do not coerce types. Numeric operators accept matching
 int or float64 operands; see [numbers](numbers.md) for numeric rules.
-Matching scalar and Point3/Vec3 types support value equality, as do arrays, maps,
+Matching scalar, Point3/Vec3 and EntityId/LinkId types support value equality, as do arrays, maps,
 records and enums whose content types are comparable. Functions and json do not
 support direct equality. See [data semantics](data.md) for cycle and identity rules.
 Integer division truncates toward zero; float64 division follows [numbers](numbers.md).

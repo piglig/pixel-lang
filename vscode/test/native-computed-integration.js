@@ -14,7 +14,7 @@ effect fn main() {
  let moved = base + offset
  let transform = Transform3::[World, World]{rotation: [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]], translation: Vec3::[World]{x:0.0,y:0.0,z:4.0}}
  let target = transform.point(moved)
- let world = Space::[World, string, bool]("room").insert(target, "moving")
+ let world = Space::[World, string, bool]("room").insert("entity-0", target, "moving")
  print(Inspect().step(world))
 }
 `;

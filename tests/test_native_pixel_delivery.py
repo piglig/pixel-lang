@@ -69,26 +69,26 @@ class NativePixelDeliveryTests(unittest.TestCase):
 record Cost { weight: int, enabled: bool }
 effect fn main() {
  let empty = Space::[World,string,Cost]("network")
- let first = empty.insert(Point3::[World]{x:0.0,y:0.0,z:0.0}, "a")
- let nodes = first.insert(Point3::[World]{x:0.0,y:0.0,z:2.0}, "b")
- let connected = nodes.connect(nodes.get(0), nodes.get(1), Cost{weight:5,enabled:true})
- let link: Link[World,string,Cost] = connected.getLink(0)
- let moved = connected.move(connected.get(1), Point3::[World]{x:0.0,y:0.0,z:9.0})
- let updated = moved.setLinkPayload(link, Cost{weight:8,enabled:true})
+ let first = empty.insert("entity-0", Point3::[World]{x:0.0,y:0.0,z:0.0}, "a")
+ let nodes = first.insert("entity-1", Point3::[World]{x:0.0,y:0.0,z:2.0}, "b")
+ let connected = nodes.connect("link-0", nodes.require(nodes.entityId("entity-0")).id, nodes.require(nodes.entityId("entity-1")).id, Cost{weight:5,enabled:true})
+ let link: Link[World,string,Cost] = connected.requireLink(connected.linkId("link-0"))
+ let moved = connected.move(connected.require(connected.entityId("entity-1")).id, Point3::[World]{x:0.0,y:0.0,z:9.0})
+ let updated = moved.setLinkPayload(link.id, Cost{weight:8,enabled:true})
  var total = 0
- for edge in updated.outgoing(updated.get(0)) {
+ for edge in updated.outgoing(updated.require(updated.entityId("entity-0")).id) {
   let cost = edge.payload
   if cost.enabled { total += cost.weight }
  }
  print(total)
  print(link.payload.weight)
- print(connected.target(link).position.z)
- print(updated.target(link).position.z)
- print(updated.source(link).id)
- print(updated.disconnect(link).linkCount())
+ print(connected.require(link.target).position.z)
+ print(updated.require(link.target).position.z)
+ print(updated.require(link.source).id.key)
+ print(updated.disconnect(link.id).linkCount())
 }
 '''
-        self.roundtrip({'main.pxl': source}, [8, 5, 2.0, 9.0, 0, 0])
+        self.roundtrip({'main.pxl': source}, [8, 5, 2.0, 9.0, "entity-0", 0])
 
     def request(self, operation, **args):
         with ExitStack() as stack:
@@ -165,15 +165,15 @@ effect fn main() {
     def test_native_space_queries_and_entity_payload_types_roundtrip(self):
         files = {'main.pxl': '''frame World = meters
 record Payload { value: int }
-fn Nearby(space: Space[World, Payload,string], origin: Entity[World, Payload]) -> int = len(space.neighbors(origin, 2.0))
+fn Nearby(space: Space[World, Payload,string], origin: Entity[World, Payload]) -> int = len(space.neighbors(origin.id, 2.0))
 effect fn main() {
  var space = Space::[World, Payload,string]("delivery")
- space = space.insert(Point3::[World]{x: 0.0, y: 0.0, z: 0.0}, Payload{value: 7})
- space = space.insert(Point3::[World]{x: 0.0, y: 0.0, z: 1.5}, Payload{value: 9})
- let origin = space.get(0)
+ space = space.insert("entity-0", Point3::[World]{x: 0.0, y: 0.0, z: 0.0}, Payload{value: 7})
+ space = space.insert("entity-1", Point3::[World]{x: 0.0, y: 0.0, z: 1.5}, Payload{value: 9})
+ let origin = space.require(space.entityId("entity-0"))
  print(Nearby(space, origin))
  print(origin.payload.value)
- print(space.ahead(origin, space.get(1), Vec3::[World]{x: 0.0, y: 0.0, z: 1.0}, 0.0))
+ print(space.ahead(origin.id, space.require(space.entityId("entity-1")).id, Vec3::[World]{x: 0.0, y: 0.0, z: 1.0}, 0.0))
 }
 '''}
         recovered = self.roundtrip(files, [1, 7, True])
@@ -267,7 +267,7 @@ effect fn main() {
 
     def test_native_space_state_initializers_keep_instance_isolation_after_png(self):
         files = {'main.pxl': '''frame World = meters
-fn Insert(space: Space[World, int,string], z: float64) -> Space[World, int,string] = space.insert(Point3::[World]{x: 0.0, y: 0.0, z: z}, 7)
+fn Insert(space: Space[World, int,string], z: float64) -> Space[World, int,string] = space.insert(string(z), Point3::[World]{x: 0.0, y: 0.0, z: z}, 7)
 fn Size(space: Space[World, int,string]) -> int = space.size()
 flow Points() step(z: float64) -> int {
  state space: Space[World, int,string] = Space::[World, int,string]("points")
@@ -385,12 +385,12 @@ effect fn main() {
         source = '''frame World = meters
 fn Update(world: Space[World, string,int], position: Point3[World]) -> Space[World, string,int] {
  if world.size() == 0 {
-  let first = world.insert(Point3::[World]{x: 0.0, y: 0.0, z: 0.0}, "observer")
-  let populated = first.insert(position, "moving")
-  return populated.connect(populated.get(0), populated.get(1), 5)
+  let first = world.insert("entity-0", Point3::[World]{x: 0.0, y: 0.0, z: 0.0}, "observer")
+  let populated = first.insert("entity-1", position, "moving")
+  return populated.connect("link-0", populated.require(populated.entityId("entity-0")).id, populated.require(populated.entityId("entity-1")).id, 5)
  }
- let moved = world.move(world.get(1), position)
- return moved.setLinkPayload(moved.getLink(0), 8)
+ let moved = world.move(world.require(world.entityId("entity-1")).id, position)
+ return moved.setLinkPayload(moved.requireLink(moved.linkId("link-0")).id, 8)
 }
 flow Simulation() step(position: Point3[World]) -> Space[World, string,int] {
  state world: Space[World, string,int] = Space::[World, string,int]("room")
@@ -402,12 +402,12 @@ effect fn main() {
  let simulation = Simulation()
  let before = simulation.step( Point3::[World]{x: 0.0, y: 0.0, z: 2.0})
  let after = simulation.step( Point3::[World]{x: 0.0, y: 0.0, z: 3.0})
- print(len(before.neighbors(before.get(0), 2.0)))
- print(len(after.neighbors(after.get(0), 2.0)))
- print(before.get(1).position.z)
- print(after.get(1).position.z)
- print(before.getLink(0).payload)
- print(after.getLink(0).payload)
+ print(len(before.neighbors(before.require(before.entityId("entity-0")).id, 2.0)))
+ print(len(after.neighbors(after.require(after.entityId("entity-0")).id, 2.0)))
+ print(before.require(before.entityId("entity-1")).position.z)
+ print(after.require(after.entityId("entity-1")).position.z)
+ print(before.requireLink(before.linkId("link-0")).payload)
+ print(after.requireLink(after.linkId("link-0")).payload)
 }
 '''
         with ExitStack() as guards:
@@ -439,7 +439,7 @@ effect fn main() {
             self.assertEqual(original_next['links'][0]['payload']['value'], '8')
             self.assertEqual([original_old['links'][0][key] for key in ('id', 'source', 'target')],
                              [original_next['links'][0][key] for key in ('id', 'source', 'target')])
-            self.assertEqual([e['id'] for e in original_old['entities']], [0, 1])
+            self.assertEqual([e['id'] for e in original_old['entities']], ['entity-0', 'entity-1'])
             self.assertIsNotNone(original_next['entities'][1]['origin'])
             self.assertNotEqual(original_old['entities'][1]['origin'], original_next['entities'][1]['origin'])
             final = workstation.request('run', dict(session=session))
@@ -453,8 +453,8 @@ effect fn main() {
             self.assertEqual(restored['cursor'], selected)
             self.assertEqual(view(restored_session, old_path), original_old)
             self.assertEqual(view(restored_session, next_path), original_next)
-            self.assertEqual(view(restored_session, old_path, neighbors=dict(origin=0, radius=2.0))['total'], 1)
-            self.assertEqual(view(restored_session, next_path, neighbors=dict(origin=0, radius=2.0))['total'], 0)
+            self.assertEqual(view(restored_session, old_path, neighbors=dict(origin="entity-0", radius=2.0))['total'], 1)
+            self.assertEqual(view(restored_session, next_path, neighbors=dict(origin="entity-0", radius=2.0))['total'], 0)
             continued = workstation.request('run', dict(session=restored_session))
             self.assertTrue(continued['state']['halted'])
             self.assertEqual(continued['output'], final['output'])

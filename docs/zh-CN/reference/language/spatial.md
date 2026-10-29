@@ -20,39 +20,40 @@ PixelLang 区分以下四种坐标与关系，不在它们之间隐式转换：
 
 ## 原生空间接口
 
-接收者接口定义如下。
-坐标系和负载类型来自接收者，调用时无需再次指定。
+标识回答“是哪一个对象”，实体值与连接值保存“某个快照中的数据”。查询和更新使用 `EntityId[F, T]` 与 `LinkId[F, T, L]`；它们支持相等比较和映射键。通过所属空间取得标识，不能直接将字符串当作标识。
 
 | 操作 | 行为 |
 | --- | --- |
-| `Space::[F, T, L](identity)` | 创建空快照；名称在一次运行中必须唯一 |
-| `space.insert(position, payload)` | 保留负载值快照，分配递增身份，返回新快照 |
-| `space.get(id)` | 返回该快照中的实体，不存在时产生执行故障 |
-| `space.move(entity, position)` | 按身份移动实体，返回新快照 |
-| `space.remove(entity)` | 删除实体，不复用其身份 |
-| `space.neighbors(entity, radius)` | 含边界、排除自身的欧氏距离查询 |
-| `space.ahead(origin, candidate, direction, tolerance)` | 判断候选实体是否在指定方向前方；容差使用空间长度单位 |
-| `space.size()` | 返回实体数量 |
-| `space.connect(source, target, payload)` | 创建有稳定身份的有向连接，保留负载值快照，返回新快照 |
-| `space.getLink(id)` | 读取连接；已删除身份不能复用 |
-| `space.disconnect(link)` | 删除指定连接，返回新快照 |
-| `space.setLinkPayload(link, payload)` | 替换连接负载，保留连接身份与端点 |
-| `space.outgoing(entity)` / `space.incoming(entity)` | 返回按身份排序的出边／入边 |
-| `space.linkCount()` | 返回连接数量 |
-| `space.source(link)` / `space.target(link)` | 在指定快照中按身份解析端点，取得该时刻的位置 |
-| `link.id` / `link.payload` | 读取身份或负载；负载为声明类型的独立值 |
-| `entity.id` / `entity.position` / `entity.payload` | 读取实体值；负载为声明类型的独立值 |
-| `point.distance(other)` / `vector.dot(other)` | 同坐标系的位置距离与位移点积 |
-| `transform.point(point)` / `transform.vector(vector)` | 显式转换位置或方向 |
+| `Space::[F, T, L](identity)` | 创建空空间；空间身份在一次运行中唯一 |
+| `space.entityId(key) / space.linkId(key)` | 从业务键取得类型化标识，不插入对象 |
+| `space.insert(key, position, payload)` | 插入实体；拒绝重复业务键 |
+| `space.get(id) / space.getLink(id)` | 返回 Option[Entity]／Option[Link]；不存在时为 None |
+| `space.require(id) / space.requireLink(id)` | 读取必须存在的对象；缺失为执行故障 |
+| `space.move(id, position) / space.setPayload(id, payload)` | 返回新快照，保留实体身份 |
+| `space.remove(id)` | 删除实体；仍有关联连接时拒绝 |
+| `space.removeCascade(id)` | 同时删除实体及所有关联连接 |
+| `space.neighbors(id, radius)` | 返回本快照的邻域实体，排除自身 |
+| `space.ahead(originId, candidateId, direction, tolerance)` | 判断位移在指定方向上的投影是否超过容差 |
+| `space.connect(key, sourceId, targetId, payload)` | 在已有实体之间插入有向连接 |
+| `space.disconnect(id) / space.setLinkPayload(id, payload)` | 删除连接或更新连接负载 |
+| `space.outgoing(id) / space.incoming(id)` | 按插入顺序返回出边／入边 |
+| `space.size() / space.linkCount()` | 返回实体／连接数量 |
+| `entity.id / entity.position / entity.payload` | 读取实体标识以及该实体值保存的位置和负载 |
+| `link.id / link.source / link.target / link.payload` | 读取连接标识、端点标识和保存的负载 |
+| `id.key` | 读取稳定业务键 |
+| `point.distance(other) / vector.dot(other)` | 同坐标系距离／点积 |
+| `transform.point(point) / transform.vector(vector)` | 显式转换位置／位移 |
 | `first.then(after)` | 先应用 first，再应用 after |
 
-`ahead` 将方向归一化，再比较位移的方向投影是否严格大于 `tolerance`；该参数不是查询半径。
-删除实体前须断开所有关联连接。空间方法返回值，不原地修改接收者；例如
-`let disconnected = scene.disconnect(link)` 不会改变 `scene`。
+业务键是 1–256 个字符的字符串，精确匹配且区分大小写。业务键以空间和标识类型为作用域。两个分支插入相同键表示同一逻辑对象；不同键即使坐标相同也不是同一对象。删除后再次插入相同键，明确表示重建同一逻辑身份；新对象应使用新键。
 
-属性内部也不可通过赋值、容器修改或 `inout` 写入。`var data = link.payload` 创建可独立修改的本地值；
-修改后调用 `scene.setLinkPayload(link, data)` 得到新快照。实体属性读取该实体值保存的位置与负载；
-空间查询和移动则在接收者快照中按身份解析实体。
+所有更新返回新快照。已取得的实体值和连接值保留原数据。读取特定快照中的端点时，使用 `space.get(link.target)` 或 `space.require(link.target)`。要求标识的参数不接受实体快照，应显式传入 `entity.id`。
+
+外来空间标识、重复插入、更新不存在的对象会导致执行故障。`get` 和 `getLink` 对合法但在当前快照中缺失的标识返回 `None`。删除实体需先断开连接，或显式使用 `removeCascade`。
+
+属性不可写，包括容器修改和 `inout`。可将负载复制到本地变量修改，再通过 `setPayload` 或 `setLinkPayload` 发布；旧快照不变。
+
+`ahead` 将方向归一化，判断位移投影是否严格大于 `tolerance`；容差采用坐标系的长度单位。
 
 ## 显式紧凑区域
 
@@ -77,11 +78,11 @@ main 创建 flow 后，由宿主配置应用调度，不将 XYZ 解释为时间�
 
 坐标采用右手系，Y 向上，分量为有限 float64。支持 meters、centimeters、millimeters；同单位不同 frame 仍是不同类型。
 Point3 表示位置，Vec3 表示位移：点减点得到位移，点加位移得到点，点加点不合法。
-半径邻域包含边界、排除自身，按稳定实体身份排序；半径须非负有限。
+半径邻域包含边界、排除自身，按插入顺序返回；半径须非负有限。
 
 `Transform3[From, To]` 的 `rotation` 是 3×3 正交旋转矩阵，`translation` 是 `Vec3[To]`。
 变换不允许改变左右手性或隐式缩放，单位换算由 frame 单位确定；`first.then(after)` 先应用 first。
-并行边和自环合法。身份删除后不复用，外来实体或不存在的身份导致执行故障。
+并行边和自环合法。标识查找和缺失行为遵循上表的约定。
 
 ## 继续阅读
 

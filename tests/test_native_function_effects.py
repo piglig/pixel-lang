@@ -83,7 +83,7 @@ effect fn main(){
  let first=Scene(ARGUMENTS)
  let second=Scene(ARGUMENTS)
  let before=first.step()
- let changed=before.insert(Point3::[World]{x:0.0,y:0.0,z:1.0}, 7)
+ let changed=before.insert("entity-0", Point3::[World]{x:0.0,y:0.0,z:1.0}, 7)
  print(before.size());print(changed.size())
  print(first.step().size());print(second.step().size())
 }

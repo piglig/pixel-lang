@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 SCALARS = frozenset({"int", "float64", "bool", "str", "json", "unit"})
-SPATIAL_TYPES = frozenset({'Point3', 'Vec3', 'Transform3', 'Entity', 'Space', 'Link'})
+SPATIAL_TYPES = frozenset({'Point3', 'Vec3', 'Transform3', 'Entity', 'EntityId', 'Space', 'Link', 'LinkId'})
 MAX_TYPE_DEPTH = 32
 MAX_TYPE_NODES = 256
 MAX_TYPE_TEXT = 4096
@@ -208,7 +208,7 @@ def is_value_type(value, parameters=frozenset()):
     if value.kind == 'flow_handle':
         return len(value.args) == 1 and value.args[0].kind == 'function' and is_value_type(value.args[0], parameters)
     if value.kind == 'spatial':
-        arity = 1 if value.name in ('Point3', 'Vec3') else 3 if value.name in ('Space', 'Link') else 2
+        arity = 1 if value.name in ('Point3', 'Vec3') else 3 if value.name in ('Space', 'Link', 'LinkId') else 2
         return len(value.args) == arity and all(is_value_type(a, parameters) for a in value.args)
     if value.kind == "function":
         return value.name in ("", "effect") and bool(value.args) and all(is_parameter_type(a, parameters) for a in value.args[:-1]) and (

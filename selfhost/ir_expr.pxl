@@ -439,7 +439,7 @@ export fn Emit(index: int, c: inout state.Context, planned: inout model.ClosureP
             Emit(children[1], &c, &planned)
             let leftType = state.ExpressionType(children[0], &c, &planned)
             let rightType = state.ExpressionType(children[1], &c, &planned)
-            if leftType >= 0 && rightType >= 0 && (planned.named.checked.resolved.types[leftType].kind == "spatial" || planned.named.checked.resolved.types[rightType].kind == "spatial") {
+            if leftType >= 0 && rightType >= 0 && ((planned.named.checked.resolved.types[leftType].name == "Point3" || planned.named.checked.resolved.types[leftType].name == "Vec3") || (planned.named.checked.resolved.types[rightType].name == "Point3" || planned.named.checked.resolved.types[rightType].name == "Vec3")) {
                 state.Emit("SPATIAL_BINARY", jsonFrom(node.text), index, planned, &c)
                 return
             }

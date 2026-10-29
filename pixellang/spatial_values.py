@@ -43,14 +43,17 @@ class ImmutableNative:
 
 UNITS = {'meters': 1.0, 'centimeters': 0.01, 'millimeters': 0.001}
 OPERATIONS = {
-    'spaceInsert': 3, 'spaceGet': 2, 'spaceMove': 3, 'spaceRemove': 2,
+    'spaceInsert': 4, 'spaceGet': 2, 'spaceMove': 3, 'spaceRemove': 2,
+    'spaceEntityId': 2, 'spaceLinkId': 2, 'identityKey': 1,
+    'spaceRequire': 2, 'spaceRequireLink': 2, 'spaceSetPayload': 3, 'spaceRemoveCascade': 2,
+    'linkSourceId': 1, 'linkTargetId': 1,
     'spaceNeighbors': 3, 'spaceAhead': 5, 'spaceSize': 1,
     'entityPosition': 1, 'entityPayload': 1, 'entityId': 1,
     'distance3': 2, 'dot3': 2,
     'transformPoint': 2, 'transformVector': 2, 'transformThen': 2,
-    'spaceConnect': 4, 'spaceDisconnect': 2, 'spaceGetLink': 2, 'spaceSetLinkPayload': 3,
+    'spaceConnect': 5, 'spaceDisconnect': 2, 'spaceGetLink': 2, 'spaceSetLinkPayload': 3,
     'spaceOutgoing': 2, 'spaceIncoming': 2, 'spaceLinkCount': 1,
-    'linkId': 1, 'linkPayload': 1, 'linkSource': 2, 'linkTarget': 2,
+    'linkId': 1, 'linkPayload': 1,
 }
 
 
@@ -200,25 +203,72 @@ class FrozenValue(ImmutableNative):
     items: tuple
 
 
+def business_key(key):
+    if type(key) is not str or not key or len(key) > 256:
+        raise SpatialError('Spatial keys must be nonempty strings of at most 256 characters')
+    return key
+
+
+@dataclass(frozen=True, slots=True)
+class EntityId(ImmutableNative):
+    owner: str
+    key: str
+    frame: CoordinateFrame
+    payload_type: str
+
+    def __post_init__(self):
+        ImmutableNative.__post_init__(self)
+        business_key(self.key)
+
+
+@dataclass(frozen=True, slots=True)
+class LinkId(ImmutableNative):
+    owner: str
+    key: str
+    frame: CoordinateFrame
+    entity_type: str
+    payload_type: str
+
+    def __post_init__(self):
+        ImmutableNative.__post_init__(self)
+        business_key(self.key)
+
+
 @dataclass(frozen=True, slots=True)
 class EntityValue(ImmutableNative):
     owner: str
-    identity: int
+    identity: str
     position: SpatialValue
     payload_type: str
     payload: object
+
+    @property
+    def id(self):
+        return EntityId(self.owner, self.identity, self.position.frame, self.payload_type)
 
 
 @dataclass(frozen=True, slots=True)
 class LinkValue(ImmutableNative):
     owner: str
-    identity: int
+    identity: str
     frame: CoordinateFrame
     entity_type: str
     payload_type: str
-    source: int
-    target: int
+    source: str
+    target: str
     payload: object
+
+    @property
+    def id(self):
+        return LinkId(self.owner, self.identity, self.frame, self.entity_type, self.payload_type)
+
+    @property
+    def source_id(self):
+        return EntityId(self.owner, self.source, self.frame, self.entity_type)
+
+    @property
+    def target_id(self):
+        return EntityId(self.owner, self.target, self.frame, self.entity_type)
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,121 +278,124 @@ class SpaceValue(ImmutableNative):
     payload_type: str
     link_type: str
     entities: tuple[EntityValue, ...] = ()
-    next_identity: int = 0
     version: int = 0
     links: tuple[LinkValue, ...] = ()
-    next_link_identity: int = 0
 
     def point(self, position):
         if (not isinstance(position, SpatialValue) or position.kind != 'Point3'
                 or position.frame != self.frame):
             raise SpatialError('Entity position requires the space coordinate frame')
 
+    def entity_id(self, key):
+        return EntityId(self.identity, business_key(key), self.frame, self.payload_type)
+
+    def link_id(self, key):
+        return LinkId(self.identity, business_key(key), self.frame, self.payload_type, self.link_type)
+
+    def check_entity_id(self, identity):
+        if (type(identity) is not EntityId or identity.owner != self.identity
+                or identity.frame != self.frame or identity.payload_type != self.payload_type):
+            raise SpatialError('Expected an entity identity belonging to this space')
+
+    def check_link_id(self, identity):
+        if (type(identity) is not LinkId or identity.owner != self.identity
+                or identity.frame != self.frame or identity.entity_type != self.payload_type
+                or identity.payload_type != self.link_type):
+            raise SpatialError('Expected a link identity belonging to this space')
+
     def get(self, identity):
-        if type(identity) is not int:
-            raise SpatialError('Entity identity must be an integer')
-        for entity in self.entities:
-            if entity.identity == identity:
-                return entity
-        raise SpatialError('Entity does not exist in this snapshot')
+        self.check_entity_id(identity)
+        return next((entity for entity in self.entities if entity.identity == identity.key), None)
 
-    def current(self, entity):
-        if (not isinstance(entity, EntityValue) or entity.owner != self.identity
-                or entity.payload_type != self.payload_type or entity.position.frame != self.frame):
-            raise SpatialError('Entity belongs to a different space')
-        # A reference is an identity, not permission to inject a stale position.
-        return self.get(entity.identity)
+    def require(self, identity):
+        entity = self.get(identity)
+        if entity is None: raise SpatialError('Entity does not exist in this snapshot')
+        return entity
 
-    def insert(self, position, payload):
+    def insert(self, key, position, payload):
+        identity = self.entity_id(key)
         self.point(position)
-        if self.next_identity >= 2**63 - 1:
-            raise SpatialError('Entity identity limit exceeded')
-        entity = EntityValue(self.identity, self.next_identity, position, self.payload_type, payload)
-        return replace(self, entities=self.entities + (entity,),
-                       next_identity=self.next_identity + 1, version=self.version + 1)
+        if self.get(identity) is not None: raise SpatialError('Entity key already exists in this snapshot')
+        entity = EntityValue(self.identity, key, position, self.payload_type, payload)
+        return replace(self, entities=self.entities + (entity,), version=self.version + 1)
 
-    def move(self, entity, position):
-        entity = self.current(entity)
+    def move(self, identity, position):
+        entity = self.require(identity)
         self.point(position)
-        updated = EntityValue(entity.owner, entity.identity, position, entity.payload_type, entity.payload)
-        return replace(self, entities=tuple(updated if e.identity == entity.identity else e for e in self.entities),
+        updated = replace(entity, position=position)
+        return replace(self, entities=tuple(updated if e.identity == identity.key else e for e in self.entities),
                        version=self.version + 1)
 
-    def remove(self, entity):
-        entity = self.current(entity)
-        if any(link.source == entity.identity or link.target == entity.identity for link in self.links):
-            raise SpatialError('Disconnect incident links before removing an entity')
-        return replace(self, entities=tuple(e for e in self.entities if e.identity != entity.identity),
+    def set_payload(self, identity, payload):
+        entity = self.require(identity)
+        updated = replace(entity, payload=payload)
+        return replace(self, entities=tuple(updated if e.identity == identity.key else e for e in self.entities),
+                       version=self.version + 1)
+
+    def remove(self, identity, *, cascade=False):
+        self.require(identity)
+        incident = tuple(link for link in self.links if link.source == identity.key or link.target == identity.key)
+        if incident and not cascade:
+            raise SpatialError('Entity has incident links; disconnect them or use removeCascade')
+        return replace(self, entities=tuple(e for e in self.entities if e.identity != identity.key),
+                       links=tuple(link for link in self.links if link.source != identity.key and link.target != identity.key),
                        version=self.version + 1)
 
     def get_link(self, identity):
-        if type(identity) is not int:
-            raise SpatialError('Link identity must be an integer')
-        for link in self.links:
-            if link.identity == identity:
-                return link
-        raise SpatialError('Link does not exist in this snapshot')
+        self.check_link_id(identity)
+        return next((link for link in self.links if link.identity == identity.key), None)
 
-    def current_link(self, link):
-        if (not isinstance(link, LinkValue) or link.owner != self.identity or link.frame != self.frame
-                or link.entity_type != self.payload_type or link.payload_type != self.link_type):
-            raise SpatialError('Link belongs to a different space')
-        return self.get_link(link.identity)
+    def require_link(self, identity):
+        link = self.get_link(identity)
+        if link is None: raise SpatialError('Link does not exist in this snapshot')
+        return link
 
-    def connect(self, source, target, payload):
-        source, target = self.current(source), self.current(target)
-        if self.next_link_identity >= 2**63 - 1:
-            raise SpatialError('Link identity limit exceeded')
-        link = LinkValue(self.identity, self.next_link_identity, self.frame, self.payload_type,
-                         self.link_type, source.identity, target.identity, payload)
-        return replace(self, links=self.links + (link,), next_link_identity=self.next_link_identity + 1,
+    def connect(self, key, source, target, payload):
+        identity = self.link_id(key)
+        if self.get_link(identity) is not None: raise SpatialError('Link key already exists in this snapshot')
+        self.require(source); self.require(target)
+        link = LinkValue(self.identity, key, self.frame, self.payload_type,
+                         self.link_type, source.key, target.key, payload)
+        return replace(self, links=self.links + (link,), version=self.version + 1)
+
+    def disconnect(self, identity):
+        self.require_link(identity)
+        return replace(self, links=tuple(item for item in self.links if item.identity != identity.key),
                        version=self.version + 1)
 
-    def disconnect(self, link):
-        link = self.current_link(link)
-        return replace(self, links=tuple(item for item in self.links if item.identity != link.identity),
-                       version=self.version + 1)
-
-    def set_link_payload(self, link, payload):
-        link = self.current_link(link)
+    def set_link_payload(self, identity, payload):
+        link = self.require_link(identity)
         updated = replace(link, payload=payload)
-        return replace(self, links=tuple(updated if item.identity == link.identity else item for item in self.links),
+        return replace(self, links=tuple(updated if item.identity == identity.key else item for item in self.links),
                        version=self.version + 1)
 
-    def outgoing(self, entity):
-        entity = self.current(entity)
-        return tuple(link for link in self.links if link.source == entity.identity)
+    def outgoing(self, identity):
+        self.require(identity)
+        return tuple(link for link in self.links if link.source == identity.key)
 
-    def incoming(self, entity):
-        entity = self.current(entity)
-        return tuple(link for link in self.links if link.target == entity.identity)
+    def incoming(self, identity):
+        self.require(identity)
+        return tuple(link for link in self.links if link.target == identity.key)
 
-    def link_source(self, link):
-        return self.get(self.current_link(link).source)
-
-    def link_target(self, link):
-        return self.get(self.current_link(link).target)
-
-    def neighbors(self, entity, radius):
-        origin = self.current(entity)
+    def neighbors(self, identity, radius):
+        origin = self.require(identity)
         if type(radius) is not float or not math.isfinite(radius) or radius < 0.0:
             raise SpatialError('Neighborhood radius must be finite and nonnegative')
         return tuple(e for e in self.entities
-                     if e.identity != origin.identity and distance(origin.position, e.position) <= radius)
+                     if e.identity != identity.key and distance(origin.position, e.position) <= radius)
 
     def ahead(self, origin, candidate, direction, tolerance):
-        a, b = self.current(origin), self.current(candidate)
+        a, b = self.require(origin), self.require(candidate)
         if (not isinstance(direction, SpatialValue) or direction.kind != 'Vec3'
                 or direction.frame != self.frame or direction.xyz == (0.0, 0.0, 0.0)):
             raise SpatialError('Direction must be a nonzero displacement in the space frame')
         if type(tolerance) is not float or not math.isfinite(tolerance) or tolerance < 0.0:
             raise SpatialError('Direction tolerance must be finite and nonnegative')
         length = math.hypot(*direction.xyz)
-        if not math.isfinite(length):
-            raise SpatialError('Direction magnitude exceeds finite range')
+        if not math.isfinite(length): raise SpatialError('Direction magnitude exceeds finite range')
         normalized = SpatialValue('Vec3', self.frame, tuple(v / length for v in direction.xyz))
         return dot(subtract(b.position, a.position), normalized) > tolerance
 
 
 _NATIVE_VALUE_TYPES = (CoordinateFrame, SpatialOrigin, SpatialValue, Transform,
-                       FrozenValue, EntityValue, LinkValue, SpaceValue)
+                       FrozenValue, EntityId, LinkId, EntityValue, LinkValue, SpaceValue)

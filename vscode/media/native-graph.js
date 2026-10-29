@@ -216,7 +216,7 @@ window.addEventListener('message', ({ data }) => {
     const position = document.createElement('p'); position.id = 'entity-position';
     const sourceButton = document.createElement('button'); sourceButton.id = 'entity-source'; sourceButton.textContent = 'Edit position source';
     const sourceNote = document.createElement('p'); sourceNote.id = 'entity-source-note';
-    selector.onchange = () => selectEntity(Number(selector.value)); container.append(selector, position, sourceButton, sourceNote);
+    selector.onchange = () => selectEntity(selector.value); container.append(selector, position, sourceButton, sourceNote);
     selectEntity(view.entities.some(entity => entity.id === selectedEntity) ? selectedEntity : view.entities[0]?.id);
     const back = document.createElement('button'); back.textContent = 'Back to flow'; back.onclick = renderRuntime; container.append(back);
     const caption = document.createElement('p'); caption.textContent = `${view.identity} · ${view.frame} · ${view.unit} · Time ${view.time} · Snapshot ${view.version ?? 'entity'} · ${view.total} entities`; container.append(caption);
@@ -231,11 +231,11 @@ window.addEventListener('message', ({ data }) => {
     if (view.start + view.count < view.total) { const next = document.createElement('button'); next.textContent = 'More entities'; next.onclick = () => page(view.start + view.count); container.append(next); }
     if (view.version !== null) {
       const origin = document.createElement('input'), radius = document.createElement('input');
-      origin.type = radius.type = 'number'; origin.min = radius.min = '0'; origin.step = '1'; radius.step = 'any';
-      origin.setAttribute('aria-label', 'Origin entity ID'); origin.placeholder = 'Origin entity ID'; origin.value = data.neighbors?.origin ?? '';
+      origin.type = 'text'; origin.maxLength = 256; radius.type = 'number'; radius.min = '0'; radius.step = 'any';
+      origin.setAttribute('aria-label', 'Origin entity key'); origin.placeholder = 'Origin entity key'; origin.value = data.neighbors?.origin ?? '';
       radius.setAttribute('aria-label', 'Radius in ' + view.unit); radius.placeholder = 'Radius in ' + view.unit; radius.value = data.neighbors?.radius ?? '';
       const query = document.createElement('button'); query.textContent = 'Find neighbors';
-      query.onclick = () => { if (Number.isInteger(origin.valueAsNumber) && origin.valueAsNumber >= 0 && Number.isFinite(radius.valueAsNumber) && radius.valueAsNumber >= 0) send('runtime-space', { path: view.path, start: 0, neighbors: { origin: origin.valueAsNumber, radius: radius.valueAsNumber } }); };
+      query.onclick = () => { if (origin.value.length > 0 && Number.isFinite(radius.valueAsNumber) && radius.valueAsNumber >= 0) send('runtime-space', { path: view.path, start: 0, neighbors: { origin: origin.value, radius: radius.valueAsNumber } }); };
       const all = document.createElement('button'); all.textContent = 'All entities'; all.onclick = () => send('runtime-space', { path: view.path, start: 0 });
       container.append(origin, radius, query, all);
     }

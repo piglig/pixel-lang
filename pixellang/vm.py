@@ -135,8 +135,8 @@ def validate_bytecode(bc):
                 return len(value.args) == 2 and all(arg.spelling() in coordinate_frames for arg in value.args)
             if value.name in ('Point3', 'Vec3'):
                 return len(value.args) == 1 and value.args[0].spelling() in coordinate_frames
-            if value.name in ('Space', 'Entity', 'Link'):
-                return (len(value.args) == (2 if value.name == 'Entity' else 3)
+            if value.name in ('Space', 'Entity', 'Link', 'EntityId', 'LinkId'):
+                return (len(value.args) == (2 if value.name in ('Entity', 'EntityId') else 3)
                         and value.args[0].spelling() in coordinate_frames
                         and all(known_type(arg) for arg in value.args[1:]))
             return False
@@ -648,6 +648,10 @@ class VM:
             return f'Transform3<{value.source.identity},{value.target.identity}>'
         if isinstance(value, spatial.SpaceValue):
             return f'Space<{value.frame.identity},{value.payload_type},{value.link_type}>'
+        if isinstance(value, spatial.EntityId):
+            return f'EntityId<{value.frame.identity},{value.payload_type}>'
+        if isinstance(value, spatial.LinkId):
+            return f'LinkId<{value.frame.identity},{value.entity_type},{value.payload_type}>'
         if isinstance(value, spatial.LinkValue):
             return f'Link<{value.frame.identity},{value.entity_type},{value.payload_type}>'
         if isinstance(value, spatial.EntityValue):
@@ -698,6 +702,8 @@ class VM:
         if isinstance(value, spatial.SpaceValue):
             return {'type': self.value_type(value), 'identity': value.identity,
                     'version': value.version, 'entities': len(value.entities), 'links': len(value.links)}
+        if isinstance(value, (spatial.EntityId, spatial.LinkId)):
+            return {'type': self.value_type(value), 'space': value.owner, 'key': value.key}
         if isinstance(value, spatial.LinkValue):
             return {'type': self.value_type(value), 'space': value.owner,
                     'identity': value.identity, 'source': value.source, 'target': value.target}
@@ -736,6 +742,8 @@ class VM:
                     'version': self.materialize(value.version, span, ancestors),
                     'entities': [self.materialize(e, span, ancestors) for e in value.entities],
                     'links': [self.materialize(e, span, ancestors) for e in value.links]}
+        if isinstance(value, (spatial.EntityId, spatial.LinkId)):
+            return {'space': value.owner, 'key': value.key}
         if isinstance(value, spatial.LinkValue):
             return {'identity': self.materialize(value.identity, span, ancestors),
                     'source': self.materialize(value.source, span, ancestors),
@@ -854,7 +862,7 @@ class VM:
                     pending.extend(key.value for key in items if isinstance(key, map_keys.Key))
                 continue
             if not isinstance(value, (spatial.SpatialValue, spatial.Transform, spatial.FrozenValue,
-                                      spatial.SpaceValue, spatial.EntityValue, spatial.LinkValue)):
+                                      spatial.SpaceValue, spatial.EntityValue, spatial.LinkValue, spatial.EntityId, spatial.LinkId)):
                 continue
             identity = id(value)
             if identity in native:
@@ -874,6 +882,8 @@ class VM:
                 count += 1 + len(value.entities) + len(value.links)
                 pending.extend(value.entities)
                 pending.extend(value.links)
+            elif isinstance(value, (spatial.EntityId, spatial.LinkId)):
+                count += 1
             elif isinstance(value, spatial.EntityValue):
                 count += 1
                 pending.extend((value.position, value.payload))
@@ -952,44 +962,60 @@ class VM:
             return first.apply(args[1], origin=origin)
         if name == 'distance3': return spatial.distance(*args)
         if name == 'dot3': return spatial.dot(*args)
-        if name in ('linkId', 'linkPayload'):
+        if name == 'identityKey':
+            if not isinstance(first, (spatial.EntityId, spatial.LinkId)): raise spatial.SpatialError('Expected a spatial identity')
+            return first.key
+        if name in ('linkId', 'linkPayload', 'linkSourceId', 'linkTargetId'):
             if not isinstance(first, spatial.LinkValue):
                 raise spatial.SpatialError('Expected a link value')
-            if name == 'linkId': return first.identity
+            if name == 'linkId': return first.id
+            if name == 'linkSourceId': return first.source_id
+            if name == 'linkTargetId': return first.target_id
             return self.thaw_spatial_payload(first.payload, span)
         if name.startswith('entity'):
             if not isinstance(first, spatial.EntityValue):
                 raise spatial.SpatialError('Expected an entity value')
             if name == 'entityPosition': return first.position
-            if name == 'entityId': return first.identity
+            if name == 'entityId': return first.id
             return self.thaw_spatial_payload(first.payload, span)
         if not isinstance(first, spatial.SpaceValue):
             raise spatial.SpatialError('Expected a space snapshot')
         if name == 'spaceSize': return len(first.entities)
         if name == 'spaceLinkCount': return len(first.links)
-        if name == 'spaceGetLink': return first.get_link(args[1])
-        if name == 'linkSource': return first.link_source(args[1])
-        if name == 'linkTarget': return first.link_target(args[1])
+        if name == 'spaceEntityId': return first.entity_id(args[1])
+        if name == 'spaceLinkId': return first.link_id(args[1])
+        if name == 'spaceRequire': return first.require(args[1])
+        if name == 'spaceRequireLink': return first.require_link(args[1])
+        if name in ('spaceGet', 'spaceGetLink'):
+            is_link = name == 'spaceGetLink'
+            value = first.get_link(args[1]) if is_link else first.get(args[1])
+            typ = (f'Link<{first.frame.identity},{first.payload_type},{first.link_type}>' if is_link
+                   else f'Entity<{first.frame.identity},{first.payload_type}>')
+            return self.make_enum(f'Option<{typ}>', 'None' if value is None else 'Some',
+                                  [] if value is None else ['value'], [] if value is None else [value], span)
         if name in ('spaceOutgoing', 'spaceIncoming'):
             links = first.outgoing(args[1]) if name == 'spaceOutgoing' else first.incoming(args[1])
             return self.allocate(f'Link<{first.frame.identity},{first.payload_type},{first.link_type}>[]', list(links), span)
-        if name == 'spaceGet': return first.get(args[1])
         if name == 'spaceAhead': return first.ahead(*args[1:])
         if name == 'spaceNeighbors':
             neighbors = first.neighbors(*args[1:])
             return self.allocate(f'Entity<{first.frame.identity},{first.payload_type}>[]', list(neighbors), span)
         self.reserve_spatial(len(first.entities) + len(first.links) + 1, span)
         if name == 'spaceConnect':
-            self.typed(args[3], first.link_type, span)
-            return first.connect(args[1], args[2], self.freeze_spatial_payload(args[3], span))
+            self.typed(args[4], first.link_type, span)
+            return first.connect(args[1], args[2], args[3], self.freeze_spatial_payload(args[4], span))
         if name == 'spaceDisconnect': return first.disconnect(args[1])
         if name == 'spaceSetLinkPayload':
             self.typed(args[2], first.link_type, span)
             return first.set_link_payload(args[1], self.freeze_spatial_payload(args[2], span))
-        if name == 'spaceInsert':
+        if name == 'spaceSetPayload':
             self.typed(args[2], first.payload_type, span)
-            payload = self.freeze_spatial_payload(args[2], span)
-            return first.insert(args[1], payload)
+            return first.set_payload(args[1], self.freeze_spatial_payload(args[2], span))
+        if name == 'spaceRemoveCascade': return first.remove(args[1], cascade=True)
+        if name == 'spaceInsert':
+            self.typed(args[3], first.payload_type, span)
+            payload = self.freeze_spatial_payload(args[3], span)
+            return first.insert(args[1], args[2], payload)
         if name == 'spaceMove': return first.move(*args[1:])
         if name == 'spaceRemove': return first.remove(args[1])
         raise spatial.SpatialError('Unknown space operation')
@@ -1436,7 +1462,7 @@ class VM:
                     ('rotation', jsonvalue.from_host([list(row) for row in item.rotation])),
                     ('translation', visit(spatial.SpatialValue('Vec3', item.target, item.translation), depth + 1)),
                 ))
-            if isinstance(item, (spatial.SpaceValue, spatial.EntityValue, spatial.LinkValue)):
+            if isinstance(item, (spatial.SpaceValue, spatial.EntityValue, spatial.LinkValue, spatial.EntityId, spatial.LinkId)):
                 self.fail_data('Space snapshots require typed snapshot serialization', span,
                                code='json.unsupported_type')
             if isinstance(item, spatial.SpatialValue):

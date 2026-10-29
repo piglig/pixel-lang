@@ -182,17 +182,24 @@ class NativeStateCodec:
                 invalid('invalid spatial source origin')
         elif isinstance(value, spatial.FrozenValue):
             self.typed(value, value.type_name)
+        elif isinstance(value, (spatial.EntityId, spatial.LinkId)):
+            if type(value.owner) is not str or value.owner not in self.vm.space_identities:
+                invalid('unknown spatial identity owner')
+            spatial.business_key(value.key)
+            if not isinstance(value.frame, spatial.CoordinateFrame): invalid('invalid identity frame')
+            parse_type(value.payload_type)
+            if isinstance(value, spatial.LinkId): parse_type(value.entity_type)
         elif isinstance(value, spatial.EntityValue):
             if type(value.owner) is not str or value.owner not in self.vm.space_identities:
                 invalid('unknown entity space')
-            integer(value.identity)
+            spatial.business_key(value.identity)
             if not isinstance(value.position, spatial.SpatialValue) or value.position.kind != 'Point3':
                 invalid('entity position is not a point')
             self.typed(value.payload, value.payload_type)
         elif isinstance(value, spatial.LinkValue):
             if type(value.owner) is not str or value.owner not in self.vm.space_identities:
                 invalid('unknown link space')
-            for n in (value.identity, value.source, value.target): integer(n)
+            for key in (value.identity, value.source, value.target): spatial.business_key(key)
             if not isinstance(value.frame, spatial.CoordinateFrame): invalid('invalid link frame')
             parse_type(value.entity_type)
             self.typed(value.payload, value.payload_type)
@@ -200,23 +207,25 @@ class NativeStateCodec:
             if type(value.identity) is not str or value.identity not in self.vm.space_identities:
                 invalid('unknown space identity')
             if not isinstance(value.frame, spatial.CoordinateFrame): invalid('invalid space frame')
-            for n in (value.next_identity, value.next_link_identity, value.version): integer(n)
+            integer(value.version)
             if type(value.entities) is not tuple or type(value.links) is not tuple: invalid('invalid space storage')
-            ids, previous = set(), -1
+            ids = set()
             for entity in value.entities:
                 if (not isinstance(entity, spatial.EntityValue) or entity.owner != value.identity
                         or entity.position.frame != value.frame or entity.payload_type != value.payload_type
-                        or not previous < entity.identity < value.next_identity):
+                        or entity.identity in ids):
                     invalid('invalid or repeated entity identity')
-                ids.add(entity.identity); previous = entity.identity
-            previous = -1
+                spatial.business_key(entity.identity)
+                ids.add(entity.identity)
+            link_ids = set()
             for link in value.links:
                 if (not isinstance(link, spatial.LinkValue) or link.owner != value.identity
                         or link.frame != value.frame or link.entity_type != value.payload_type
                         or link.payload_type != value.link_type or link.source not in ids or link.target not in ids
-                        or not previous < link.identity < value.next_link_identity):
+                        or link.identity in link_ids):
                     invalid('invalid link or dangling endpoint')
-                previous = link.identity
+                spatial.business_key(link.identity)
+                link_ids.add(link.identity)
 
 
 def cell_types(vm):

@@ -169,7 +169,7 @@ explicit initial value defines the empty result and numeric type, as in
 `T: Hashable` is the prerequisite contract for typed map keys.
 Hashable implies Equatable; Ordered and Numeric satisfy Hashable, but Hashable
 does not imply Ordered. Supported types are int, finite float64, bool, string,
-Point3/Vec3, and enums whose payload types in every variant are hashable. Arrays,
+Point3/Vec3 and EntityId/LinkId, and enums whose payload types in every variant are hashable. Arrays,
 maps, records, functions, JSON and runtime instances cannot be hash keys;
 inactive enum variants are checked too. Positive and negative floating zero are
 equal and identify the same map key; spatial source origins do not affect
