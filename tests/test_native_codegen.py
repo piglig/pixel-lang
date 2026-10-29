@@ -16,6 +16,44 @@ from tests.bytecode_helpers import op, program
 
 @unittest.skipUnless(shutil.which('clang') or shutil.which('cc'), 'C compiler required')
 class NativeCodegenTests(unittest.TestCase):
+    def test_native_build_deadline_preserves_existing_executable(self):
+        import os
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            output=Path(directory)/'program'
+            output.write_bytes(b'previous executable')
+            compiler=Path(directory)/'slow-cc'
+            compiler.write_text('#!/usr/bin/env python3\nimport time\ntime.sleep(2)\n')
+            compiler.chmod(0o755)
+            code=self.code([op('PUSH',0),op('RETURN')])
+            with patch.dict(os.environ,{'PIXELLANG_NATIVE_BUILD_TIMEOUT':'0.05'}):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    build_native(code,output,cc=str(compiler))
+            self.assertEqual(output.read_bytes(),b'previous executable')
+            self.assertTrue(output.with_suffix('.c').exists())
+            self.assertFalse(list(Path(directory).glob('.pixel-native-*')))
+
+    def test_explicit_native_deadline_overrides_environment(self):
+        import os
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            output=Path(directory)/'program'
+            code=self.code([op('PUSH',0),op('RETURN')])
+            with patch.dict(os.environ,{'PIXELLANG_NATIVE_BUILD_TIMEOUT':'invalid'}):
+                build_native(code,output,timeout=30)
+            self.assertEqual(subprocess.run([str(output)],timeout=5).returncode,0)
+
+    def test_invalid_native_build_deadlines_do_not_write_artifacts(self):
+        import os
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            output=Path(directory)/'program'
+            code=self.code([op('PUSH',0),op('RETURN')])
+            for value in ('nan','inf','0','-1','invalid'):
+                with self.subTest(value=value), patch.dict(os.environ,{'PIXELLANG_NATIVE_BUILD_TIMEOUT':value}):
+                    with self.assertRaises(ValueError):build_native(code,output)
+            self.assertEqual(list(Path(directory).iterdir()),[])
+
     def code(self, instructions, constants=(0,), locals=0):
         code = program([])
         types = {bool: 'bool', int: 'int', float: 'float64', str: 'str'}

@@ -80,6 +80,8 @@ intentionally expensive; daily edits should use the related gate.
 A passing release compiler gate does not substitute for package/VSIX installation,
 real editor tests, or a release report tied to the same frozen snapshot.
 
+CI sets `PIXELLANG_NATIVE_BUILD_TIMEOUT=600` for each C compilation and `--regression-timeout 3600` for each regression suite. Local defaults remain 120 and 1200 seconds. The outer supervisor allows 30 seconds for worker cleanup and evidence writing. These infrastructure deadlines do not change performance thresholds or test coverage.
+
 ## Performance budget
 
 ```sh

@@ -3,6 +3,8 @@ on:
   workflow_dispatch:
   push:
     tags: ['v*-alpha.*']
+env:
+  PIXELLANG_NATIVE_BUILD_TIMEOUT: "600"
 permissions:
   contents: read
 concurrency:
@@ -21,7 +23,7 @@ jobs:
         with:
           node-version: '22'
       - run: python -m pip install uv
-      - run: uv sync --locked
+      - uses: ./.github/actions/native-toolchain
       - run: npm --prefix vscode ci
       - run: npm --prefix vscode run prepare-runtime
       - name: Check release tag
@@ -35,7 +37,7 @@ jobs:
           PY
       - run: uv run python scripts/check_docs.py
       - run: npm --prefix vscode run check
-      - run: uv run python scripts/verify_preview.py release --workers 2 --output "$RUNNER_TEMP/acceptance"
+      - run: uv run python scripts/verify_preview.py release --workers 2 --regression-timeout 3600 --output "$RUNNER_TEMP/acceptance"
       - run: uv run python scripts/build_distribution.py --output "$RUNNER_TEMP/distribution"
       - run: uv run python tests/clean_install.py "$RUNNER_TEMP"/distribution/*.whl --report "$RUNNER_TEMP/distribution/clean-install.json"
       - name: Test packaged extension in VS Code

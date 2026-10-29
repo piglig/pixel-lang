@@ -28,7 +28,7 @@ class PreviewGateTests(unittest.TestCase):
                 dict(kind='start',test=names[1])]))
             output=root/'run'
             cmd=[sys.executable,str(ROOT/'scripts/verify_preview.py'),'related',
-                 '--output',str(output),'--workers','2','--timings-from',str(root/'history'),
+                 '--output',str(output),'--workers','2','--regression-timeout','30','--timings-from',str(root/'history'),
                  *[arg for name in names for arg in ('--test',name)]]
             result=subprocess.run(cmd,cwd=ROOT,capture_output=True,text=True,timeout=60)
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
@@ -36,11 +36,23 @@ class PreviewGateTests(unittest.TestCase):
             self.assertTrue(report['verified'])
             self.assertTrue(report['fresh'])
             manifest=json.loads((output/'related/manifest.json').read_text())
+            self.assertEqual(manifest['timeout'],30)
             self.assertEqual(len(manifest['shards']),1)  # One shared class fixture.
             self.assertEqual(sorted(sum(manifest['shards'],[])),names)
             self.assertEqual(manifest['selection']['timingCosts'],dict.fromkeys(names,10))
             events=[json.loads(line) for line in (output/'related/events.jsonl').read_text().splitlines()]
             self.assertEqual(sorted(e['test'] for e in events if e['kind']=='success'),names)
+
+    def test_invalid_regression_deadlines_are_rejected_before_output_creation(self):
+        with TemporaryDirectory() as directory:
+            output=Path(directory)/'evidence'
+            for value in ('nan','inf','0','-1'):
+                result=subprocess.run([sys.executable,str(ROOT/'scripts/verify_preview.py'),
+                    'merge','--output',str(output),'--regression-timeout',value],
+                    cwd=ROOT,capture_output=True,text=True,timeout=10)
+                self.assertNotEqual(result.returncode,0)
+                self.assertIn('finite and positive',result.stderr)
+                self.assertFalse(output.exists())
 
     def test_deadline_stops_owned_process(self):
         with TemporaryDirectory() as directory:

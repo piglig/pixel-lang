@@ -6,6 +6,8 @@ uses original bytecode PCs and binds the executable to its input bytecode.
 """
 import hashlib
 import json
+import math
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -880,9 +882,13 @@ def entry_session(code):
     raise ValueError('Compiler entry must only initialize and advance session state, optionally through unit forwarding entries')
 
 
-def build_native(code, output, *, cc=None, optimization=2, max_depth=256, session=None):
+def build_native(code, output, *, cc=None, optimization=2, max_depth=256, session=None, timeout=None):
     """Build a standalone executable and original-instruction source map."""
     from .bootstrap import normalized
+    if timeout is None:
+        timeout = float(os.environ.get('PIXELLANG_NATIVE_BUILD_TIMEOUT', '120'))
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError('Native build timeout must be finite and positive')
     if type(optimization) is not int or not 0 <= optimization <= 3:
         raise ValueError('Native optimization level must be 0..3')
     source = emit_c(code, max_depth=max_depth, session=session)  # Reject unsupported programs before writing artifacts.
@@ -899,7 +905,7 @@ def build_native(code, output, *, cc=None, optimization=2, max_depth=256, sessio
         # without expensive expansion of the large generated translation unit.
         optimization_flags = ['-fno-inline-functions'] if optimization == 1 else []
         subprocess.run([compiler, '-std=c11', f'-O{optimization}', *optimization_flags, '-ffp-contract=off', str(source_path), '-lm', '-lz', '-o', str(executable)],
-                       check=True, capture_output=True, text=True, timeout=120)
+                       check=True, capture_output=True, text=True, timeout=timeout)
         executable.replace(output)
     mapping = {'format': 'pixellang-native-source-map/2',
                'bytecodeSha256': hashlib.sha256(normalized(code).encode('utf-8',errors='surrogatepass')).hexdigest(),

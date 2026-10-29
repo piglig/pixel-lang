@@ -10,6 +10,7 @@ Packaging/UI acceptance is separate.
 import argparse
 import hashlib
 import json
+import math
 import os
 import platform
 import importlib.metadata
@@ -60,14 +61,17 @@ def main():
     parser.add_argument('--resume-from',type=Path,help='Reuse completed exact-input stages in a new evidence directory')
     parser.add_argument('--workers',type=int,default=1)
     parser.add_argument('--timings-from',type=Path,help='Previous gate directory used only for test-shard scheduling, never for passing results')
+    parser.add_argument('--regression-timeout',type=float,default=1200,help='Seconds per regression suite; independent of performance budgets')
     args=parser.parse_args()
+    if not math.isfinite(args.regression_timeout) or args.regression_timeout<=0:
+        parser.error('--regression-timeout must be finite and positive')
     if not 1<=args.workers<=16:parser.error('workers must be 1..16')
     if bool(args.test)!=(args.level=='related'):parser.error('--test is required for related and forbidden for broader gates')
     output=args.output.resolve()
     if output.is_relative_to(ROOT):parser.error('Evidence directory must be outside the source tree')
     output.mkdir(parents=True,exist_ok=False)
     before=inputs()
-    manifest={'level':args.level,'tests':args.test,'workers':args.workers,'files':before,
+    manifest={'level':args.level,'tests':args.test,'workers':args.workers,'regressionTimeout':args.regression_timeout,'files':before,
               'environment':{'python':sys.version,'executable':sys.executable,'platform':platform.platform(),
                              'packages':sorted([d.metadata['Name'],d.version] for d in importlib.metadata.distributions()),
                              'environmentSha256':hashlib.sha256(json.dumps({k:v for k,v in os.environ.items() if k not in ('_','SHLVL','PWD','OLDPWD')},sort_keys=True).encode()).hexdigest(),
@@ -117,8 +121,8 @@ def main():
         if args.level=='related':
             dest=output/'related'
             run('related',[py,'-m','pixellang.regression','--output',str(dest),
-                           '--workers',str(args.workers),*scheduling('related'),
-                           *[part for test in args.test for part in ('--test',test)]],dest/'summary.json')
+                           '--workers',str(args.workers),'--timeout',str(args.regression_timeout),*scheduling('related'),
+                           *[part for test in args.test for part in ('--test',test)]],dest/'summary.json',timeout=args.regression_timeout+30)
             result['verified']=True
         else:
             manifest=json.loads((ROOT/'pixellang/artifacts/compiler-manifest.json').read_text())
@@ -126,11 +130,11 @@ def main():
             if hashlib.sha256(artifact.read_bytes()).hexdigest()!=manifest['sha256'] or hashlib.sha256(snapshot.read_bytes()).hexdigest()!=manifest['sourceSha256']:
                 raise RuntimeError('Installed compiler must match current frozen source and artifact hashes')
             dest=output/'language-project'
-            run('language-project',[py,'-m','pixellang.regression','--scope','host','--workers',str(args.workers),'--timeout','1200','--output',str(dest),*scheduling('language-project')],dest/'summary.json')
+            run('language-project',[py,'-m','pixellang.regression','--scope','host','--workers',str(args.workers),'--timeout',str(args.regression_timeout),'--output',str(dest),*scheduling('language-project')],dest/'summary.json',timeout=args.regression_timeout+30)
             def generated(name,compiler,native_compiler):
                 dest=output/name
                 run(name,[py,'scripts/verify_generated_compiler.py','--compiler',str(compiler),'--native-compiler',str(native_compiler),'--sources',str(snapshot),
-                          '--workers',str(args.workers),'--timeout','1200','--output',str(dest),*scheduling(name)],dest/'summary.json',timeout=2400)
+                          '--workers',str(args.workers),'--timeout',str(args.regression_timeout),'--output',str(dest),*scheduling(name)],dest/'summary.json',timeout=args.regression_timeout+30)
             generated('generated',artifact,artifact.with_name('compiler-native'))
             run('bridge',['node','vscode/test/bridge-service.js'],timeout=120)
             run('dap',['node','vscode/test/debug-launch.js'],timeout=30)
