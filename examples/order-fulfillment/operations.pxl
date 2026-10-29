@@ -1,0 +1,95 @@
+import "model.pxl" as model
+
+// Prefixes keep order keys separate from internal warehouse objects.
+fn OrderKey(key: string) -> string = "order/" + key
+fn ValidKey(key: string) -> bool = len(key) > 0 && len(key) <= 244
+fn ReservationKey(key: string) -> string = "reservation/" + key
+
+export effect fn Open(identity: string, stock: int) -> Space[model.Warehouse, model.Item, model.Reservation] {
+    assert(stock >= 0)
+    let empty = Space::[model.Warehouse,model.Item,model.Reservation](identity)
+    return empty.insert("depot", Point3::[model.Warehouse]{x:0.0,y:0.0,z:0.0}, model.Item.Depot(stock))
+}
+
+export fn Available(scene: Space[model.Warehouse, model.Item, model.Reservation]) -> int {
+    return match scene.require(scene.entityId("depot")).payload {
+        .Depot(count) => count,
+        .Order(_) => { assert(false); 0 }
+    }
+}
+
+export fn Find(scene: Space[model.Warehouse, model.Item, model.Reservation], key: string) -> Option[model.Order] {
+    if !ValidKey(key) { return .None }
+    return match scene.get(scene.entityId(OrderKey(key))) {
+        .None => .None,
+        .Some(entity) => match entity.payload { .Order(value) => .Some(value), .Depot(_) => .None }
+    }
+}
+
+fn RequireOrder(scene: Space[model.Warehouse, model.Item, model.Reservation], key: string) -> Result[model.Order, model.Rejection] {
+    if !ValidKey(key) { return .Err(.InvalidOrder) }
+    return match Find(scene,key) { .Some(value) => .Ok(value), .None => .Err(.MissingOrder(key)) }
+}
+
+export fn Reserved(scene: Space[model.Warehouse, model.Item, model.Reservation]) -> int {
+    var total = 0
+    for link in scene.outgoing(scene.entityId("depot")) { total += link.payload.quantity }
+    return total
+}
+
+export fn Apply(scene: Space[model.Warehouse, model.Item, model.Reservation], command: model.Command) -> Result[Space[model.Warehouse, model.Item, model.Reservation], model.Rejection] {
+    match command {
+        .Create(key, totalCents, quantity) => {
+            // The longest internal prefix is 12 characters; native keys allow 256.
+            if !ValidKey(key) || totalCents <= 0 || quantity <= 0 { return .Err(.InvalidOrder) }
+            match Find(scene,key) { .Some(_) => { return .Err(.DuplicateOrder(key)) }, .None => {} }
+            let value = model.Order{status:.Pending,totalCents,quantity}
+            return .Ok(scene.insert(OrderKey(key), Point3::[model.Warehouse]{x:0.0,y:0.0,z:0.0}, model.Item.Order(value)))
+        },
+        .Pay(key, cents) => {
+            let previous = RequireOrder(scene,key)?
+            if previous.status != model.Status.Pending { return .Err(.InvalidTransition(key,previous.status)) }
+            if cents != previous.totalCents { return .Err(.AmountMismatch(previous.totalCents,cents)) }
+            let available = Available(scene)
+            if previous.quantity > available { return .Err(.InsufficientStock(previous.quantity,available)) }
+            let depot = scene.entityId("depot")
+            let order = scene.entityId(OrderKey(key))
+            let reserved = scene.setPayload(depot,model.Item.Depot(available-previous.quantity))
+            let paid = reserved.setPayload(order,model.Item.Order(previous with {status:.Paid}))
+            let updated = paid.connect(ReservationKey(key),depot,order,model.Reservation{quantity:previous.quantity})
+            return .Ok(updated)
+        },
+        .Ship(key, tracking) => {
+            let previous = RequireOrder(scene,key)?
+            if previous.status != model.Status.Paid { return .Err(.InvalidTransition(key,previous.status)) }
+            if len(tracking) == 0 { return .Err(.MissingTracking) }
+            let order = scene.entityId(OrderKey(key))
+            // XYZ describes a physical dispatch location, not business time.
+            let shipped = scene.setPayload(order,model.Item.Order(previous with {status:.Shipped(tracking)}))
+            let moved = shipped.move(order,Point3::[model.Warehouse]{x:10.0,y:0.0,z:2.0})
+            return .Ok(moved.disconnect(scene.linkId(ReservationKey(key))))
+        },
+        .Cancel(key) => {
+            let previous = RequireOrder(scene,key)?
+            var updated = scene
+            match previous.status {
+                .Pending => {},
+                .Paid => {
+                    let reservation = scene.requireLink(scene.linkId(ReservationKey(key)))
+                    updated = scene.setPayload(reservation.source,model.Item.Depot(Available(scene)+reservation.payload.quantity)).disconnect(reservation.id)
+                },
+                _ => { return .Err(.InvalidTransition(key,previous.status)) }
+            }
+            return .Ok(updated.setPayload(scene.entityId(OrderKey(key)),model.Item.Order(previous with {status:.Cancelled})))
+        }
+    }
+}
+
+// Only the final snapshot is published. A rejected command discards the local draft.
+export fn ApplyAll(scene: Space[model.Warehouse, model.Item, model.Reservation], commands: [model.Command]) -> Result[Space[model.Warehouse, model.Item, model.Reservation], model.Rejection] {
+    var draft = scene
+    for command in commands {
+        match Apply(draft,command) { .Ok(updated) => { draft = updated }, .Err(reason) => { return .Err(reason) } }
+    }
+    return .Ok(draft)
+}

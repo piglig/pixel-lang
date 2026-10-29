@@ -1,0 +1,24 @@
+import "model.pxl" as model
+import "operations.pxl" as operations
+import "workflow.pxl" as workflow
+
+effect fn Show(view: model.View, key: string) {
+    print(match view.outcome { .Accepted => "accepted", .Rejected(reason) => model.Message(reason) })
+    print(match operations.Find(view.scene,key) { .Some(order) => model.StatusName(order.status), .None => "absent" })
+    print([operations.Available(view.scene),operations.Reserved(view.scene)])
+}
+
+effect fn main() {
+    let orders = workflow.Fulfillment(operations.Open("orders",3))
+    Show(orders.step(.Submit([.Create("A-100",1299,2),.Create("B-200",2499,2)])),"A-100")
+    // The first payment can succeed locally; the second cannot. Neither is committed.
+    Show(orders.step(.Submit([.Pay("A-100",1299),.Pay("B-200",2499)])),"A-100")
+    let paid = orders.step(.Submit([.Pay("A-100",1299)]))
+    Show(paid,"A-100")
+    Show(orders.step(.Submit([.Ship("A-100","")])),"A-100")
+    Show(orders.step(.Submit([.Ship("A-100","TRACK-100")])),"A-100")
+    Show(orders.step(.Submit([.Cancel("A-100")])),"A-100")
+    // Captured data, reservations and position remain available after shipment.
+    Show(paid,"A-100")
+    print(paid.scene.require(paid.scene.entityId("order/A-100")).position.z)
+}

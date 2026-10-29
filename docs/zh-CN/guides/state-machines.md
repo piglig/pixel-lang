@@ -179,3 +179,5 @@ effect fn main() {
 
 - [完整文档目录](../README.md)
 - [安装工具链](installation.md)
+
+多订单协作、库存预留与批量快照发布的完整示例见[订单履约与批量更新](../../../examples/order-fulfillment/README.md).

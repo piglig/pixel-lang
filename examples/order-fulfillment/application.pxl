@@ -1,0 +1,5 @@
+import "operations.pxl" as operations
+import "workflow.pxl" as workflow
+
+// The host supplies submitted batches; there is no timer or synthetic Tick event.
+effect fn main() { workflow.Fulfillment(operations.Open("orders",3)) }

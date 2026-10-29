@@ -1,0 +1,43 @@
+export frame Warehouse = meters
+
+export enum Status { Pending, Paid, Shipped(tracking: string), Cancelled }
+export record Order { status: Status, totalCents: int, quantity: int }
+export enum Item { Depot(available: int), Order(value: Order) }
+export record Reservation { quantity: int }
+
+export enum Command {
+    Create(key: string, totalCents: int, quantity: int),
+    Pay(key: string, cents: int),
+    Ship(key: string, tracking: string),
+    Cancel(key: string)
+}
+// One submitted batch is one atomic business event.
+export enum Event { Submit(commands: [Command]) }
+
+export enum Rejection {
+    InvalidOrder,
+    DuplicateOrder(key: string),
+    MissingOrder(key: string),
+    InvalidTransition(key: string, status: Status),
+    AmountMismatch(expected: int, actual: int),
+    InsufficientStock(requested: int, available: int),
+    MissingTracking
+}
+export enum Outcome { Accepted, Rejected(reason: Rejection) }
+export record View {
+    scene: Space[Warehouse, Item, Reservation],
+    outcome: Outcome
+}
+
+export fn StatusName(status: Status) -> string = match status {
+    .Pending => "pending", .Paid => "paid", .Shipped(_) => "shipped", .Cancelled => "cancelled"
+}
+export fn Message(reason: Rejection) -> string = match reason {
+    .InvalidOrder => "Order requires a nonempty key, positive price and quantity",
+    .DuplicateOrder(key) => "Duplicate order: " + key,
+    .MissingOrder(key) => "Unknown order: " + key,
+    .InvalidTransition(key, status) => "Invalid transition: " + key + " is " + StatusName(status),
+    .AmountMismatch(expected, actual) => "Payment amount does not match",
+    .InsufficientStock(requested, available) => "Insufficient stock",
+    .MissingTracking => "Tracking number is required"
+}

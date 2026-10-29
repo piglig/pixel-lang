@@ -1,0 +1,10 @@
+import "model.pxl" as model
+import "operations.pxl" as operations
+
+export flow Fulfillment(initial: Space[model.Warehouse,model.Item,model.Reservation]) step(event: model.Event) -> model.View {
+    state scene = initial
+    let decision = match event { .Submit(commands) => operations.ApplyAll(scene,commands) }
+    let updated = match decision { .Ok(value) => value, .Err(_) => scene }
+    next scene = updated
+    output model.View{scene:updated,outcome:match decision { .Ok(_) => .Accepted, .Err(reason) => .Rejected(reason) }}
+}

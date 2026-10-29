@@ -11,6 +11,7 @@ Complete [installation](../docs/en/guides/installation.md). Examples below are o
 | [native-space](native-space/README.en.md) | 3D neighborhoods |
 | [weighted-routes](weighted-routes/README.en.md) | Links and propagation |
 | [native-orders](native-orders/README.en.md) | Order state machine |
+| [order-fulfillment](order-fulfillment/README.en.md) | Atomic order fulfillment |
 | [native-elevator](native-elevator/README.en.md) | Spatial controller |
 | [ledger](ledger/README.en.md) | CSV reporting |
 | [log-analysis](log-analysis/README.en.md) | Streaming log analysis |

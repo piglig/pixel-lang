@@ -1,0 +1,113 @@
+[
+  {
+    "input": {
+      "variant": "Submit",
+      "fields": {
+        "commands": [
+          {
+            "variant": "Create",
+            "fields": {
+              "key": "A-100",
+              "totalCents": 1299,
+              "quantity": 2
+            }
+          },
+          {
+            "variant": "Create",
+            "fields": {
+              "key": "B-200",
+              "totalCents": 2499,
+              "quantity": 2
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "input": {
+      "variant": "Submit",
+      "fields": {
+        "commands": [
+          {
+            "variant": "Pay",
+            "fields": {
+              "key": "A-100",
+              "cents": 1299
+            }
+          },
+          {
+            "variant": "Pay",
+            "fields": {
+              "key": "B-200",
+              "cents": 2499
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "input": {
+      "variant": "Submit",
+      "fields": {
+        "commands": [
+          {
+            "variant": "Pay",
+            "fields": {
+              "key": "A-100",
+              "cents": 1299
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "input": {
+      "variant": "Submit",
+      "fields": {
+        "commands": [
+          {
+            "variant": "Ship",
+            "fields": {
+              "key": "A-100",
+              "tracking": ""
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "input": {
+      "variant": "Submit",
+      "fields": {
+        "commands": [
+          {
+            "variant": "Ship",
+            "fields": {
+              "key": "A-100",
+              "tracking": "TRACK-100"
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "input": {
+      "variant": "Submit",
+      "fields": {
+        "commands": [
+          {
+            "variant": "Cancel",
+            "fields": {
+              "key": "A-100"
+            }
+          }
+        ]
+      }
+    }
+  }
+]

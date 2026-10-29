@@ -192,3 +192,5 @@ list has the wrong number of arguments, repair its count in the text editor firs
 
 - [Documentation index](../README.md)
 - [Install the toolchain](installation.md)
+
+For a multi-order workflow with stock reservations and atomic snapshot publication, see [Atomic order fulfillment](../../../examples/order-fulfillment/README.en.md).

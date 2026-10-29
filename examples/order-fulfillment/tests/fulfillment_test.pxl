@@ -1,0 +1,72 @@
+import "../model.pxl" as model
+import "../operations.pxl" as operations
+import "../workflow.pxl" as workflow
+
+fn Accepted(view: model.View) -> bool = match view.outcome { .Accepted => true, .Rejected(_) => false }
+fn Status(view: model.View, key: string) -> string = match operations.Find(view.scene,key) {
+    .Some(order) => model.StatusName(order.status), .None => "absent"
+}
+fn Check(view: model.View, key: string, status: string, available: int, reserved: int) {
+    assert(Status(view,key) == status)
+    assert(operations.Available(view.scene) == available)
+    assert(operations.Reserved(view.scene) == reserved)
+}
+
+effect fn main() {
+    let initial = operations.Open("tests",3)
+    let orders = workflow.Fulfillment(initial)
+    let untouched = workflow.Fulfillment(initial)
+    let created = orders.step(.Submit([.Create("A",1299,2),.Create("B",2499,2)]))
+    assert(Accepted(created))
+    Check(created,"A","pending",3,0)
+    assert(!Accepted(orders.step(.Submit([.Create("A",9999,1)]))))
+    assert(!Accepted(orders.step(.Submit([.Create("",1299,1)]))))
+    assert(!Accepted(orders.step(.Submit([.Create("negative",-1,1)]))))
+    assert(!Accepted(orders.step(.Submit([.Create("zero",100,0)]))))
+    assert(!Accepted(orders.step(.Submit([.Pay("unknown",1299)]))))
+    assert(!Accepted(orders.step(.Submit([.Pay("A",1)]))))
+    assert(!Accepted(orders.step(.Submit([.Ship("A","early")]))))
+
+    // A failed batch neither publishes new entities nor partially reserves stock.
+    let failed = orders.step(.Submit([.Pay("A",1299),.Pay("B",2499)]))
+    assert(!Accepted(failed))
+    Check(failed,"A","pending",3,0)
+    Check(failed,"B","pending",3,0)
+    let discarded = orders.step(.Submit([.Create("discarded",100,1),.Pay("unknown",100)]))
+    assert(Status(discarded,"discarded") == "absent")
+    assert(discarded.scene.size() == created.scene.size())
+
+    let paid = orders.step(.Submit([.Pay("A",1299)]))
+    assert(Accepted(paid))
+    Check(paid,"A","paid",1,2)
+    let reservation = paid.scene.requireLink(paid.scene.linkId("reservation/A"))
+    assert(reservation.source == paid.scene.entityId("depot"))
+    assert(reservation.target == paid.scene.entityId("order/A"))
+    assert(!Accepted(orders.step(.Submit([.Pay("A",1299)]))))
+    assert(!Accepted(orders.step(.Submit([.Ship("A","")]))))
+
+    let cancelled = orders.step(.Submit([.Cancel("A")]))
+    assert(Accepted(cancelled))
+    Check(cancelled,"A","cancelled",3,0)
+    assert(cancelled.scene.linkCount() == 0)
+    assert(!Accepted(orders.step(.Submit([.Cancel("A")]))))
+    assert(!Accepted(orders.step(.Submit([.Ship("A","late")]))))
+
+    let shipped = orders.step(.Submit([.Pay("B",2499),.Ship("B","TRACK-B")]))
+    assert(Accepted(shipped))
+    Check(shipped,"B","shipped",1,0)
+    assert(shipped.scene.require(shipped.scene.entityId("order/B")).position.z == 2.0)
+    assert(!Accepted(orders.step(.Submit([.Cancel("B")]))))
+    assert(!Accepted(orders.step(.Submit([.Ship("B","again")]))))
+
+    // Snapshots and sibling flow instances never acquire each other's changes.
+    Check(paid,"A","paid",1,2)
+    Check(created,"A","pending",3,0)
+    Check(untouched.step(.Submit([])),"A","absent",3,0)
+    assert(paid.scene.require(paid.scene.entityId("order/A")).position.z == 0.0)
+    assert(operations.Available(initial) == 3)
+    assert(initial.size() == 1)
+
+    let pending = workflow.Fulfillment(operations.Open("cancel-pending",0))
+    Check(pending.step(.Submit([.Create("C",100,1),.Cancel("C") ])),"C","cancelled",0,0)
+}

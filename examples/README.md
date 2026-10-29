@@ -11,6 +11,7 @@
 | [native-space](native-space/README.md) | 三维邻域 |
 | [weighted-routes](weighted-routes/README.md) | 连接与传播 |
 | [native-orders](native-orders/README.md) | 订单状态机 |
+| [order-fulfillment](order-fulfillment/README.md) | 订单履约与批量更新 |
 | [native-elevator](native-elevator/README.md) | 空间控制器 |
 | [ledger](ledger/README.md) | CSV 数据报告 |
 | [log-analysis](log-analysis/README.md) | 流式日志分析 |
