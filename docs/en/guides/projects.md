@@ -2,7 +2,7 @@
 
 [简体中文](../../zh-CN/guides/projects.md) · [English](projects.md) · [Documentation](../README.md)
 
-Use pixel.toml to organize multi-file projects and declare local dependencies and tests. Complete installation before running these commands in your toolchain environment.
+As your program grows, you can split it into files, reuse local libraries and add tests. This guide shows how to keep those pieces together with a `pixel.toml` project file. Complete [installation](installation.md) before trying the commands.
 
 
 **On this page**

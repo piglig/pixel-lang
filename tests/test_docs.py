@@ -20,6 +20,13 @@ class DocumentationTests(unittest.TestCase):
     def test_complete_pairs_pass(self):
         self.assertEqual(check(self.root), [])
 
+    def test_root_readme_uses_explicit_chinese_translation(self):
+        (self.root / 'README.md').write_text('# PixelLang\n\n[简体中文](README.zh-CN.md)\n')
+        (self.root / 'README.zh-CN.md').write_text('# PixelLang\n\n[English](README.md)\n')
+        self.assertEqual(check(self.root), [])
+        (self.root / 'README.zh-CN.md').unlink()
+        self.assertTrue(any('README requires' in error for error in check(self.root)))
+
     def test_missing_translation_and_local_target_fail(self):
         (self.root / 'docs/en/guide.md').write_text('# Guide\n\n[Missing](absent.md)\n')
         errors = check(self.root)

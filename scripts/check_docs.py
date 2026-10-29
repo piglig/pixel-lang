@@ -58,7 +58,8 @@ def check(root=ROOT):
     for directory in [root, root / 'vscode', root / 'examples', *sorted((root / 'examples').glob('*'))]:
         if not directory.is_dir():
             continue
-        if (directory / 'README.md').exists() != (directory / 'README.en.md').exists():
+        translation = 'README.zh-CN.md' if directory == root else 'README.en.md'
+        if (directory / 'README.md').exists() != (directory / translation).exists():
             errors.append(f'{directory.relative_to(root)}: README requires Chinese and English versions')
     for document in documents(root):
         raw = document.read_text()

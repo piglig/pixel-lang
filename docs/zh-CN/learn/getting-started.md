@@ -2,7 +2,7 @@
 
 [简体中文](getting-started.md) · [English](../../en/learn/getting-started.md) · [文档首页](../README.md)
 
-本教程完成一次完整流程：编写文本程序、运行、导出 PNG，再从 PNG 恢复源码。
+我们先写一个小程序，运行它，再把它变成一张图片。最后，你会从图片恢复代码，并再次运行。
 先完成[安装](../guides/installation.md)，并确认 `pixel doctor` 成功。以下命令在已激活的工具链环境中运行；源码安装也可使用 `uv run pixelrun` 等入口。
 
 ## 1. 编写与运行
@@ -23,7 +23,7 @@ pixelrun hello.pxl
 Hello, PixelLang!
 ```
 
-`main` 是入口。`print` 产生外部效果，因此入口声明为 `effect fn`。
+PixelLang 从 `main` 开始运行。这个函数要向终端打印文字，所以使用 `effect fn`：表示它可以与程序外部交互。
 
 ## 2. 使用集合算法
 
@@ -52,8 +52,7 @@ pixelunpack program.png -o recovered
 pixelrun recovered/hello.pxl
 ```
 
-三次执行应产生相同结果。恢复目录必须为空；PNG 包含入口和可达模块，执行仍需 PixelLang 运行时。
-恢复生成规范源码，不保留原始注释和排版。传输图片时保持精确像素。
+运行源码、PNG 和恢复后的代码，你应该看到相同的输出。请为 `recovered` 选择空文件夹。图片带上了程序需要的代码，接收者仍需要安装 PixelLang 才能运行。分享时保留原始 PNG，不要缩放或编辑它；恢复后的代码行为一致，但不会保留原来的注释和排版。
 
 ## 下一步
 

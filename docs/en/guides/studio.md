@@ -2,7 +2,7 @@
 
 [简体中文](../../zh-CN/guides/studio.md) · [English](studio.md) · [Documentation](../README.md)
 
-Studio connects source, spatial views and execution history inside VS Code. It is a local extension and does not require a separate browser service.
+Write, run and debug PixelLang without leaving VS Code. Studio lets you inspect values, explore spatial relationships and revisit earlier execution steps. It runs locally as a VS Code extension.
 
 ## Install and configure
 
@@ -24,7 +24,9 @@ Packaging does not publish the extension. See [verification](../contributing/ver
 
 ## Write programs
 
-Open `.pxl` files for diagnostics, completion, hover types, signature help, outlines, definitions, references, rename and formatting. These features use native compiler syntax, types and bindings. Formatting operates on unsaved text without requiring imports to exist. Rename checks project references and rejects diagnostics or binding changes caused by shadowing.
+Open a `.pxl` file and start typing. Studio suggests completions, highlights errors and shows a value’s type when you hover over it. You can jump to a definition, find references, rename a symbol or format the file using familiar VS Code commands.
+
+Formatting works on unsaved code, even if an imported file is missing. Rename checks the project before applying changes; if the new name would conflict with another name or leave errors, Studio asks you to resolve that first.
 
 See [projects](projects.md) for save-and-test, PNG builds, dependency locks and individual tests.
 

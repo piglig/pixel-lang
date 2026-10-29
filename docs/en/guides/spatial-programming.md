@@ -2,7 +2,7 @@
 
 [简体中文](../../zh-CN/guides/spatial-programming.md) · [English](spatial-programming.md) · [Documentation](../README.md)
 
-Create a 3D space with typed links, move an entity, compare snapshots, then export and recover the program. Complete installation and the first-program tutorial first.
+What changes when an object moves farther away? In this guide, you’ll create two entities, move one along the Z axis and see how that changes a nearby-entity query. You’ll also connect the entities and share the program as a PNG. Start with [your first program](../learn/getting-started.md) if you haven’t run PixelLang yet.
 
 
 **On this page**
@@ -44,16 +44,16 @@ effect fn main() {
 }
 ```
 
-`frame` names a coordinate frame and declares its length unit.
-`Space[World, string, Road]` specifies the frame, entity payload type and link payload
-type. Entities have stable identities. Moving an entity produces a new snapshot;
-`before` retains its old position. Explicit links follow endpoint identities and
-survive movement.
+The observer stays at the origin. The moving entity starts 1.5 meters away, inside the 2-meter search radius. After it moves to Z = 3, it is outside that radius. The two calls to `Inspect().step(...)` let you compare those results.
 
-A `fn` encapsulates pure computation; a `flow` expresses dependencies through
-expressions and named results. `Count(network)` computes a result, while
-`network.connect(a, b, payload)` creates a relation between spatial entities.
-The layout of computations in Studio does not change spatial distances.
+Here are the pieces to notice:
+
+- `frame World = meters` gives the coordinates a name and a unit.
+- `Space[World, string, Road]` stores entities with string labels and connections with `Road` data.
+- `before` keeps the space as it was before the move, so you can still query the old positions.
+- The road remains connected to the same entities when they move. Its cost is still `7`.
+
+`Count` is an ordinary function that calculates a result. `Inspect` is a flow that produces an output for each step. Moving boxes around in Studio changes the view; moving an entity with `network.move(...)` changes the space your program uses.
 
 ## Run, deliver and recover
 

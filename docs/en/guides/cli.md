@@ -2,7 +2,7 @@
 
 [简体中文](../../zh-CN/guides/cli.md) · [English](cli.md) · [Documentation](../README.md)
 
-Choose commands for execution, builds, inspection and recovery. Each command’s --help is authoritative for flags; project manifests are covered in the project guide.
+Use the command line to run a program, build an image or recover code from a PNG. Find the task you need below; add `--help` to any command to see its options.
 
 ## Choose a command
 

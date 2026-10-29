@@ -2,7 +2,7 @@
 
 [简体中文](../../zh-CN/guides/state-machines.md) · [English](state-machines.md) · [Documentation](../README.md)
 
-Start with a flow that handles business events only. Add a logical clock explicitly when needed; recordings and journals are host execution tools.
+An order remembers whether it has been paid; a counter remembers its current value. A `flow` gives a program that kind of memory. Start with a small counter that responds to events, then learn how to run it as an application and inspect its history.
 
 
 **On this page**

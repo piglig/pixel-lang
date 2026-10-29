@@ -18,7 +18,7 @@ class OnboardingTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         documents = {
             'README.md': [[[1, 3]]],
-            'README.en.md': [[[1, 3]]],
+            'README.zh-CN.md': [[[1, 3]]],
             'docs/zh-CN/learn/getting-started.md': [['Hello, PixelLang!'], [2, 7, 9]],
             'docs/en/learn/getting-started.md': [['Hello, PixelLang!'], [2, 7, 9]],
         }

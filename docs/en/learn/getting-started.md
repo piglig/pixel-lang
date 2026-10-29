@@ -2,7 +2,7 @@
 
 [简体中文](../../zh-CN/learn/getting-started.md) · [English](getting-started.md) · [Documentation](../README.md)
 
-Write and run a text program, export it as PNG, then recover editable source.
+Let’s write a small program, run it, and turn it into an image. At the end, you’ll recover the code from that image and run it again.
 First complete [installation](../guides/installation.md) and confirm `pixel doctor` succeeds. Commands below use an activated toolchain environment; a source installation can also use entries such as `uv run pixelrun`.
 
 ## 1. Write and run
@@ -23,7 +23,7 @@ pixelrun hello.pxl
 Hello, PixelLang!
 ```
 
-`main` is the entry point. Printing is an external effect, so the entry uses `effect fn`.
+PixelLang starts running at `main`. Because this function prints to the terminal, it uses `effect fn`: a function allowed to interact with the outside world.
 
 ## 2. Use collection algorithms
 
@@ -51,7 +51,7 @@ pixelunpack program.png -o recovered
 pixelrun recovered/hello.pxl
 ```
 
-All three executions should agree. Use an empty recovery directory. PNG includes the entry and reachable modules, but execution still requires the PixelLang runtime. Recovery produces canonical source without original comments or formatting. Preserve exact pixels when transferring the image.
+You should see the same output when you run the source, the PNG and the recovered code. Choose an empty folder for `recovered`. The image includes the code your program needs, and the person running it will need PixelLang installed. Share the original PNG without resizing or editing it; recovered source keeps the program’s behavior, but not its original comments or formatting.
 
 ## Next steps
 

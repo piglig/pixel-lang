@@ -2,7 +2,7 @@
 
 [简体中文](installation.md) · [English](../../en/guides/installation.md) · [文档首页](../README.md)
 
-选择与操作系统和 CPU 架构匹配的工具链。当前原生编译器构建和受控文件访问面向 macOS、Linux 等 POSIX 环境。
+先在电脑上把 PixelLang 跑起来。你可以安装适合自己电脑的软件包，也可以从源码构建。目前支持 macOS 和 Linux；选择软件包时，请确认操作系统和 CPU 架构与本机一致。
 
 ## 环境要求
 

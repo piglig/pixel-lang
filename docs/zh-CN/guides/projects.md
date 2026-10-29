@@ -2,7 +2,7 @@
 
 [简体中文](projects.md) · [English](../../en/guides/projects.md) · [文档首页](../README.md)
 
-用 pixel.toml 组织多文件项目，并显式声明本地依赖与测试。先完成安装，再在工具链环境中执行本页命令。
+程序变大后，你可以把代码拆成多个文件，复用本地库，再加上测试。本指南会带你用 `pixel.toml` 管理这些内容。开始前，请先完成[安装](installation.md)。
 
 
 **本页内容**

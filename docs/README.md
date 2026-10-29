@@ -1,13 +1,15 @@
-# PixelLang documentation · 文档
+# PixelLang documentation
 
-[简体中文](zh-CN/README.md) · [English](en/README.md) · [项目首页 / Project](../README.md)
+[English](en/README.md) · [简体中文](zh-CN/README.md) · [Project](../README.md)
 
-| 开始 / Start | 中文 | English |
+Welcome! Start with a small program, then explore the parts of PixelLang that interest you.
+
+| Get started | English | 简体中文 |
 | --- | --- | --- |
-| 安装 / Install | [安装工具链](zh-CN/guides/installation.md) | [Installation](en/guides/installation.md) |
-| 学习 / Learn | [第一个程序](zh-CN/learn/getting-started.md) | [First program](en/learn/getting-started.md) |
-| 查询 / Reference | [语言参考](zh-CN/reference/language/overview.md) | [Language reference](en/reference/language/overview.md) |
-| 贡献 / Contribute | [贡献指南](zh-CN/contributing/README.md) | [Contributing](en/contributing/README.md) |
+| Set up PixelLang | [Installation](en/guides/installation.md) | [安装](zh-CN/guides/installation.md) |
+| Run a program | [Your first program](en/learn/getting-started.md) | [第一个程序](zh-CN/learn/getting-started.md) |
+| Look up syntax | [Language reference](en/reference/language/overview.md) | [语言参考](zh-CN/reference/language/overview.md) |
+| Help improve PixelLang | [Contributing](en/contributing/README.md) | [参与贡献](zh-CN/contributing/README.md) |
 
-两种语言使用相同目录结构。每页提供语言切换；教程、指南、参考与内部实现分别维护。
-Both languages share one structure. Every page provides a language switch; tutorials, task guides, references and internals have separate responsibilities.
+You can switch between English and Chinese at the top of each page.
+每页顶部都可以切换中英文，选择你读起来更轻松的语言即可。

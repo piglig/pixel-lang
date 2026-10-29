@@ -2,7 +2,7 @@
 
 [简体中文](../../zh-CN/guides/installation.md) · [English](installation.md) · [Documentation](../README.md)
 
-Use a toolchain matching your operating system and CPU architecture. Native compiler builds and controlled file access currently target POSIX hosts such as macOS and Linux.
+Start here to get PixelLang running on your computer. You can install a package built for your machine or build from source. The toolchain currently supports macOS and Linux; choose a package matching your operating system and CPU.
 
 ## Requirements
 

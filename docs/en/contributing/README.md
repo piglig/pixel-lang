@@ -59,6 +59,8 @@ See [layered verification](verification.md) for merge and release requirements. 
 
 Give every rule one authoritative home and link to it elsewhere. Keep matching paths in both languages, with language switches and a documentation-home link below each title. Label code blocks, state working directories and prerequisites, and give long pages task-oriented headings and a contents list. Keep migration progress, test totals and individual benchmark runs out of references; do not describe proposals as current features.
 
+Write for the person using the feature: explain what they will be able to do, show a small example, then introduce the terms needed to understand it. Prefer “what you should see” to lists of internal mechanisms. Keep exact constraints in the reference and implementation details in internals; link to them when a reader needs more depth. The repository landing page is English (`README.md`), with Chinese in `README.zh-CN.md`.
+
 The structure follows the separation of learning, guides, references and implementation material in [Rust](https://doc.rust-lang.org/stable/), [Python](https://docs.python.org/3/) and [Go](https://go.dev/doc/) documentation.
 
 ## Verify real editor interaction

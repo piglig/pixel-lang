@@ -2,7 +2,7 @@
 
 [简体中文](../zh-CN/README.md) · [English](README.md) · [Documentation](README.md)
 
-Start with a running program, then choose a task guide. Use references for exact behavior and internals for compiler work.
+New to PixelLang? Start by running a small program. When you’re ready to build something of your own, the guides will help you organize a project, work in VS Code and explore space and state. Keep the language reference nearby for questions as you go.
 
 | Your goal | Start with |
 | --- | --- |
