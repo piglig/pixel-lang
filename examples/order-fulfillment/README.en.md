@@ -47,7 +47,7 @@ In VS Code, run **PixelLang: Open Native Application** and select `application.p
 
 Order keys contain 1–244 characters. Internal prefixes separate order entities and reservation links from the depot. Typed identities belong to the space; snapshots of that space retain the same identities. `Open` requires nonnegative stock. `Find` returns an optional order; `Available` and `Reserved` report stock, with reservations obtained through outgoing links from the depot.
 
-Batch atomicity here means publishing only the final immutable value. It does not provide an optimized storage transaction: intermediate updates still copy spatial data. The example models payment and shipment without external side effects; real integrations need their own idempotency and delivery protocol.
+Batch atomicity here means publishing only the final immutable value. Intermediate updates share unchanged storage through persistent maps and vectors; no separate mutable transaction builder is needed. The example models payment and shipment without external side effects; real integrations need their own idempotency and delivery protocol.
 
 ## Measure development costs
 

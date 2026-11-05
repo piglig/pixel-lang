@@ -16,6 +16,35 @@ Operations return new snapshots with isolated typed payloads. Parallel edges and
 
 Flows store space snapshots as ordinary state. Execution faults roll back a step; transition functions decide how business Result.Err affects state. Checkpoints preserve the identity registry and resource accounting so resumed execution obeys the same boundaries.
 
+## Persistent storage
+
+Entity and link tables use the runtime's insertion-ordered persistent maps: a hash
+prefix index provides identity lookup and a radix-32 vector preserves iteration
+order. An update copies the changed paths and shares untouched branches. Validated
+immutable payloads are checked when created, not by scanning every entity on each
+space update. Deleted order slots are compacted when they dominate live entries.
+
+Separate persistent incoming and outgoing indexes map an entity key to its ordered
+link keys. Payload and position updates leave those indexes unchanged. Queries
+resolve current link values from the snapshot, so payload edits cannot leave stale
+links in adjacency results. Cascade removal visits incident links, including
+parallel edges and self-loops, and publishes one snapshot version.
+
+Batch transition functions can repeatedly update a local snapshot and publish only
+the final value. Intermediate snapshots share storage; rejected batches leave their
+input untouched. There is no additional transaction syntax or mutable builder.
+Point edits and identity lookup avoid whole-table scans; neighborhood radius queries
+still scan entities. Deletion compaction occasionally rebuilds a table.
+
+Native allocation accounting charges copied storage paths and new values. At idle
+event boundaries, live traversal counts shared storage once across snapshots.
+These units are resource accounting, not allocator bytes. Durable state checkpoints
+use schema version 3; older checkpoint schemas are rejected. Logical table entries
+are serialized in insertion order, independent of Python hash layout, and restored
+indexes are validated against the entity/link tables. Serialization still visits
+all entries of each distinct table; in-memory structural sharing is not a promise
+of incremental disk checkpoint encoding.
+
 ## Queries and transforms
 
 Radius neighborhoods, directional projections and explicit links are distinct relationships. Spatial indexes must match direct queries, including boundaries, ordering and invalid-input behavior. Translation affects positions, not directions. Unit conversion and transform composition are explicit. Different floating-point implementations are not promised bitwise agreement across hardware.

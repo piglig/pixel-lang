@@ -91,7 +91,7 @@ def children(vm, value):
         return iter(()), False, 0
     if isinstance(value, (dict, ValueMap)):
         return iter(value.items()), True, len(value)
-    if isinstance(value, (list, tuple, bytearray, ValueVector)):
+    if isinstance(value, (list, tuple, bytearray, ValueVector, spatial.SpatialTable)):
         return enumerate(value), False, len(value)
     return iter(()), False, 0
 
@@ -159,7 +159,7 @@ def inspect_values(timeline, args):
 def describe_value(timeline, vm, item, path, name):
     item = vm.binding_value(item)
     _, member_named, size = children(vm, item)
-    synthetic = isinstance(item, (dict, ValueMap, list, tuple, bytearray, ValueVector))
+    synthetic = isinstance(item, (dict, ValueMap, list, tuple, bytearray, ValueVector, spatial.SpatialTable))
     typ = item.type_name if isinstance(item, spatial.FrozenValue) else vm.value_type(item)
     readable_type = "" if synthetic else display_type(timeline, typ)
     if synthetic:

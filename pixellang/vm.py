@@ -834,6 +834,7 @@ class VM:
         """
         if self.flow_runtime.transaction is not None or not self.event_waiting:
             self.fail('Native allocation recount requires an idle event boundary', None)
+        from .spatial_storage import storage_children
         pending = list(self.stack)
         for frame in self.call_stack:
             pending.extend(frame.memory)
@@ -861,8 +862,19 @@ class VM:
                 if isinstance(items, (dict, ValueMap)):
                     pending.extend(key.value for key in items if isinstance(key, map_keys.Key))
                 continue
+            storage = storage_children(value)
+            if storage is not None:
+                if id(value) not in native:
+                    native.add(id(value))
+                    cost, children = storage
+                    count += cost
+                    pending.extend(children)
+                    if count > self.max_heap_items:
+                        self.fail_data('Live spatial state exceeds the allocation budget', None, code='spatial.budget')
+                continue
             if not isinstance(value, (spatial.SpatialValue, spatial.Transform, spatial.FrozenValue,
-                                      spatial.SpaceValue, spatial.EntityValue, spatial.LinkValue, spatial.EntityId, spatial.LinkId)):
+                                      spatial.SpaceValue, spatial.SpatialTable, spatial.EntityValue,
+                                      spatial.LinkValue, spatial.EntityId, spatial.LinkId)):
                 continue
             identity = id(value)
             if identity in native:
@@ -879,9 +891,11 @@ class VM:
                 else:
                     pending.extend(value.items)
             elif isinstance(value, spatial.SpaceValue):
-                count += 1 + len(value.entities) + len(value.links)
-                pending.extend(value.entities)
-                pending.extend(value.links)
+                count += 1
+                pending.extend((value.entities, value.links, value.outgoing_index, value.incoming_index))
+            elif isinstance(value, spatial.SpatialTable):
+                count += 1
+                pending.append(value._data)
             elif isinstance(value, (spatial.EntityId, spatial.LinkId)):
                 count += 1
             elif isinstance(value, spatial.EntityValue):
@@ -952,6 +966,12 @@ class VM:
             del self.stack[base:]
 
     def space_operation(self, name, args, span, *, origin=None):
+        result = self._space_operation(name, args, span, origin=origin)
+        if isinstance(result, spatial.SpaceValue) and result is not args[0]:
+            self.reserve_spatial(result.allocated, span)
+        return result
+
+    def _space_operation(self, name, args, span, *, origin=None):
         first = args[0]
         if name in ('transformPoint', 'transformVector', 'transformThen'):
             if not isinstance(first, spatial.Transform): raise spatial.SpatialError('Expected a coordinate transform')
@@ -1000,7 +1020,6 @@ class VM:
         if name == 'spaceNeighbors':
             neighbors = first.neighbors(*args[1:])
             return self.allocate(f'Entity<{first.frame.identity},{first.payload_type}>[]', list(neighbors), span)
-        self.reserve_spatial(len(first.entities) + len(first.links) + 1, span)
         if name == 'spaceConnect':
             self.typed(args[4], first.link_type, span)
             return first.connect(args[1], args[2], args[3], self.freeze_spatial_payload(args[4], span))

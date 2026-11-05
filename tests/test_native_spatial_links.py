@@ -21,7 +21,7 @@ class NativeSpatialLinkTests(unittest.TestCase):
         self.assertEqual(linked.require(edge.target_id).position.xyz[2], 2.0)
         self.assertEqual(edge.payload, 5)
         self.assertEqual(updated.require_link(updated.link_id('road')).payload, 8)
-        self.assertEqual(self.world.links, ())
+        self.assertEqual(tuple(self.world.links), ())
         self.assertEqual(updated.require(edge.source_id).id, self.a)
 
     def test_direction_parallel_links_and_self_links_are_explicit(self):

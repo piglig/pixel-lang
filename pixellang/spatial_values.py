@@ -4,6 +4,9 @@ Frame identity and units are semantic data, independent of scene rendering.
 """
 from dataclasses import dataclass, field, replace, fields
 import math
+from collections.abc import Sequence
+from .value_map import ValueMap
+from .spatial_storage import allocation_cost
 
 
 class SpatialError(ValueError):
@@ -271,15 +274,115 @@ class LinkValue(ImmutableNative):
         return EntityId(self.owner, self.target, self.frame, self.entity_type)
 
 
+@dataclass(frozen=True, slots=True, init=False, eq=False)
+class SpatialTable(ImmutableNative, Sequence):
+    """Validated immutable, insertion-ordered values with a business-key index.
+
+    Public construction validates entries once. Updates only accept immutable
+    native children and share the existing trusted storage.
+    """
+    _data: ValueMap
+    allocated: int = field(compare=False, repr=False)
+
+    def __init__(self, entries=()):
+        data = ValueMap()
+        for key, value in entries:
+            self._validate(key, value)
+            if key in data:
+                raise SpatialError('Repeated spatial table key')
+            data = data.set(key, value)
+        object.__setattr__(self, '_data', data)
+        object.__setattr__(self, 'allocated', allocation_cost(data))
+
+    @staticmethod
+    def _validate(key, value):
+        business_key(key)
+        if type(value) not in (EntityValue, LinkValue, SpatialTable, str):
+            raise SpatialError('Invalid spatial table value')
+
+    @classmethod
+    def _updated(cls, data, previous):
+        result = object.__new__(cls)
+        object.__setattr__(result, '_data', data)
+        object.__setattr__(result, 'allocated', allocation_cost(data, previous))
+        return result
+
+    def set(self, key, value):
+        self._validate(key, value)
+        return self._updated(self._data.set(key, value), self._data)
+
+    def remove(self, key):
+        return self._updated(self._data.remove(key), self._data)
+
+    def get(self, key):
+        return self._data.get(key)
+
+    def items(self):
+        return self._data.items()
+
+    def __len__(self):
+        return len(self._data)
+
+    def __iter__(self):
+        return self._data.values()
+
+    def __getitem__(self, index):
+        # Positional access is for debugger pagination, never identity lookup.
+        from itertools import islice
+        if isinstance(index, slice):
+            return tuple(self)[index]
+        if index < 0:
+            index += len(self)
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        return next(islice(self, index, index + 1))
+
+    def __eq__(self, other):
+        if self is other:
+            return True
+        if type(other) is SpatialTable:
+            return len(self) == len(other) and all(a == b for a, b in zip(self.items(), other.items()))
+        return NotImplemented
+
+    __hash__ = None
+
+
 @dataclass(frozen=True, slots=True)
 class SpaceValue(ImmutableNative):
     identity: str
     frame: CoordinateFrame
     payload_type: str
     link_type: str
-    entities: tuple[EntityValue, ...] = ()
+    entities: SpatialTable = field(default_factory=SpatialTable)
     version: int = 0
-    links: tuple[LinkValue, ...] = ()
+    links: SpatialTable = field(default_factory=SpatialTable)
+    outgoing_index: SpatialTable = field(default_factory=SpatialTable, compare=False, repr=False)
+    incoming_index: SpatialTable = field(default_factory=SpatialTable, compare=False, repr=False)
+    allocated: int = field(default=1, compare=False, repr=False)
+
+    def __post_init__(self):
+        ImmutableNative.__post_init__(self)
+        if any(type(table) is not SpatialTable for table in
+               (self.entities, self.links, self.outgoing_index, self.incoming_index)):
+            raise SpatialError('Space storage requires immutable spatial tables')
+
+    def _update(self, *, extra=0, **changes):
+        cost = 1 + extra + sum(table.allocated + 1 for table in changes.values())
+        return replace(self, **changes, version=self.version + 1, allocated=cost)
+
+    @staticmethod
+    def _add_edge(index, endpoint, key):
+        bucket = index.get(endpoint)
+        if bucket is None:
+            bucket = SpatialTable()
+        bucket = bucket.set(key, key)
+        return index.set(endpoint, bucket), bucket.allocated + 1
+
+    @staticmethod
+    def _drop_edge(index, endpoint, key):
+        bucket = index.get(endpoint).remove(key)
+        changed = index.set(endpoint, bucket) if bucket else index.remove(endpoint)
+        return changed, bucket.allocated + 1
 
     def point(self, position):
         if (not isinstance(position, SpatialValue) or position.kind != 'Point3'
@@ -305,7 +408,7 @@ class SpaceValue(ImmutableNative):
 
     def get(self, identity):
         self.check_entity_id(identity)
-        return next((entity for entity in self.entities if entity.identity == identity.key), None)
+        return self.entities.get(identity.key)
 
     def require(self, identity):
         entity = self.get(identity)
@@ -317,33 +420,37 @@ class SpaceValue(ImmutableNative):
         self.point(position)
         if self.get(identity) is not None: raise SpatialError('Entity key already exists in this snapshot')
         entity = EntityValue(self.identity, key, position, self.payload_type, payload)
-        return replace(self, entities=self.entities + (entity,), version=self.version + 1)
+        return self._update(entities=self.entities.set(key, entity), extra=1)
 
     def move(self, identity, position):
         entity = self.require(identity)
         self.point(position)
         updated = replace(entity, position=position)
-        return replace(self, entities=tuple(updated if e.identity == identity.key else e for e in self.entities),
-                       version=self.version + 1)
+        return self._update(entities=self.entities.set(identity.key, updated), extra=1)
 
     def set_payload(self, identity, payload):
         entity = self.require(identity)
         updated = replace(entity, payload=payload)
-        return replace(self, entities=tuple(updated if e.identity == identity.key else e for e in self.entities),
-                       version=self.version + 1)
+        return self._update(entities=self.entities.set(identity.key, updated), extra=1)
 
     def remove(self, identity, *, cascade=False):
         self.require(identity)
-        incident = tuple(link for link in self.links if link.source == identity.key or link.target == identity.key)
-        if incident and not cascade:
+        outgoing = self.outgoing_index.get(identity.key)
+        incoming = self.incoming_index.get(identity.key)
+        if (outgoing or incoming) and not cascade:
             raise SpatialError('Entity has incident links; disconnect them or use removeCascade')
-        return replace(self, entities=tuple(e for e in self.entities if e.identity != identity.key),
-                       links=tuple(link for link in self.links if link.source != identity.key and link.target != identity.key),
-                       version=self.version + 1)
+        draft = self
+        cost = 0
+        # Dict preserves insertion order and removes the duplicate for self-loops.
+        for key in dict.fromkeys((*(outgoing or ()), *(incoming or ()))):
+            draft = draft.disconnect(self.link_id(key))
+            cost += draft.allocated
+        updated = draft._update(entities=draft.entities.remove(identity.key))
+        return replace(updated, version=self.version + 1, allocated=cost + updated.allocated)
 
     def get_link(self, identity):
         self.check_link_id(identity)
-        return next((link for link in self.links if link.identity == identity.key), None)
+        return self.links.get(identity.key)
 
     def require_link(self, identity):
         link = self.get_link(identity)
@@ -356,26 +463,30 @@ class SpaceValue(ImmutableNative):
         self.require(source); self.require(target)
         link = LinkValue(self.identity, key, self.frame, self.payload_type,
                          self.link_type, source.key, target.key, payload)
-        return replace(self, links=self.links + (link,), version=self.version + 1)
+        outgoing, out_cost = self._add_edge(self.outgoing_index, source.key, key)
+        incoming, in_cost = self._add_edge(self.incoming_index, target.key, key)
+        return self._update(links=self.links.set(key, link), outgoing_index=outgoing,
+                            incoming_index=incoming, extra=1 + out_cost + in_cost)
 
     def disconnect(self, identity):
-        self.require_link(identity)
-        return replace(self, links=tuple(item for item in self.links if item.identity != identity.key),
-                       version=self.version + 1)
+        link = self.require_link(identity)
+        outgoing, out_cost = self._drop_edge(self.outgoing_index, link.source, identity.key)
+        incoming, in_cost = self._drop_edge(self.incoming_index, link.target, identity.key)
+        return self._update(links=self.links.remove(identity.key), outgoing_index=outgoing,
+                            incoming_index=incoming, extra=out_cost + in_cost)
 
     def set_link_payload(self, identity, payload):
         link = self.require_link(identity)
         updated = replace(link, payload=payload)
-        return replace(self, links=tuple(updated if item.identity == identity.key else item for item in self.links),
-                       version=self.version + 1)
+        return self._update(links=self.links.set(identity.key, updated), extra=1)
 
     def outgoing(self, identity):
         self.require(identity)
-        return tuple(link for link in self.links if link.source == identity.key)
+        return tuple(self.links.get(key) for key in (self.outgoing_index.get(identity.key) or ()))
 
     def incoming(self, identity):
         self.require(identity)
-        return tuple(link for link in self.links if link.target == identity.key)
+        return tuple(self.links.get(key) for key in (self.incoming_index.get(identity.key) or ()))
 
     def neighbors(self, identity, radius):
         origin = self.require(identity)
@@ -398,4 +509,4 @@ class SpaceValue(ImmutableNative):
 
 
 _NATIVE_VALUE_TYPES = (CoordinateFrame, SpatialOrigin, SpatialValue, Transform,
-                       FrozenValue, EntityId, LinkId, EntityValue, LinkValue, SpaceValue)
+                       FrozenValue, EntityId, LinkId, EntityValue, LinkValue, SpatialTable, SpaceValue)

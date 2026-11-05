@@ -11,7 +11,12 @@ from . import jsonvalue, map_keys, spatial_values as spatial
 from .model import PixelError
 from .typeexpr import parse_type, map_parts
 
-KINDS = {cls.__name__: cls for cls in spatial._NATIVE_VALUE_TYPES}
+KINDS = {cls.__name__: cls for cls in spatial._NATIVE_VALUE_TYPES if cls is not spatial.SpatialTable}
+
+
+def state_fields(value):
+    # Allocation counters describe local work, not the value or its wire format.
+    return tuple(f for f in fields(value) if f.name != 'allocated')
 
 
 def invalid(message):
@@ -50,12 +55,15 @@ class NativeStateCodec:
             if type(item) is float:
                 if not math.isfinite(item): invalid('non-finite number')
                 return {'float': item}
-            if type(item) not in (*KINDS.values(), tuple, jsonvalue.JsonValue):
+            if type(item) not in (*KINDS.values(), spatial.SpatialTable, tuple, jsonvalue.JsonValue):
                 invalid('unsupported value')
             prior = self.memo.get(id(item))
             if prior is not None: return {'ref': prior[1]}
             identity = len(self.memo)
             self.memo[id(item)] = (item, identity)
+            if type(item) is spatial.SpatialTable:
+                # Serialize logical entries, never process-randomized hash nodes.
+                return {'id': identity, 'spatialTable': [visit(pair, depth + 1) for pair in item.items()]}
             if type(item) is tuple:
                 return {'id': identity, 'tuple': [visit(v, depth + 1) for v in item]}
             if type(item) is jsonvalue.JsonValue:
@@ -64,7 +72,7 @@ class NativeStateCodec:
                 if self.encode_bytes < 0: raise NativeStateLimit('event', 'Native checkpoint encoding budget exceeded')
                 return {'id': identity, 'json': text}
             return {'id': identity, 'native': type(item).__name__, 'fields':
-                    {f.name: visit(getattr(item, f.name), depth + 1) for f in fields(item)}}
+                    {f.name: visit(getattr(item, f.name), depth + 1) for f in state_fields(item)}}
         try:
             return visit(value)
         except RecursionError:
@@ -91,6 +99,14 @@ class NativeStateCodec:
             self.decoded.append(None)
             if set(item) == {'id', 'tuple'} and isinstance(item['tuple'], list):
                 result = tuple(visit(v, depth + 1) for v in item['tuple'])
+            elif set(item) == {'id', 'spatialTable'} and type(item['spatialTable']) is list:
+                entries = [visit(v, depth + 1) for v in item['spatialTable']]
+                if any(type(pair) is not tuple or len(pair) != 2 for pair in entries):
+                    invalid('invalid spatial table entry')
+                try:
+                    result = spatial.SpatialTable(entries)
+                except (ValueError, TypeError) as error:
+                    invalid(str(error))
             elif set(item) == {'id', 'json'} and type(item['json']) is str:
                 result = jsonvalue.parse(item['json'])
             else:
@@ -98,10 +114,10 @@ class NativeStateCodec:
                         or item['native'] not in KINDS or not isinstance(item['fields'], dict)):
                     invalid('unknown value tag')
                 cls = KINDS[item['native']]
-                if set(item['fields']) != {f.name for f in fields(cls)}: invalid('native fields do not match')
+                if set(item['fields']) != {f.name for f in state_fields(cls)}: invalid('native fields do not match')
                 # JSON object ordering is not semantic; follow the codec's fixed
                 # field order so references never depend on key serialization.
-                values = {f.name: visit(item['fields'][f.name], depth + 1) for f in fields(cls)}
+                values = {f.name: visit(item['fields'][f.name], depth + 1) for f in state_fields(cls)}
                 try:
                     result = cls(**values)
                     self._native(result)
@@ -208,24 +224,33 @@ class NativeStateCodec:
                 invalid('unknown space identity')
             if not isinstance(value.frame, spatial.CoordinateFrame): invalid('invalid space frame')
             integer(value.version)
-            if type(value.entities) is not tuple or type(value.links) is not tuple: invalid('invalid space storage')
+            if type(value.entities) is not spatial.SpatialTable or type(value.links) is not spatial.SpatialTable: invalid('invalid space storage')
             ids = set()
-            for entity in value.entities:
-                if (not isinstance(entity, spatial.EntityValue) or entity.owner != value.identity
+            for key, entity in value.entities.items():
+                if (not isinstance(entity, spatial.EntityValue) or entity.identity != key or entity.owner != value.identity
                         or entity.position.frame != value.frame or entity.payload_type != value.payload_type
                         or entity.identity in ids):
                     invalid('invalid or repeated entity identity')
                 spatial.business_key(entity.identity)
                 ids.add(entity.identity)
             link_ids = set()
-            for link in value.links:
-                if (not isinstance(link, spatial.LinkValue) or link.owner != value.identity
+            outgoing, incoming = {}, {}
+            for key, link in value.links.items():
+                if (not isinstance(link, spatial.LinkValue) or link.identity != key or link.owner != value.identity
                         or link.frame != value.frame or link.entity_type != value.payload_type
                         or link.payload_type != value.link_type or link.source not in ids or link.target not in ids
                         or link.identity in link_ids):
                     invalid('invalid link or dangling endpoint')
                 spatial.business_key(link.identity)
                 link_ids.add(link.identity)
+                outgoing.setdefault(link.source, []).append((key, key))
+                incoming.setdefault(link.target, []).append((key, key))
+            for index, expected in ((value.outgoing_index, outgoing), (value.incoming_index, incoming)):
+                if len(index) != len(expected): invalid('invalid spatial adjacency index')
+                for key, bucket in index.items():
+                    if (type(bucket) is not spatial.SpatialTable or key not in expected
+                            or list(bucket.items()) != expected[key]):
+                        invalid('invalid spatial adjacency index')
 
 
 def cell_types(vm):

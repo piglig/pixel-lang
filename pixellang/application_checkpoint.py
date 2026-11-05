@@ -15,7 +15,7 @@ def capture(runtime, record, max_bytes=64_000_000):
         if not pending or pending[0][1] != record.sequence:
             invalid('pending input does not match event')
         pending = pending[1:]
-    return dict(version=2, completed=runtime.completed + 1,
+    return dict(version=3, completed=runtime.completed + 1,
         tick=record.tick, sequence=runtime.sequence + (record.kind == 'tick'),
         vm_steps=vm.steps, instance_steps=root.steps,
         cells=[dict(path=list(path), node=node, value=codec.encode(value))
@@ -34,7 +34,7 @@ def restore(runtime, document):
         invalid('checkpoint requires a fresh application')
     names = {'version','completed','tick','sequence','vm_steps','instance_steps','cells','configuration','pending','latest'}
     if (not isinstance(document, dict) or set(document) != names
-            or type(document['version']) is not int or document['version'] != 2):
+            or type(document['version']) is not int or document['version'] != 3):
         invalid('checkpoint fields do not match')
     completed = integer(document['completed'], 1)
     tick = integer(document['tick'])

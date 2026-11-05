@@ -16,6 +16,7 @@ Freeze the workload before comparing cold starts, warm requests and edited build
 - [Single builds and session caches](#single-builds-and-session-caches)
 - [Native compiler hot paths](#native-compiler-hot-paths)
 - [Resident function-check and IR caches](#resident-function-check-and-ir-caches)
+- [Spatial snapshot updates](#spatial-snapshot-updates)
 - [Further reading](#further-reading)
 
 ## Contract and interface
@@ -240,6 +241,21 @@ The probe edits one compiler function and requires identical bytecode with and
 without function caching. Report hits, recomputed functions and end-to-end time.
 A high hit rate does not justify enabling a cache when serialization, restoration
 and dependency validation increase total latency.
+
+## Spatial snapshot updates
+
+```sh
+python scripts/benchmark_order_fulfillment.py --sizes 100 300 1000 --trials 3 --output /tmp/fulfillment-storage.json
+```
+
+The report separates full VM business batches from direct storage edits retaining
+historical snapshots. `snapshotUpdates` excludes initial scene construction and
+verifies old values after timing. Configure it with `--snapshot-sizes` and
+`--snapshot-updates`. The report records source, compiler and runtime hashes.
+A batch hitting the spatial budget records `completed: false` and a null median,
+without discarding completed measurements. `--max-heap-items` defaults to the VM's
+normal 1,000,000-unit limit; report any override when comparing results.
+Storage allocation units include indexes and copied paths, not process memory.
 
 ## Further reading
 
