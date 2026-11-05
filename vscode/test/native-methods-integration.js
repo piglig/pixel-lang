@@ -17,6 +17,7 @@ fn inspect(scene:Space[World,string,Cost],origin:EntityId[World,string],transfor
  await replace(text);
  const completions = await vscode.commands.executeCommand('vscode.executeCompletionItemProvider', uri,
   document.positionAt(text.indexOf('scene.neighbors') + 'scene.'.length), '.');
+ for (const method of ['entities','links']) assert(completions.items.some(item=>item.label===method && item.kind===vscode.CompletionItemKind.Method));
  const neighbors = completions.items.find(item => item.label === 'neighbors');
  assert(neighbors);
  assert.equal(neighbors.kind, vscode.CompletionItemKind.Method);

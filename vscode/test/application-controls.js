@@ -33,3 +33,16 @@ player.receive({cursor:0,length:1,timed:false,interval_ns:'0',pending:[]});
 player.play();assert.deepEqual(sent.at(-1),{type:'seek',index:1});
 player.pause();
 console.log('Event-only playback drains pending inputs and stops without synthesizing ticks.');
+
+const {changeSummary}=require('../media/application');
+const changes={total:2,truncated:false,spaces:[{identity:'world',afterVersion:1,total:2,truncated:false,rows:[
+  {category:'entity',key:0,kind:'updated'}, {category:'link',key:'route',kind:'added'}]}]};
+assert.equal(changeSummary(changes,2),'2 spatial objects changed.');
+assert.equal(changeSummary({total:0,spaces:[{total:0,truncated:false}]},2),'No spatial data changed.');
+assert.match(changeSummary({...changes,truncated:true},2),/Preview limited/);
+assert.equal(sceneView(space,'2',changes).entities[0].change,'updated');
+assert.equal(sceneView(space,'2',{spaces:[]}).entities[0].change,undefined);
+assert.equal(sceneView({...space,version:0},'2',changes).entities[0].change,undefined);
+assert.equal(sceneView(space,'2',{spaces:[...changes.spaces,...changes.spaces]}).entities[0].change,undefined);
+assert.match(changeSummary(changes,0),/Step an event/);
+console.log('Event changes: summaries, empty/rejected changes, truncation and snapshot markers passed.');

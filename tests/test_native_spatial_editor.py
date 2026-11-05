@@ -78,9 +78,16 @@ fn main(){}
     def test_space_method_completion_uses_typed_native_contracts(self):
         text='frame World=meters\nrecord Cost {weight:int}\nfn inspect(scene:Space[World,string,Cost]){scene.|}\nfn main(){}'
         items=self.complete(text)
-        self.assertEqual(len(items),20)
         self.assertTrue(all(item['kind']=='Method' for item in items))
         details={item['label']:item['detail'] for item in items}
+        self.assertEqual(set(details), {
+            'entityId', 'linkId', 'require', 'requireLink', 'setPayload', 'removeCascade',
+            'insert', 'get', 'move', 'remove', 'neighbors', 'ahead', 'size', 'entities',
+            'links', 'connect', 'disconnect', 'getLink', 'setLinkPayload', 'outgoing',
+            'incoming', 'linkCount',
+        })
+        self.assertEqual(details['entities'],'fn entities() -> [Entity[World, string]]')
+        self.assertEqual(details['links'],'fn links() -> [Link[World, string, Cost]]')
         self.assertEqual(details['insert'],'fn insert(key: string, position: Point3[World], payload: string) -> Space[World, string, Cost]')
         self.assertEqual(details['connect'],'fn connect(key: string, source: EntityId[World, string], target: EntityId[World, string], payload: Cost) -> Space[World, string, Cost]')
         self.assertEqual(details['get'],'fn get(id: EntityId[World, string]) -> Option[Entity[World, string]]')

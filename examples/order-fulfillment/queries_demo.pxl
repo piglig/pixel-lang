@@ -1,0 +1,17 @@
+import "operations.pxl" as operations
+import "workflow.pxl" as workflow
+import "queries.pxl" as queries
+import "model.pxl" as model
+
+effect fn main() {
+    let orders = workflow.Fulfillment(operations.Open("query-demo",3))
+    let paid = orders.step(.Submit([.Create("A-100",1299,2),.Pay("A-100",1299)]))
+    let captured = queries.PaidOrders(paid.scene)
+    let shipped = orders.step(.Submit([.Ship("A-100","TRACK-100")]))
+    print(queries.PaidOrderKeys(paid.scene))
+    print(queries.TotalReserved(paid.scene))
+    print(queries.PaidOrderKeys(shipped.scene))
+    print(queries.TotalReserved(shipped.scene))
+    print(captured[0].id.key)
+    print(match captured[0].payload { .Order(order) => model.StatusName(order.status), .Depot(_) => "depot" })
+}

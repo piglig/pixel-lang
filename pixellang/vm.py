@@ -1000,6 +1000,14 @@ class VM:
             return self.thaw_spatial_payload(first.payload, span)
         if not isinstance(first, spatial.SpaceValue):
             raise spatial.SpatialError('Expected a space snapshot')
+        if name in ('spaceEntities', 'spaceLinks'):
+            if name == 'spaceEntities':
+                typ, values = f'Entity<{first.frame.identity},{first.payload_type}>[]', first.entities
+            else:
+                typ, values = f'Link<{first.frame.identity},{first.payload_type},{first.link_type}>[]', first.links
+            if len(values) > self.max_heap_items:
+                self.fail_data('Spatial query exceeds the heap budget', span, code='spatial.budget')
+            return self.allocate(typ, list(values), span)
         if name == 'spaceSize': return len(first.entities)
         if name == 'spaceLinkCount': return len(first.links)
         if name == 'spaceEntityId': return first.entity_id(args[1])

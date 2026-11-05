@@ -1,0 +1,20 @@
+import "std/collections.pxl" as collections
+import "model.pxl" as model
+
+// Queries return captured entity values from this particular snapshot.
+export fn PaidOrders(scene: Space[model.Warehouse,model.Item,model.Reservation]) -> [Entity[model.Warehouse,model.Item]] {
+    return collections.Filter::[Entity[model.Warehouse,model.Item]](scene.entities(), fn(entity: Entity[model.Warehouse,model.Item]) -> bool {
+        return match entity.payload { .Order(order) => order.status == model.Status.Paid, .Depot(_) => false }
+    })
+}
+
+export fn PaidOrderKeys(scene: Space[model.Warehouse,model.Item,model.Reservation]) -> [string] {
+    return collections.Map::[Entity[model.Warehouse,model.Item],string](PaidOrders(scene), fn(entity: Entity[model.Warehouse,model.Item]) -> string {
+        return entity.id.key
+    })
+}
+
+export fn TotalReserved(scene: Space[model.Warehouse,model.Item,model.Reservation]) -> int {
+    return collections.Fold::[Link[model.Warehouse,model.Item,model.Reservation],int](scene.links(), 0,
+        fn(total: int, link: Link[model.Warehouse,model.Item,model.Reservation]) -> int { return total + link.payload.quantity })
+}

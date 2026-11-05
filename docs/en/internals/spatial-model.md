@@ -49,6 +49,28 @@ of incremental disk checkpoint encoding.
 
 Radius neighborhoods, directional projections and explicit links are distinct relationships. Spatial indexes must match direct queries, including boundaries, ordering and invalid-input behavior. Translation affects positions, not directions. Unit conversion and transform composition are explicit. Different floating-point implementations are not promised bitwise agreement across hardware.
 
+## Snapshot data differences
+
+`spatial_diff.compare_spaces(before, after)` compares states of one typed space.
+Different owners, coordinate frames or payload types are rejected. Stable business
+keys match entities and links across branches; matching version numbers never imply
+matching state. Entity changes contain before/after values and changed position or
+payload fields. Link changes additionally identify endpoint changes. Added and
+removed objects retain the available side of their captured data.
+
+The diff walks the persistent order vectors, skipping identical branches and pairs,
+then resolves candidate keys through the identity indexes. Rows sort by business
+key. Identical data, including an edit that restores the previous value, produces no
+change. Source provenance, snapshot version and enumeration-order changes alone
+are outside this data diff. Table compaction or independently reconstructed storage
+can require more traversal even when logical changes are small.
+
+Studio compares flow state immediately before and after the selected event. Live
+steps reuse their captured before-state; historical comparison uses isolated replay
+from checkpoints and never seeks the live VM. The preview shows at most 64 spaces,
+100 changed objects and bounded value text, with explicit limit messages. Existing
+source event debugging remains the path to inspect full values and execution.
+
 ## Source and Studio
 
 The compiler retains Unicode scalar ranges for coordinate expressions; the host converts these to UTF-16 edits. Provenance does not participate in equality or hashing. Direct literals support coordinate editing; computed positions navigate to expressions instead of becoming constants. Coordinate equality is not a provenance heuristic.

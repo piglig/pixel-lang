@@ -122,6 +122,8 @@ class NativeApplicationRuntime:
             if type(value) is not int or value <= 0:
                 raise ValueError('Event budgets must be positive integers')
         self.vm = vm
+        self.startup_budget = vm.max_steps
+        self.startup_output_budget = vm.output_budget
         self.step_budget = step_budget
         self.max_result_bytes = max_result_bytes
         self.max_pending = max_pending
@@ -135,6 +137,16 @@ class NativeApplicationRuntime:
         self.sequence = 0
         self.pending = []
         self.pending_bytes = 0
+
+    def fresh_runtime(self, bytecode=None):
+        from .vm import VM
+        vm = self.vm
+        return NativeApplicationRuntime(VM(vm.code_image if bytecode is None else bytecode, max_steps=self.startup_budget,
+            max_heap_items=vm.max_heap_items, max_heap_objects=vm.max_heap_objects,
+            max_depth=vm.max_depth, max_output_chars=self.startup_output_budget,
+            input_text=vm.input_text, arguments=list(vm.arguments)),
+            configuration=self.configuration, step_budget=self.step_budget, max_result_bytes=self.max_result_bytes,
+            max_pending=self.max_pending, max_pending_bytes=self.max_pending_bytes)
 
     def live(self):
         """Execution without a recorder always observes the live frontier."""
@@ -344,6 +356,22 @@ class NativeEventRuntime(NativeApplicationRuntime):
         self.records.append(record)
         self.history_bytes += record.size
         self.cursor = cursor
+
+    def inspect(self, index):
+        """Read a historical boundary in an isolated VM without moving the live cursor."""
+        if type(index) is not int or not 0 <= index <= len(self.records):
+            raise PixelError('event', 'History index is outside the recorded range')
+        replay = self.fresh_runtime()
+        start = max(key for key in self.checkpoints if key <= index)
+        replay.vm.restore_checkpoint(self.checkpoints[start])
+        for record in self.records[start:index]:
+            output, _, _ = replay._invoke(record.event, record.tick, record.delta_ns)
+            if output != record.output:
+                raise PixelError('event', 'Native event replay diverged')
+        replay.completed = index
+        replay.latest = self.records[index - 1] if index else None
+        replay.tick = replay.latest.tick if replay.latest else -1
+        return replay
 
     def seek(self, index):
         if type(index) is not int or not 0 <= index <= len(self.records):

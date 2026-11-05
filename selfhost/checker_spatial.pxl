@@ -34,6 +34,8 @@ export fn Method(receiver: string, name: string) -> string {
         if name == "neighbors" { return "spaceNeighbors" }
         if name == "ahead" { return "spaceAhead" }
         if name == "size" { return "spaceSize" }
+        if name == "entities" { return "spaceEntities" }
+        if name == "links" { return "spaceLinks" }
         if name == "connect" { return "spaceConnect" }
         if name == "disconnect" { return "spaceDisconnect" }
         if name == "getLink" { return "spaceGetLink" }
@@ -82,7 +84,7 @@ export fn Signatures(receiver: int, resolved: inout model.ResolvedTypes) -> [mod
     let typ = resolved.types[receiver]
     var signatures: [model.MethodSignature] = []
     if typ.kind != "spatial" { return signatures }
-    for name in ["entityId", "linkId", "require", "requireLink", "setPayload", "removeCascade", "insert", "get", "move", "remove", "neighbors", "ahead", "size", "connect", "disconnect", "getLink", "setLinkPayload", "outgoing", "incoming", "linkCount", "distance", "dot", "point", "vector", "then"] {
+    for name in ["entityId", "linkId", "require", "requireLink", "setPayload", "removeCascade", "insert", "get", "move", "remove", "neighbors", "ahead", "size", "entities", "links", "connect", "disconnect", "getLink", "setLinkPayload", "outgoing", "incoming", "linkCount", "distance", "dot", "point", "vector", "then"] {
         let operation = Method(typ.name, name)
         if operation != "" { signatures.append(Describe(receiver, name, operation, &resolved)) }
     }
@@ -118,6 +120,8 @@ fn Describe(receiver: int, name: string, operation: string, resolved: inout mode
         let linkId = types.Spatial("LinkId",typ.arguments,&resolved)
         let text = state.Scalar("string",&resolved)
         if operation == "spaceSize" || operation == "spaceLinkCount" { result = integer }
+        if operation == "spaceEntities" { result = types.Structural("array",[entity],&resolved) }
+        if operation == "spaceLinks" { result = types.Structural("array",[link],&resolved) }
         if operation == "spaceEntityId" || operation == "spaceLinkId" {
             parameters.append(model.TypeField{name:"key",typeId:text})
             result = entityId

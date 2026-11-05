@@ -46,6 +46,7 @@ An identity answers **which object**; an entity or link value contains **data fr
 | `space.connect(key, sourceId, targetId, payload)` | Insert a directed link between existing entities |
 | `space.disconnect(id) / space.setLinkPayload(id, payload)` | Remove a link or replace its payload |
 | `space.outgoing(id) / space.incoming(id)` | Return links in insertion order |
+| `space.entities() / space.links()` | Return captured entity / link arrays in insertion order |
 | `space.size() / space.linkCount()` | Count entities / links |
 | `entity.id / entity.position / entity.payload` | Read the identity and data captured by this entity value |
 | `link.id / link.source / link.target / link.payload` | Read link identity, endpoint identities and captured payload |
@@ -63,6 +64,17 @@ Foreign-space identities, duplicate insertions and updates to missing objects ar
 Properties are readonly, including through containers and `inout`. Copy a payload into a local variable to edit it, then publish it with `setPayload` or `setLinkPayload`. Earlier snapshots remain unchanged.
 
 `ahead` normalizes the direction and tests whether projected displacement is strictly greater than `tolerance`, measured in the frame's length unit.
+
+
+Use `entities()` and `links()` with the ordinary collection functions: `Filter`
+selects values, `Map` extracts fields and `Fold` computes totals. No query-specific
+syntax is required. The returned arrays contain captured, readonly entity/link
+values; later space updates do not change them. To read a newer state, query the
+new snapshot with the captured value's identity. Enumeration follows insertion
+order, including deletion followed by reinsertion.
+
+See [order queries](../../../../examples/order-fulfillment/README.en.md#query-a-snapshot)
+for paid-order filtering and reservation totals.
 
 ## Explicit compact regions
 

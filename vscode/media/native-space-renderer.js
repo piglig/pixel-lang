@@ -57,7 +57,7 @@
         c1 = { x: from.x + (control.x - from.x) * 2 / 3, y: from.y + (control.y - from.y) * 2 / 3 };
         c2 = { x: to.x + (control.x - to.x) * 2 / 3, y: to.y + (control.y - to.y) * 2 / 3 };
       }
-      paths.push({ id: link.id, from, to, c1, c2 });
+      paths.push({ id: link.id, from, to, c1, c2, ...(link.change ? {change:link.change} : {}) });
     });
     return paths;
   }
@@ -69,6 +69,7 @@
       const ctx = this.canvas.getContext('2d'); ctx.setTransform(ratio, 0, 0, ratio, 0, 0); ctx.clearRect(0, 0, width, height);
       const geometry = project(view, width, height, this.yaw, this.pitch, this.zoom, framing); this.items = geometry.items;
       const style = getComputedStyle(this.canvas), accent = style.getPropertyValue('--accent').trim() || '#79b8ff';
+      const changedColor=kind=>kind==='added' ? style.getPropertyValue('--vscode-gitDecoration-addedResourceForeground').trim()||'#81c995' : style.getPropertyValue('--vscode-gitDecoration-modifiedResourceForeground').trim()||'#d7ba7d';
       ctx.font = '12px system-ui'; ctx.fillStyle = style.color;
       ctx.fillText(`${framing !== view && !cameraOnly ? 'Position preview · ' : ''}${view.identity} · ${view.unit} · Time ${view.time} · Snapshot ${view.version ?? 'entity'}`, 20, 72, width - 40);
       const first = view.entities.length ? view.start + 1 : 0, last = view.start + view.entities.length;
@@ -76,6 +77,7 @@
       if (!view.entities.length) ctx.fillText('No entities in this view', width / 2 - 65, height / 2);
       ctx.strokeStyle = accent; ctx.lineWidth = 1.5;
       for (const edge of linkPaths(geometry.items, view.links)) {
+        ctx.strokeStyle=edge.change ? changedColor(edge.change) : accent;ctx.lineWidth=edge.change ? 2.5 : 1.5;
         ctx.beginPath(); ctx.moveTo(edge.from.x, edge.from.y);
         ctx.bezierCurveTo(edge.c1.x, edge.c1.y, edge.c2.x, edge.c2.y, edge.to.x, edge.to.y); ctx.stroke();
         const angle = Math.atan2(edge.to.y - edge.c2.y, edge.to.x - edge.c2.x);
@@ -85,9 +87,9 @@
       }
       for (const item of geometry.items) {
         ctx.beginPath(); ctx.arc(item.x, item.y, item.id === selected ? 8 : 5, 0, Math.PI * 2);
-        ctx.fillStyle = accent; ctx.fill();
+        ctx.fillStyle = item.change ? changedColor(item.change) : accent; ctx.fill();
         if (item.id === selected) { ctx.strokeStyle = style.color; ctx.lineWidth = 2; ctx.stroke(); }
-        ctx.fillStyle = style.color; ctx.fillText('#' + item.id, item.x + 12, item.y - 10);
+        ctx.fillStyle = style.color; ctx.fillText('#' + item.id + (item.change ? ' · '+item.change : ''), item.x + 12, item.y - 10);
       }
       for (const axis of geometry.axes) {
         const x = 56, y = height - 96;

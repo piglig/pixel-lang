@@ -7,11 +7,22 @@
     for (const [key,item] of Object.entries(value)) spacesIn(item,path+'.'+key,result);
     return result;
   }
-  function sceneView(space, time) {
+  function changeSummary(changes, cursor) {
+    if (!cursor) return 'Step an event to compare snapshots.';
+    if (changes?.unavailable) return 'Snapshot comparison is unavailable.';
+    if (!changes?.spaces.length) return changes?.truncated ? 'State inspection limit reached.' : 'No spaces in flow state.';
+    const incomplete=changes.truncated || changes.spaces.some(space=>space.truncated);
+    const summary=changes.total ? `${changes.total} spatial object${changes.total===1?'':'s'} changed` : 'No spatial data changed';
+    return summary + (incomplete ? ' · Preview limited; use Debug event for full state.' : '.');
+  }
+  function sceneView(space, time, changes) {
+    const matches=(changes?.spaces||[]).filter(item=>item.identity===space.identity && item.afterVersion===space.version);
+    // Output paths and state paths differ. Ambiguous retained snapshots cannot be marked reliably.
+    const markers=new Map(matches.length===1 ? matches[0].rows.map(row=>[row.category+':'+row.key,row.kind]) : []);
     return {identity:space.identity, version:space.version, unit:'native coordinates',time,
       start:0,total:space.entities.length,
-      entities:space.entities.map(e=>({id:e.identity,position:[e.position.x,e.position.y,e.position.z],payload:e.payload})),
-      links:space.links.map(e=>({id:e.identity,source:e.source.identity??e.source,target:e.target.identity??e.target}))};
+      entities:space.entities.map(e=>({id:e.identity,position:[e.position.x,e.position.y,e.position.z],payload:e.payload,change:markers.get('entity:'+e.identity)})),
+      links:space.links.map(e=>({id:e.identity,source:e.source.identity??e.source,target:e.target.identity??e.target,change:markers.get('link:'+e.identity)}))};
   }
   class Playback {
     constructor(send, schedule=(fn, delay)=>setTimeout(fn, delay), clear=id=>clearTimeout(id)) {
@@ -41,7 +52,7 @@
     }
     fail() { this.pause(); this.busy=false; }
   }
-  const exported={spacesIn,sceneView,Playback};
+  const exported={spacesIn,sceneView,changeSummary,Playback};
   if (typeof module !== 'undefined') { module.exports=exported; return; }
   const vscode=acquireVsCodeApi(), $=id=>document.getElementById(id);
   const player=new Playback(message=>{ $('error').hidden=true; vscode.postMessage(message); updateControls(); });
@@ -52,7 +63,7 @@
     const busy=player.busy, live=state && state.cursor===state.length;
     for (const id of ['step','latest','time','save','load']) $(id).disabled=busy || !state;
     for (const id of ['save','load']) $(id).hidden=Boolean(state?.journal);
-    $('debug').disabled=busy || !state || !state.cursor || player.running;
+    for (const id of ['debug','changes-debug','previous']) $(id).disabled=busy || !state || !state.cursor || player.running;
     $('step').disabled=busy || !player.canAdvance();
     $('play').disabled=busy || !player.canAdvance() || player.running;
     $('pause').disabled=!player.running;
@@ -65,7 +76,7 @@
     $('spaces').disabled=!selected;
     $('fit').disabled=!selected;
     if (!selected) { const canvas=$('scene');canvas.getContext('2d').clearRect(0,0,canvas.width,canvas.height);return; }
-    const view=sceneView(selected.value,state.tick??'0');
+    const view=sceneView(selected.value,state.tick??'0',state.changes);
     if (sceneIdentity!==view.identity) {
       sceneIdentity=view.identity;
       // Hold camera framing fixed across frames so movement remains visible.
@@ -79,12 +90,37 @@
     $('payload').value=JSON.stringify(defaults,null,2);
     $('schema').textContent=JSON.stringify({fields,records:state.records,enums:state.enums},null,2);
   }
+  function renderChanges(value) {
+    $('changes-summary').textContent=changeSummary(value.changes,value.cursor);
+    const sections=(value.changes?.spaces||[]).filter(space=>space.total).map(space=>{
+      const section=document.createElement('section'), heading=document.createElement('h3');
+      heading.textContent=`${space.identity} · ${space.total} changed`;
+      section.append(heading);
+      for (const row of space.rows) {
+        const detail=document.createElement('details'), summary=document.createElement('summary');
+        const badge=document.createElement('span'), key=document.createElement('code'), fields=document.createElement('span');
+        badge.className='change-kind '+row.kind;badge.textContent=row.kind+' '+row.category;
+        key.textContent=row.key;fields.className='change-fields';fields.textContent=row.fields.join(', ');
+        summary.append(badge,key,fields);
+        const values=document.createElement('div');values.className='change-values';
+        for (const [label,content] of [['Before',row.beforeText],['After',row.afterText]]) {
+          const column=document.createElement('section'), title=document.createElement('h4'), body=document.createElement('pre');
+          title.textContent=label;body.textContent=content;column.append(title,body);values.append(column);
+        }
+        detail.append(summary,values);section.append(detail);
+      }
+      return section;
+    });
+    $('changes').replaceChildren(...sections);
+  }
   function render(value) {
     state=value;player.receive(value);
     $('time').max=String(value.length);$('time').value=String(value.cursor);
     $('position').textContent=`${value.cursor} / ${value.length}`;
     $('status').textContent=`${value.timed===false?'Events':`Tick ${value.tick??'—'} · ${value.elapsed_ns} ns`} · ${value.cursor===value.length?'Live':'History'}${value.journal?' · Saved to journal':''}`;
     $('output').textContent=value.viewText;$('state').textContent=value.stateText;
+    $('event-input').textContent=value.eventText||'No event selected.';$('result').textContent=value.resultText||'—';
+    renderChanges(value);
     const oldVariant=$('variant').value, variants=Object.keys(value.variants);
     if (JSON.stringify(Array.from($('variant').options,o=>o.value))!==JSON.stringify(variants)) {
       $('variant').replaceChildren(...variants.map(name=>new Option(name,name)));
@@ -104,6 +140,8 @@
   }
   $('play').onclick=()=>{player.play();updateControls();};$('pause').onclick=pause;
   $('step').onclick=()=>{pause();player.step();};
+  $('previous').onclick=()=>{pause();player.command({type:'seek',index:state.cursor-1});};
+  $('changes-debug').onclick=()=>{pause();player.command({type:'debug'});};
   $('latest').onclick=()=>{pause();player.command({type:'seek',index:state.length});};
   $('time').onchange=()=>{pause();player.command({type:'seek',index:Number($('time').value)});};
   $('speed').onchange=()=>{player.speed=Number($('speed').value);};

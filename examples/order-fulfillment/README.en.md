@@ -37,6 +37,23 @@ pixel application examples/order-fulfillment/application.pxl --replay /tmp/fulfi
 
 In VS Code, run **PixelLang: Open Native Application** and select `application.pxl` to use the event application. Each `Submit` carries an array of commands. A business rejection is recorded and consumes its event, while retaining the space snapshot. An execution fault instead rolls back the step and leaves the event pending.
 
+## Query a snapshot
+
+```sh
+pixel run examples/order-fulfillment/queries_demo.pxl
+```
+
+[queries.pxl](queries.pxl) composes `entities()` and `links()` with `Filter`, `Map`
+and `Fold`. The demo prints the paid order's key and two reserved items. After
+shipping, a query of the new snapshot returns no paid orders and zero reservations;
+the captured entity from the old query still says `paid`.
+
+In Studio, expand **Event changes** after payment: the order and depot change,
+and a reservation link appears. A rejected batch shows **No spatial data changed**
+and its reason in **Result**. Shipping changes the order's position and status,
+and removes the reservation. Use **Before event** to inspect the old scene or
+**Debug event** to step through the transition's source.
+
 ## Read the implementation
 
 - [model.pxl](model.pxl): orders, commands, outcomes and typed reservation data.

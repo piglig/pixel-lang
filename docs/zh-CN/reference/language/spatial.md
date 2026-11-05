@@ -37,6 +37,7 @@ PixelLang 区分以下四种坐标与关系，不在它们之间隐式转换：
 | `space.connect(key, sourceId, targetId, payload)` | 在已有实体之间插入有向连接 |
 | `space.disconnect(id) / space.setLinkPayload(id, payload)` | 删除连接或更新连接负载 |
 | `space.outgoing(id) / space.incoming(id)` | 按插入顺序返回出边／入边 |
+| `space.entities() / space.links()` | 按插入顺序返回当前快照的实体／连接数组 |
 | `space.size() / space.linkCount()` | 返回实体／连接数量 |
 | `entity.id / entity.position / entity.payload` | 读取实体标识以及该实体值保存的位置和负载 |
 | `link.id / link.source / link.target / link.payload` | 读取连接标识、端点标识和保存的负载 |
@@ -54,6 +55,14 @@ PixelLang 区分以下四种坐标与关系，不在它们之间隐式转换：
 属性不可写，包括容器修改和 `inout`。可将负载复制到本地变量修改，再通过 `setPayload` 或 `setLinkPayload` 发布；旧快照不变。
 
 `ahead` 将方向归一化，判断位移投影是否严格大于 `tolerance`；容差采用坐标系的长度单位。
+
+
+`entities()` 和 `links()` 可以直接配合普通集合函数：用 `Filter` 筛选、
+`Map` 提取字段、`Fold` 统计，无需学习专用查询语法。
+返回的数组包含当前快照捕获的只读实体／连接值，后续空间更新不会改变它们。
+读取新状态时，使用捕获值的身份查询新快照。枚举保持插入顺序；删除后重新插入的对象排在末尾。
+
+已付款订单筛选和预留库存汇总示例见[查询快照](../../../../examples/order-fulfillment/README.md#查询快照)。
 
 ## 显式紧凑区域
 

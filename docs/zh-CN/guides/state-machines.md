@@ -181,3 +181,12 @@ effect fn main() {
 - [安装工具链](installation.md)
 
 多订单协作、库存预留与批量快照发布的完整示例见[订单履约与批量更新](../../../examples/order-fulfillment/README.md).
+
+### 查看一次事件改变了什么
+
+Studio 的 **Event changes** 比较所选事件及其前一状态。
+展开实体或连接可查看前后数据；**Before event** 打开前一快照，
+继续提交输入前请返回 **Latest**。**Debug event** 在源码调试器中打开所选迁移。
+变化的实体会在场景中标记；已删除对象仍可在差异列表和前一快照中查看。
+**Result** 面板直接显示业务拒绝原因，无需展开完整空间输出。
+被拒绝的操作可以同时显示原因和 **No spatial data changed**。

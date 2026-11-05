@@ -5,6 +5,7 @@ from pathlib import Path
 from .model import PixelError
 from .native_events import NativeApplicationRuntime, NativeEventRuntime
 from .vm import VM
+from .application_changes import spaces_in_state, describe_changes, compact_spaces, text
 
 
 class ApplicationSession:
@@ -16,6 +17,7 @@ class ApplicationSession:
         self.compiler = compiler
         self.compiled = None
         self.inspection = None
+        self.change_cache = None
         if files is not None:
             self.files, self.entry = files, entry
             self.code = compiler.request('compile', files=files, entry=entry, cancelled=cancelled)['result']['bytecode']
@@ -42,6 +44,19 @@ class ApplicationSession:
         if close is not None:
             close()
 
+    def changes(self, runtime, cursor):
+        if cursor == 0:
+            return dict(spaces=[], total=0, truncated=False)
+        cache_key = (id(self.runtime), cursor)
+        if self.change_cache is not None and self.change_cache[0] == cache_key:
+            return self.change_cache[1]
+        if not hasattr(self.runtime, 'inspect'):
+            return dict(spaces=[], total=0, truncated=False, unavailable=True)
+        before = self.runtime.inspect(cursor - 1)
+        result = describe_changes(spaces_in_state(before.vm), spaces_in_state(runtime.vm), runtime)
+        self.change_cache = (cache_key, result)
+        return result
+
     def status(self, include_source=False):
         runtime = self.inspection or self.runtime
         binding = runtime.vm.event_binding
@@ -63,6 +78,9 @@ class ApplicationSession:
             interval_ns=str(binding.interval_ns),
             timed=binding.clock_type is not None,
             view=runtime.view(), viewText=json.dumps(runtime.view(), ensure_ascii=False, indent=2),
+            eventText=text(runtime.input_value(selected.event)) if selected else '',
+            resultText=text(compact_spaces(runtime.view())) if selected else '',
+            changes=self.changes(runtime, cursor),
             stateText=json.dumps(cells, ensure_ascii=False, indent=2),
             eventType=binding.event_type, variants=self.code['enums'][binding.event_type],
             records=self.code['records'], enums=self.code['enums'],
@@ -87,7 +105,10 @@ class ApplicationSession:
                 and not isinstance(runtime, NativeEventRuntime)):
             raise PixelError('event', 'History was not enabled for this application session')
         if method == 'application-step':
+            before = spaces_in_state(runtime.vm)
             runtime.step()
+            cursor = runtime.cursor if isinstance(runtime, NativeEventRuntime) else runtime.completed
+            self.change_cache = ((id(runtime), cursor), describe_changes(before, spaces_in_state(runtime.vm), runtime))
         elif method == 'application-input':
             # Preserve signed 64-bit fields across JavaScript's number boundary.
             value = json.loads(args['valueText'])

@@ -5,7 +5,7 @@ async function run() {
   assert((await vscode.commands.getCommands(true)).includes('pixellang.openApplication'));
   assert((await vscode.commands.getCommands(true)).includes('pixellang.openApplicationJournal'));
   const root=vscode.workspace.workspaceFolders[0].uri.fsPath;
-  for(const name of ['native-orders']) fs.cpSync(path.resolve(__dirname,'../../examples',name),path.join(root,name),{recursive:true});
+  for(const name of ['native-orders','order-fulfillment']) fs.cpSync(path.resolve(__dirname,'../../examples',name),path.join(root,name),{recursive:true});
   const order=await api.application.open(vscode.Uri.file(path.join(root,'native-orders/main.pxl'))),session=order.session;
   await api.service().call('application-step',{session});
   await api.service().call('application-input',{session,valueText:'{"variant":"Pay","fields":{"cents":1299}}'});
@@ -45,6 +45,20 @@ async function run() {
   await api.service().call('application-close',{session:journal.session});
   const resumed=await api.application.open(vscode.Uri.file(path.join(root,'native-orders/main.pxl')),{journalPath});
   assert.equal(resumed.cursor,132);assert.equal(resumed.view.order.status.variant,'Paid');
+  const fulfillment=await api.application.open(vscode.Uri.file(path.join(root,'order-fulfillment/application.pxl')));
+  const events=JSON.parse(fs.readFileSync(path.join(root,'order-fulfillment/events.json'),'utf8'));
+  for (const [index,event] of events.entries()) {
+    await api.service().call('application-input',{session:fulfillment.session,valueText:JSON.stringify(event.input)});
+    const result=await api.service().call('application-step',{session:fulfillment.session});
+    assert.equal(result.changes.total,[2,0,3,0,2,0][index]);
+    if(index===1){assert(result.resultText.includes('InsufficientStock'));assert.equal(result.changes.total,0);}
+  }
+  const selected=await api.service().call('application-seek',{session:fulfillment.session,index:3});
+  assert.equal(selected.changes.total,3);
+  assert(selected.changes.spaces[0].rows.some(row=>row.key==='reservation/A-100' && row.kind==='added'));
+  const fulfillmentRecording=await api.service().call('application-recording',{session:fulfillment.session});
+  assert.equal((await api.service().call('application-restore',{session:fulfillment.session,...fulfillmentRecording})).changes.total,3);
+  await api.service().call('application-close',{session:fulfillment.session});
   if (Number(process.env.PIXELLANG_TEST_HOLD_MS || 0)) {
     await api.application.open(vscode.Uri.file(path.join(root,'native-orders/main.pxl')));
     await new Promise(resolve=>setTimeout(resolve,Number(process.env.PIXELLANG_TEST_HOLD_MS)));

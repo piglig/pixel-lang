@@ -227,8 +227,6 @@ class JournaledApplicationRuntime(NativeApplicationRuntime):
             raise ValueError('Checkpoint interval must be positive')
         self.checkpoint_interval = checkpoint_interval
         self.inspection_cache = None
-        self.startup_budget = vm.max_steps
-        self.startup_output_budget = vm.output_budget
         super().__init__(vm, **budgets)
         from .bootstrap import normalized
         header = dict(format='pixellang-event-journal', version=3, configuration=deepcopy(self.configuration),
@@ -318,16 +316,6 @@ class JournaledApplicationRuntime(NativeApplicationRuntime):
         # to streaming replay; cache pressure never stops application execution.
         self.inspection_cache = snapshot if footprint(snapshot) <= self.max_inspection_bytes else None
         return inspected
-
-    def fresh_runtime(self, bytecode=None):
-        from .vm import VM
-        vm = self.vm
-        return NativeApplicationRuntime(VM(vm.code_image if bytecode is None else bytecode, max_steps=self.startup_budget,
-            max_heap_items=vm.max_heap_items, max_heap_objects=vm.max_heap_objects,
-            max_depth=vm.max_depth, max_output_chars=self.startup_output_budget,
-            input_text=vm.input_text, arguments=list(vm.arguments)),
-            configuration=self.configuration, step_budget=self.step_budget, max_result_bytes=self.max_result_bytes,
-            max_pending=self.max_pending, max_pending_bytes=self.max_pending_bytes)
 
     def before_event(self, index, bytecode=None):
         """Replay through input acceptance, stopping before a selected event."""

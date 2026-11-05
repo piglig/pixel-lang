@@ -194,3 +194,14 @@ list has the wrong number of arguments, repair its count in the text editor firs
 - [Install the toolchain](installation.md)
 
 For a multi-order workflow with stock reservations and atomic snapshot publication, see [Atomic order fulfillment](../../../examples/order-fulfillment/README.en.md).
+
+### See what one event changed
+
+In Studio, **Event changes** compares the selected event with its preceding state.
+Expand an entity or link to inspect its before/after data. **Before event** opens the
+previous snapshot; return to **Latest** before sending more inputs. **Debug event**
+opens the selected transition in the source debugger. Changed entities are marked
+in the scene, while deleted objects remain visible in the change list and preceding
+snapshot. The **Result** panel keeps business rejection reasons visible without
+expanding the complete spatial output. A rejected operation can therefore show its
+reason alongside **No spatial data changed**.

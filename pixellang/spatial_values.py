@@ -51,6 +51,7 @@ OPERATIONS = {
     'spaceRequire': 2, 'spaceRequireLink': 2, 'spaceSetPayload': 3, 'spaceRemoveCascade': 2,
     'linkSourceId': 1, 'linkTargetId': 1,
     'spaceNeighbors': 3, 'spaceAhead': 5, 'spaceSize': 1,
+    'spaceEntities': 1, 'spaceLinks': 1,
     'entityPosition': 1, 'entityPayload': 1, 'entityId': 1,
     'distance3': 2, 'dot3': 2,
     'transformPoint': 2, 'transformVector': 2, 'transformThen': 2,

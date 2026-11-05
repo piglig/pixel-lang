@@ -37,6 +37,21 @@ pixel application examples/order-fulfillment/application.pxl --replay /tmp/fulfi
 
 在 VS Code 中执行 **PixelLang: Open Native Application**，选择 `application.pxl` 使用事件应用。每个 `Submit` 携带一组命令。业务拒绝会消费并记录事件，同时保留原空间快照；执行故障则回滚本步，并保留待处理事件。
 
+## 查询快照
+
+```sh
+pixel run examples/order-fulfillment/queries_demo.pxl
+```
+
+[queries.pxl](queries.pxl) 将 `entities()`、`links()` 与 `Filter`、`Map`、`Fold` 组合。
+示例先输出已付款订单的键和两件预留商品。发货后查询新快照，已付款订单为空、
+预留数量为零；之前捕获的实体仍然是 `paid`。
+
+在 Studio 中付款后展开 **Event changes**：订单和仓库载荷变化，并新增一条预留连接。
+批次被拒绝时显示 **No spatial data changed**，原因可直接在 **Result** 查看。
+发货改变订单位置和状态，并移除预留连接。
+使用 **Before event** 查看旧场景，或通过 **Debug event** 单步检查迁移源码。
+
 ## 阅读实现
 
 - [model.pxl](model.pxl)：订单、命令、结果和带类型的预留数据。
